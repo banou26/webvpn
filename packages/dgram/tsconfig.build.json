@@ -6,7 +6,9 @@
     "declaration": true,
     "emitDeclarationOnly": true,
     "rootDir": "src",
-    "outDir": "build"
+    "outDir": "build",
+    // the client's build, as the package's users get it, and not its source, which is outside rootDir
+    "paths": {}
   },
   "include": ["src"]
 }

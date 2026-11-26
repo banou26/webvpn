@@ -1,7 +1,9 @@
 import type { Provider } from '../src'
 
+import { WebVpnError } from '@webvpn/client'
 import { describe, expect, it } from 'vite-plus/test'
 
+import { WebVpnError as SourceWebVpnError } from '../../client/src'
 import dgram, { createDgram, createSocket, setProvider, Socket } from '../src'
 import { fakeProvider, wait } from './fake'
 
@@ -53,6 +55,13 @@ describe('the module-level exports', () => {
     await Promise.all(sockets.map((socket) => new Promise((resolve) => socket.once('listening', resolve))))
     expect(made).toBe(2)
     expect(relay.binds).toEqual(['0.0.0.0:0', ':::0'])
+  })
+})
+
+describe('@webvpn/client', () => {
+  // so the tests run on a fresh checkout, before any build of the client, and never on a stale one
+  it('is the client\'s source', () => {
+    expect(WebVpnError).toBe(SourceWebVpnError)
   })
 })
 

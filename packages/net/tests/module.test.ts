@@ -1,8 +1,9 @@
 import type { Provider } from '../src'
 
-import { ErrorCode } from '@webvpn/client'
+import { ErrorCode, WebVpnError } from '@webvpn/client'
 import { describe, expect, it } from 'vite-plus/test'
 
+import { WebVpnError as SourceWebVpnError } from '../../client/src'
 import net, { connect, createNet, createServer, isIP, isIPv4, isIPv6, Server, setProvider, Socket } from '../src'
 import { fakeProvider, fakeSocket, relayError, wait } from './fake'
 
@@ -133,6 +134,13 @@ describe('a failed connect', () => {
       const socket = createNet(relay.provider).connect(443, 'example.com')
       expect(await new Promise((resolve) => socket.once('error', resolve))).toBe(failure)
     }
+  })
+})
+
+describe('@webvpn/client', () => {
+  // so the tests run on a fresh checkout, before any build of the client, and never on a stale one
+  it('is the client\'s source', () => {
+    expect(WebVpnError).toBe(SourceWebVpnError)
   })
 })
 

@@ -26,6 +26,8 @@ export default defineConfig({
     rollupOptions: { external: [/^@webvpn\/client/, 'buffer', 'events'] },
   },
   test: {
+    // the client's source rather than its build, which a fresh checkout does not have
+    alias: { '@webvpn/client': join(import.meta.dirname, '../client/src/index.ts') },
     projects: [
       {
         extends: true,
