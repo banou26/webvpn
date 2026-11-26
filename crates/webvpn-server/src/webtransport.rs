@@ -61,7 +61,8 @@ pub fn server_config(bind: ServerConfigBuilder<WantsIdentity>, identity: Identit
 /// [`close`](Transport::close) ends the QUIC connection with the session's code and reason as its application close,
 /// and resolves once the connection is closed; the endpoint sends the close from there. A native client reads the code
 /// and the reason. A browser reads neither: its `WebTransport.closed` rejects, which Chromium 156 reports as
-/// "Connection lost.".
+/// "Connection lost.". So a browser takes the code and the reason from the `Bye` the relay says first on the control
+/// stream, and [`SendHalf::deliver`] waits for the client to end the session once it read it.
 ///
 /// With the cargo feature `close-capsule`, the code and reason go in a CLOSE_WEBTRANSPORT_SESSION capsule instead,
 /// which `WebTransport.closed` resolves with, and the connection closes once the capsule is acknowledged. The feature
@@ -86,8 +87,8 @@ fn http3_code(code: u32) -> VarInt {
     VarInt::try_from_u64(0x52e4_a40f_a8db + code + code / 0x1e).expect("below 2^62")
 }
 
-/// Both reset the stream with their `webvpn_proto::reset` code mapped into HTTP/3's error space, so a browser reports
-/// the code itself as the stream's error code: 1 for [`fail`](SendHalf::fail), 0 for [`abandon`](SendHalf::abandon).
+/// Both resets carry their `webvpn_proto::reset` code mapped into HTTP/3's error space, so a browser reports the code
+/// itself as the stream's error code: 1 for [`fail`](SendHalf::fail), 0 for [`abandon`](SendHalf::abandon).
 impl SendHalf for SendStream {
     fn fail(&mut self) {
         let _ = self.reset(http3_code(reset::PEER_RESET));
@@ -95,6 +96,14 @@ impl SendHalf for SendStream {
 
     fn abandon(&mut self) {
         let _ = self.reset(http3_code(reset::CLOSED));
+    }
+
+    /// Resolves once the client stopped the stream or the connection ended, as a client does once it read the `Bye`.
+    /// QUIC's acknowledgement of the bytes is not enough: a refused session's close came 0.1 ms behind it on loopback,
+    /// and Chromium 156 then dropped the acknowledged stream before the page saw it, in 1 of 5 sessions (measured
+    /// 2026-11-27).
+    async fn deliver(&mut self) {
+        let _ = self.stopped().await;
     }
 }
 
@@ -219,7 +228,7 @@ mod tests {
 
     use super::*;
     use crate::policy::Basic;
-    use crate::relay::Config;
+    use crate::relay::{Config, STOPPING};
 
     /// How long a client waits on the relay before the test fails.
     const WAIT: Duration = Duration::from_secs(5);
@@ -411,13 +420,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_refused_admission_closes_the_session_with_session_limit_and_the_policy_s_message() {
+    async fn a_refused_admission_says_bye_then_closes_with_session_limit_and_the_policy_s_message() {
         let mut policy = Basic::default();
         policy.max_sessions = 0;
         let message = policy.admit(Ipv4Addr::LOCALHOST.into()).unwrap_err().message.into_owned();
         let served = served(policy, Config::default());
-        assert_eq!(closed(served.connect().await).await, (u64::from(close::SESSION_LIMIT), message));
+        let connection = served.connect().await.unwrap();
+        let (send, recv) = within(connection.accept_bi()).await.unwrap();
+        let mut control = Control { send, recv, buf: Vec::new() };
+        assert_eq!(control.next().await, RelayPacket::Bye { code: close::SESSION_LIMIT, reason: message.clone() });
+        assert_eq!(closed(Ok(connection)).await, (u64::from(close::SESSION_LIMIT), message));
         assert_eq!(served.relay.sessions(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_stop_past_its_grace_says_bye_with_restarting_before_it_closes() {
+        let served = served(Basic::default(), Config::default());
+        let (connection, mut control) = served.open().await;
+        let relay = served.relay.clone();
+        let stopping = tokio::spawn(async move { relay.stop(Duration::from_millis(100)).await });
+        assert_eq!(control.next().await, RelayPacket::Draining);
+        assert_eq!(control.next().await, RelayPacket::Bye { code: close::RESTARTING, reason: STOPPING.into() });
+        assert_eq!(closed(Ok(connection)).await, (u64::from(close::RESTARTING), STOPPING.to_owned()));
+        within(stopping).await.unwrap();
+        within(served.serving).await.unwrap();
     }
 
     #[tokio::test]

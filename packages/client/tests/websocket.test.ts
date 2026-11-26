@@ -162,7 +162,7 @@ describe('the WebSocket mux', () => {
     expect(socket.frames(MuxKind.DATAGRAM).map(({ payload }) => payload)).toEqual([Uint8Array.of(5)])
   })
 
-  it('reads the session close code from the WebSocket close code', async () => {
+  it('reads the session close code from the WebSocket close code, and LOST from any other', async () => {
     const closes: [number, Promise<unknown>][] = []
     for (const code of [4004, 1006]) {
       const { socket, carrier } = await mux()
@@ -170,7 +170,7 @@ describe('the WebSocket mux', () => {
       closes.push([code, carrier.closed])
     }
     expect(await closes[0]![1]).toEqual({ code: CloseCode.RESTARTING, reason: 'stopping' })
-    expect(await closes[1]![1]).toEqual({ code: CloseCode.PROTOCOL_ERROR, reason: 'stopping' })
+    expect(await closes[1]![1]).toEqual({ code: CloseCode.LOST, reason: 'stopping' })
   })
 
   it('closes the WebSocket with 4000 and the session close code', async () => {

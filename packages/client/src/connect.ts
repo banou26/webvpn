@@ -30,7 +30,9 @@ export type ConnectOptions = {
 /**
  * Opens a session with a relay. Rejects with `TypeError` when the options name no URL for the carrier to take, and
  * otherwise with the last carrier's failure: a `WebVpnError` (the relay closed or refused the session, a version
- * that does not suit, a refused credential, a setup that took too long) or the browser's own error.
+ * that does not suit, a refused credential, a setup that took too long) or the browser's own error. A `WebVpnError`
+ * the relay's close caused carries its `closeCode`, so a full relay (`SESSION_LIMIT`) or one that is stopping
+ * (`RESTARTING`) reads apart from one that could not be reached.
  */
 export const connect = async (options: ConnectOptions): Promise<Session> => {
   const { url, webSocketUrl, transport = 'auto', agent } = options

@@ -179,7 +179,7 @@ export const webSocketCarrier = async (socket: WebSocket): Promise<Carrier> => {
   }
   socket.onclose = (event: CloseEvent) => {
     // first, so whoever reads the streams' end below finds the code already there
-    const code = event.code >= 4000 && event.code < 5000 ? event.code - 4000 : CloseCode.PROTOCOL_ERROR
+    const code = event.code >= 4000 && event.code < 5000 ? event.code - 4000 : CloseCode.LOST
     settle({ code, reason: event.reason })
     clearTimeout(timer)
     const failure = new Error('the WebSocket closed')

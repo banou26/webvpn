@@ -20,10 +20,10 @@ use tokio_rustls::TlsConnector;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use webvpn_proto::mux::{self, kind, stream_type, CONTROL_STREAM};
-use webvpn_proto::{features, ClientPacket, ErrorCode, Hello, RelayPacket};
+use webvpn_proto::{close, features, ClientPacket, ErrorCode, Hello, RelayPacket};
 use webvpnd::{CertificateFiles, Daemon, Settings};
 use wtransport::tls::{Sha256Digest, Sha256DigestFmt};
-use wtransport::{Endpoint, Identity, RecvStream, SendStream};
+use wtransport::{Connection, Endpoint, Identity, RecvStream, SendStream};
 
 /// How long a test waits on the relay, or on the program, before it fails.
 const WAIT: Duration = Duration::from_secs(5);
@@ -313,11 +313,8 @@ impl Control {
     }
 }
 
-#[tokio::test]
-async fn a_webtransport_session_runs_end_to_end_on_the_self_signed_certificate_by_its_hash() {
-    let mut settings = settings();
-    settings.watch_own_ipv6 = true;
-    let daemon = within(Daemon::start(settings)).await.unwrap();
+/// A WebTransport session with `daemon`, which serves its self-signed certificate, and its control stream.
+async fn webtransport(daemon: &Daemon) -> (Connection, Control) {
     let ports = daemon.ports();
     let (head, body) = http(ports.http, "/cert-hash").await;
     assert!(head.lines().any(|line| line == "access-control-allow-origin: *"), "{head}");
@@ -330,7 +327,15 @@ async fn a_webtransport_session_runs_end_to_end_on_the_self_signed_certificate_b
     let endpoint = Endpoint::client(config).unwrap();
     let connection = within(endpoint.connect(format!("https://127.0.0.1:{}/", ports.webtransport))).await.unwrap();
     let (send, recv) = within(connection.accept_bi()).await.unwrap();
-    let mut control = Control { send, recv, buf: Vec::new() };
+    (connection, Control { send, recv, buf: Vec::new() })
+}
+
+#[tokio::test]
+async fn a_webtransport_session_runs_end_to_end_on_the_self_signed_certificate_by_its_hash() {
+    let mut settings = settings();
+    settings.watch_own_ipv6 = true;
+    let daemon = within(Daemon::start(settings)).await.unwrap();
+    let (connection, mut control) = webtransport(&daemon).await;
     assert!(matches!(control.next().await, RelayPacket::Hello(_)));
     control.send(ClientPacket::Hello(Hello::new(0, "client under test"))).await;
 
@@ -347,6 +352,20 @@ async fn a_webtransport_session_runs_end_to_end_on_the_self_signed_certificate_b
     let mut echoed = [0; 4];
     within(recv.read_exact(&mut echoed)).await.unwrap();
     assert_eq!(&echoed, b"ping");
+}
+
+// A browser shows a page no code of the QUIC close, so the code reaches it in the `Bye`.
+#[tokio::test]
+async fn a_full_relay_says_bye_with_session_limit_over_webtransport_before_it_closes() {
+    let mut settings = settings();
+    settings.policy.max_sessions = 0;
+    let daemon = within(Daemon::start(settings)).await.unwrap();
+    let (connection, mut control) = webtransport(&daemon).await;
+    let reason = "the relay holds as many sessions as it allows";
+    assert_eq!(control.next().await, RelayPacket::Bye { code: close::SESSION_LIMIT, reason: reason.into() });
+    let closed = within(connection.closed()).await;
+    let wtransport::error::ConnectionError::ApplicationClosed(ended) = closed else { panic!("closed with {closed}") };
+    assert_eq!(ended.code().into_inner(), u64::from(close::SESSION_LIMIT));
 }
 
 #[tokio::test]
@@ -394,7 +413,9 @@ async fn the_stop_drains_turns_ready_off_and_returns_within_the_grace() {
     let (head, body) = http(ports.http, "/ready").await;
     assert_eq!((status(&head), body.as_str()), ("http/1.1 503 service unavailable", "Draining"));
 
-    // the session stays open, so the grace runs out and closes it with RESTARTING
+    // the session stays open, so the grace runs out and closes it with RESTARTING, said first in a `Bye`
+    let bye = RelayPacket::Bye { code: close::RESTARTING, reason: "the relay is stopping".into() };
+    assert!(matches!(client.next().await, Received::Control(packet) if packet == bye));
     assert_eq!(client.closed().await, 4004);
     within(running).await.unwrap();
     let took = began.elapsed();

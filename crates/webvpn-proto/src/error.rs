@@ -69,6 +69,8 @@ pub mod close {
     pub const SESSION_LIMIT: u32 = 3;
     /// The relay is stopping; another session may be opened at once.
     pub const RESTARTING: u32 = 4;
+    /// Never sent: what a client reports when its carrier ended with neither a `Bye` nor a close code.
+    pub const LOST: u32 = 5;
 
     /// The WebSocket close code that carries a session close code.
     pub const fn websocket(code: u32) -> u16 {

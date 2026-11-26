@@ -28,9 +28,10 @@ export const webTransportCarrier = async (transport: WebTransport, readyTimeoutM
 
   let settle!: (info: CloseInfo) => void
   const closed = new Promise<CloseInfo>((resolve) => { settle = resolve })
+  // A relay's QUIC close rejects with no code (Chromium 156: "Connection lost."), which is why the relay says `bye`
   transport.closed.then(
-    (info) => settle({ code: info.closeCode ?? CloseCode.PROTOCOL_ERROR, reason: info.reason ?? '' }),
-    (error: unknown) => settle({ code: CloseCode.PROTOCOL_ERROR, reason: error instanceof Error ? error.message : '' }),
+    (info) => settle({ code: info.closeCode ?? CloseCode.LOST, reason: info.reason ?? '' }),
+    (error: unknown) => settle({ code: CloseCode.LOST, reason: error instanceof Error ? error.message : '' }),
   )
   const close = (code: number, reason: string) => {
     settle({ code, reason })

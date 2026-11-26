@@ -28,6 +28,14 @@ pub trait SendHalf: AsyncWrite + Unpin + Send + 'static {
     /// returns: a session stopped opening streams after about 100 such closes. A reset ends the client's receive
     /// side without a read.
     fn abandon(&mut self) {}
+
+    /// Resolves once the client read what was written on the stream, as far as the carrier can tell. The relay calls it
+    /// on the control stream after its `Bye`, within a bound, and closes the session once it resolved, so a carrier
+    /// whose close can overtake what was written waits here. The default resolves at once, which suits a carrier whose
+    /// close goes out behind what the control stream wrote.
+    fn deliver(&mut self) -> impl Future<Output = ()> + Send {
+        std::future::ready(())
+    }
 }
 
 /// One client's session on a carrier.
@@ -48,7 +56,8 @@ pub trait Transport: Send + Sync + 'static {
 
     /// Closes the session with a `webvpn_proto::close` code and a reason for a person, and resolves once the carrier
     /// holds the close and will send it before its connection ends. A carrier that drops its connection sooner loses
-    /// both, and a client then reads the end of its streams as its peers closing.
+    /// both, and a client then reads the end of its streams as its peers closing. The relay says `Bye` with the same
+    /// code and reason on the control stream first, whenever it has one, and waits for [`SendHalf::deliver`].
     ///
     /// Each carrier documents how far its close reaches. The WebTransport carrier's default close is a QUIC
     /// connection close, whose code and reason a native client reads and a browser does not; its `close-capsule`

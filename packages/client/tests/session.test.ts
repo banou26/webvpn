@@ -115,6 +115,51 @@ describe('the hello exchange', () => {
   })
 })
 
+describe('the session\'s end', () => {
+  const BYE = { code: CloseCode.RESTARTING, reason: 'the relay is stopping' }
+
+  it('takes the code and reason of the relay\'s bye over the carrier\'s close that follows it', async () => {
+    const { relay, session } = await opened(Feature.DNS)
+    const waiting = outcome(session.lookup(QUERY))
+    await relay.next()
+    relay.send({ type: 'bye', ...BYE })
+    await settle()
+    // as a browser reports the relay's QUIC close over WebTransport
+    relay.close(CloseCode.LOST, 'Connection lost.')
+    expect(await session.closed).toEqual(BYE)
+    expect(await waiting).toMatchObject({ code: ErrorCode.OTHER, closeCode: CloseCode.RESTARTING })
+    expect(await relay.carrier.closed).toEqual(BYE)
+  })
+
+  it('takes the carrier\'s code and reason when no bye came', async () => {
+    const { relay, session } = await opened()
+    relay.close(CloseCode.SESSION_LIMIT, 'full')
+    expect(await session.closed).toEqual({ code: CloseCode.SESSION_LIMIT, reason: 'full' })
+    expect(await outcome(session.udpBind(ANY))).toMatchObject({ closeCode: CloseCode.SESSION_LIMIT })
+  })
+
+  it('reads as LOST when the carrier ended with no code and no bye came', async () => {
+    const { relay, session } = await opened(Feature.DNS)
+    const waiting = outcome(session.lookup(QUERY))
+    await relay.next()
+    relay.close(CloseCode.LOST, '')
+    expect(await session.closed).toEqual({ code: CloseCode.LOST, reason: '' })
+    expect(await waiting).toMatchObject({ code: ErrorCode.OTHER, closeCode: CloseCode.LOST })
+  })
+
+  it('rejects a session the relay refuses in its setup with the bye\'s close code, and sends no hello', async () => {
+    const relay = fakeRelay()
+    relay.start()
+    const session = outcome(openSession(relay.carrier))
+    relay.send({ type: 'bye', code: CloseCode.SESSION_LIMIT, reason: 'the relay holds as many sessions as it allows' })
+    const error = await session
+    expect(error).toBeInstanceOf(WebVpnError)
+    expect(error).toMatchObject({ code: ErrorCode.CAPACITY, closeCode: CloseCode.SESSION_LIMIT })
+    expect((await relay.carrier.closed).code).toBe(CloseCode.SESSION_LIMIT)
+    expect(relay.packets).toEqual([])
+  })
+})
+
 describe('requests', () => {
   it('match their replies by id, in whatever order the replies come', async () => {
     const { relay, session } = await opened(Feature.DNS)

@@ -69,8 +69,9 @@ type Upgraded = WebSocketStream<Prefixed<Either<TlsStream<TcpStream>, TcpStream>
 /// - is dropped when its request head is longer than 8 KiB;
 /// - is answered by [`Options::http`] when it is not a WebSocket upgrade.
 ///
-/// The relay asks its policy about the session after the upgrade, so a refusal reaches the client as a WebSocket close
-/// with code 4003 (4000 plus `SESSION_LIMIT`) and the policy's message. Nothing it logs names a client.
+/// The relay asks its policy about the session after the upgrade, so a refusal reaches the client as a `Bye` with
+/// `SESSION_LIMIT` and the policy's message, then a WebSocket close with code 4003 (4000 plus `SESSION_LIMIT`) and the
+/// same message. Nothing it logs names a client.
 pub async fn serve<P: Policy>(relay: Relay<P>, listener: TcpListener, options: Options) {
     loop {
         // The accept goes first: a connection the listener holds when the stop comes is taken and dropped below,
@@ -242,9 +243,10 @@ mod tests {
     use tokio_tungstenite::tungstenite::protocol::CloseFrame;
     use tokio_tungstenite::tungstenite::Message;
     use webvpn_proto::mux::{self, kind, stream_type, CONTROL_STREAM};
-    use webvpn_proto::{ClientPacket, Hello, RelayPacket};
+    use webvpn_proto::{close, ClientPacket, Hello, RelayPacket};
 
     use super::*;
+    use crate::relay::STOPPING;
     use crate::testing::WAIT;
     use crate::{Basic, Config, Counter};
 
@@ -309,7 +311,7 @@ mod tests {
     }
 
     /// What the relay sent: a control packet, or a frame of another stream.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq)]
     enum Received {
         Control(RelayPacket),
         Frame(u8, u32, Vec<u8>),
@@ -458,15 +460,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_refused_admission_reaches_the_client_as_a_close_with_the_session_code_and_the_policy_s_message() {
+    async fn a_refused_admission_reaches_the_client_as_a_bye_then_a_close_with_the_session_code_and_message() {
         let mut policy = Basic::default();
         policy.max_sessions = 0;
         let refusal = policy.admit(IpAddr::from([127, 0, 0, 1])).unwrap_err();
         let relay = Relay::new(policy, Config::default());
         let (address, _serving) = start(&relay, Options::default()).await;
-        let close = connect(address).await.closed().await;
+        let mut client = connect(address).await;
+        let bye = RelayPacket::Bye { code: close::SESSION_LIMIT, reason: refusal.message.to_string() };
+        assert_eq!(client.next().await, Received::Control(bye));
+        let close = client.closed().await;
         assert_eq!(u16::from(close.code), 4003);
         assert_eq!(close.reason.as_str(), refusal.message);
+    }
+
+    #[tokio::test]
+    async fn a_stop_past_its_grace_says_bye_with_restarting_before_the_close() {
+        let relay = relay(Config::default());
+        let (address, _serving) = start(&relay, Options::default()).await;
+        let mut client = connect(address).await;
+        client.hello().await;
+        let stopping = tokio::spawn({
+            let relay = relay.clone();
+            async move { relay.stop(Duration::from_millis(100)).await }
+        });
+        assert_eq!(client.next().await, Received::Control(RelayPacket::Draining));
+        let bye = RelayPacket::Bye { code: close::RESTARTING, reason: STOPPING.into() };
+        assert_eq!(client.next().await, Received::Control(bye));
+        let close = client.closed().await;
+        assert_eq!((u16::from(close.code), close.reason.as_str()), (4004, STOPPING));
+        within(stopping).await.unwrap();
     }
 
     #[tokio::test]

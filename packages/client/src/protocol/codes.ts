@@ -50,6 +50,8 @@ export const CloseCode = {
   SESSION_LIMIT: 3,
   /** The relay is stopping; another session may be opened at once. */
   RESTARTING: 4,
+  /** Never sent: the carrier ended with neither a `bye` nor a close code, as a lost connection does. */
+  LOST: 5,
 } as const
 
 /** The WebSocket close code that carries a session close code. */

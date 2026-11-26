@@ -7,7 +7,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Semaphore;
 use tokio::time::{timeout, Instant};
-use tokio_util::sync::CancellationToken;
 use webvpn_proto::{ClientPacket, ErrorCode, Hello, RelayPacket, TcpOption, UdpPacket};
 
 use crate::policy::{Auth, Basic, Policy};
@@ -37,7 +36,6 @@ async fn open() -> Harness {
         Auth::None,
         UdpCarrier::Bidi,
         setup,
-        CancellationToken::new(),
     ));
     let mut control = client.control().await;
     assert!(matches!(control.next().await, Some(RelayPacket::Hello(_))));

@@ -6,6 +6,7 @@ use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -13,7 +14,6 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{self, AbortHandle, JoinError, JoinSet};
 use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, warn};
 use webvpn_proto::{close, ClientPacket, DecodeError, ErrorCode, Hello, RelayPacket, UdpPacket};
@@ -21,8 +21,8 @@ use webvpn_proto::{close, ClientPacket, DecodeError, ErrorCode, Hello, RelayPack
 use crate::dns::MAX_LOOKUPS_PER_SESSION;
 use crate::metrics::{Counter, Metrics};
 use crate::policy::{Auth, Direction, Refusal, Session, SocketKind};
-use crate::relay::Shared;
-use crate::transport::Transport;
+use crate::relay::{Shared, STOPPING};
+use crate::transport::{SendHalf, Transport};
 
 /// How a session's UDP sockets reach the client, which a carrier picks once for each session it hands to
 /// [`Relay::serve`](crate::Relay::serve). It must match what the carrier's clients read.
@@ -100,12 +100,19 @@ const UDP_UPLOAD_QUEUED_BYTES_BUDGET: usize = 32 * 1024 * 1024;
 
 const NOT_TAKEN: &str = "the relay does not take this request";
 
-/// Runs one session until the client or the relay ends it.
+/// How long the relay gives its `Bye` to reach the client before it closes the session anyway. It covers the wait for
+/// room in the reply queue, the write and [`SendHalf::deliver`] together, so a client that reads nothing, or that
+/// does not end the session once it read the `Bye`, holds a closing session no longer. A client that reads ends the
+/// session within a round trip of the `Bye`, so a second covers round trips up to about 900 ms, and it stays under
+/// the 2 seconds a stop waits for its sessions to end (`relay::CLOSE_WAIT`).
+pub(crate) const BYE_WAIT: Duration = Duration::from_secs(1);
+
+/// Runs one session until the client or the relay ends it, then says `Bye` and closes it.
 ///
-/// `policy` is the session the relay's policy admitted. `draining` is cancelled when the relay begins to stop, which
-/// sends the client `Draining` once and changes nothing else. A session whose setup fails or that breaks the protocol
-/// is closed here with the matching `webvpn_proto::close` code and ends in `Err`; any other end leaves the close to
-/// the caller.
+/// `policy` is the session the relay's policy admitted. The relay's `stopping` sends the client `Draining` once and
+/// changes nothing else; its `closing` ends the session with `RESTARTING`. Every end closes the session here, with
+/// the matching `webvpn_proto::close` code, after a `Bye` with the same code whenever the control stream can carry
+/// it. A session whose setup fails or that breaks the protocol ends in `Err`.
 pub(crate) async fn run<T: Transport, S: Session>(
     transport: Arc<T>,
     policy: S,
@@ -113,19 +120,21 @@ pub(crate) async fn run<T: Transport, S: Session>(
     auth: Auth,
     udp_carrier: UdpCarrier,
     setup: Setup,
-    draining: CancellationToken,
 ) -> Result<()> {
     let hello = Hello::new(relay.features(auth), relay.config.agent.clone());
-    let greeted = tokio::time::timeout_at(setup.deadline, greet(&*transport, hello)).await;
-    let (send, mut reader) = match greeted.unwrap_or(Err(Closing::SETUP_FAILED)) {
-        Ok(streams) => streams,
-        Err(closing) => {
-            let error = closing.close(&*transport).await;
-            drop(setup.permit);
-            return Err(error);
+    let mut control = None;
+    let greeted = tokio::select! {
+        greeted = tokio::time::timeout_at(setup.deadline, greet(&*transport, &mut control, hello)) => {
+            greeted.unwrap_or(Err(Closing::SETUP_FAILED))
         }
+        closing = cut(&relay) => Err(closing),
     };
     drop(setup.permit);
+    let mut reader = match greeted {
+        Ok(reader) => reader,
+        Err(closing) => return closing.close(&*transport, control.as_mut()).await,
+    };
+    let send = control.expect("a greeting holds the control stream");
     relay.metrics.count(Counter::Sessions);
     if udp_carrier == UdpCarrier::UniStreamRequired {
         relay.metrics.count(Counter::WsSessions);
@@ -136,6 +145,10 @@ pub(crate) async fn run<T: Transport, S: Session>(
         let mut send = send;
         while let Some(packet) = reply_queue.recv().await {
             write(&mut send, &packet).await?;
+            if matches!(packet, RelayPacket::Bye { .. }) {
+                send.deliver().await;
+                break;
+            }
         }
         Ok::<_, std::io::Error>(())
     }));
@@ -147,7 +160,7 @@ pub(crate) async fn run<T: Transport, S: Session>(
         handle: Arc::new(SessionHandle {
             transport,
             policy: Arc::new(policy),
-            relay,
+            relay: relay.clone(),
             replies,
             udp_carrier,
             upload_budget: Arc::new(Semaphore::new(UDP_UPLOAD_QUEUED_BYTES_BUDGET)),
@@ -162,48 +175,61 @@ pub(crate) async fn run<T: Transport, S: Session>(
     let accepting = AbortOnDropHandle::new(tokio::spawn(accept_upload_streams(state.handle.clone(), upload_sender)));
 
     let mut writer_done = false;
-    let mut drain_announced = false;
-    let ended = loop {
-        tokio::select! {
-            written = &mut writer, if !writer_done => {
-                writer_done = true;
+    let serving = async {
+        let mut drain_announced = false;
+        loop {
+            tokio::select! {
                 // A failed write is a client that went away, which ends the session as any other end does.
-                break match written {
-                    Err(error) if error.is_panic() => Err(anyhow!("the control writer panicked")),
-                    _ => Ok(()),
-                };
-            }
-            _ = draining.cancelled(), if !drain_announced => {
-                drain_announced = true;
-                state.handle.reply(RelayPacket::Draining).await;
-            }
-            Some(registered) = register_queue.recv() => {
-                if let Err(refusal) = state.sockets.register(&*state.handle.policy, registered) {
-                    debug!(code = refusal.code.0, "the session did not take in a listener's connection");
+                _ = &mut writer, if !writer_done => {
+                    writer_done = true;
+                    break Closing::ENDED;
                 }
-            }
-            Some(_) = state.lookups.join_next(), if !state.lookups.is_empty() => {}
-            Some(joined) = state.sockets.tasks.join_next_with_id(), if !state.sockets.tasks.is_empty() => {
-                state.sockets.reap(joined);
-            }
-            read = reader.next() => {
-                let closing = match read {
-                    Ok(Some(packet)) => match state.dispatch(packet).await {
-                        Ok(()) => continue,
-                        Err(closing) => closing,
-                    },
-                    Ok(None) => break Ok(()),
-                    Err(_) => Closing::UNREADABLE,
-                };
-                break Err(closing.close(&*state.handle.transport).await);
-            }
-            Some(queued) = upload_queue.recv() => state.sockets.deliver(queued, &state.handle.relay.metrics),
-            datagram = state.handle.transport.recv_datagram() => {
-                let Ok(datagram) = datagram else { break Ok(()) };
-                state.datagram(&datagram);
+                _ = relay.stopping.cancelled(), if !drain_announced => {
+                    drain_announced = true;
+                    state.handle.reply(RelayPacket::Draining).await;
+                }
+                Some(registered) = register_queue.recv() => {
+                    if let Err(refusal) = state.sockets.register(&*state.handle.policy, registered) {
+                        debug!(code = refusal.code.0, "the session did not take in a listener's connection");
+                    }
+                }
+                Some(_) = state.lookups.join_next(), if !state.lookups.is_empty() => {}
+                Some(joined) = state.sockets.tasks.join_next_with_id(), if !state.sockets.tasks.is_empty() => {
+                    state.sockets.reap(joined);
+                }
+                read = reader.next() => match read {
+                    Ok(Some(packet)) => {
+                        if let Err(closing) = state.dispatch(packet).await {
+                            break closing;
+                        }
+                    }
+                    Ok(None) => break Closing::ENDED,
+                    Err(_) => break Closing::UNREADABLE,
+                },
+                Some(queued) = upload_queue.recv() => state.sockets.deliver(queued, &state.handle.relay.metrics),
+                datagram = state.handle.transport.recv_datagram() => {
+                    let Ok(datagram) = datagram else { break Closing::ENDED };
+                    state.datagram(&datagram);
+                }
             }
         }
     };
+    // Raced rather than one more branch of the loop, which may be waiting on a client that reads nothing.
+    let closing = tokio::select! {
+        closing = serving => closing,
+        closing = cut(&relay) => closing,
+    };
+
+    // The `Bye` goes behind the replies already queued, and the close goes out while the session's streams are still
+    // open, so the client reads why before any of its sockets ends.
+    if !writer_done {
+        let said = async {
+            state.handle.reply(closing.bye()).await;
+            let _ = (&mut writer).await;
+        };
+        writer_done = tokio::time::timeout(BYE_WAIT, said).await.is_ok();
+    }
+    state.handle.transport.close(closing.0, closing.1).await;
 
     register_queue.close();
     while register_queue.try_recv().is_ok() {}
@@ -217,35 +243,85 @@ pub(crate) async fn run<T: Transport, S: Session>(
     accepting.abort();
     let _ = accepting.await;
     state.lookups.shutdown().await;
-    // Never wait on the queue closing or on a final write the client's flow control holds back.
     if !writer_done {
         writer.abort();
         let _ = writer.await;
     }
-    ended
+    closing.result()
+}
+
+/// Closes a session that never ran, before any hello: says `Bye` with `code` and `reason` on a control stream opened
+/// for it alone, within [`BYE_WAIT`], then closes the carrier with the same code and reason.
+pub(crate) async fn refuse(transport: &impl Transport, code: u32, reason: &str) {
+    let said = async {
+        let (mut send, _recv) = transport.control_stream().await?;
+        say_bye(&mut send, code, reason).await?;
+        anyhow::Ok(())
+    };
+    let _ = tokio::time::timeout(BYE_WAIT, said).await;
+    transport.close(code, reason).await;
+}
+
+/// Writes `Bye` as the last frame of the control stream and waits for the carrier to deliver it. Unbounded: the
+/// caller bounds it with [`BYE_WAIT`].
+async fn say_bye(send: &mut impl SendHalf, code: u32, reason: &str) -> std::io::Result<()> {
+    write(send, &RelayPacket::Bye { code, reason: reason.to_owned() }).await?;
+    send.deliver().await;
+    Ok(())
+}
+
+/// Resolves once the relay's stop gave up waiting for this session, which then closes with `RESTARTING`. Counted as
+/// [`Counter::DrainCapCloses`].
+async fn cut(relay: &Shared) -> Closing {
+    relay.closing.cancelled().await;
+    relay.metrics.count(Counter::DrainCapCloses);
+    Closing::RESTARTING
 }
 
 /// A reason for the relay to close the session: the `close` code the client reads, and a reason for a person.
 struct Closing(u32, &'static str);
 
 impl Closing {
+    const ENDED: Self = Self(close::NORMAL, "the session ended");
+    const RESTARTING: Self = Self(close::RESTARTING, STOPPING);
     const SETUP_FAILED: Self = Self(close::PROTOCOL_ERROR, "the session setup failed");
     const UNREADABLE: Self = Self(close::PROTOCOL_ERROR, "a control frame could not be read");
 
-    /// Closes the session, and gives the error `run` ends with.
-    async fn close(self, transport: &impl Transport) -> anyhow::Error {
+    fn bye(&self) -> RelayPacket {
+        RelayPacket::Bye { code: self.0, reason: self.1.to_owned() }
+    }
+
+    /// What `run` ends with: `Err` for a session that failed its setup or broke the protocol.
+    fn result(&self) -> Result<()> {
+        match self.0 {
+            close::NORMAL | close::RESTARTING => Ok(()),
+            _ => Err(anyhow!(self.1)),
+        }
+    }
+
+    /// Says `Bye` on `send`, the control stream when the session has it, within [`BYE_WAIT`], then closes the session.
+    async fn close<T: Transport>(self, transport: &T, send: Option<&mut T::Send>) -> Result<()> {
+        if let Some(send) = send {
+            let _ = tokio::time::timeout(BYE_WAIT, say_bye(send, self.0, self.1)).await;
+        }
         transport.close(self.0, self.1).await;
-        anyhow!(self.1)
+        self.result()
     }
 }
 
-/// Writes the relay's hello on the control stream and reads the client's, which must be its first frame.
-async fn greet<T: Transport>(transport: &T, hello: Hello) -> Result<(T::Send, ControlReader<T::Recv>), Closing> {
-    let (mut send, recv) = transport.control_stream().await.map_err(|_| Closing::SETUP_FAILED)?;
-    write(&mut send, &RelayPacket::Hello(hello)).await.map_err(|_| Closing::SETUP_FAILED)?;
+/// Opens the control stream into `control`, writes the relay's hello and reads the client's, which must be its first
+/// frame.
+async fn greet<T: Transport>(
+    transport: &T,
+    control: &mut Option<T::Send>,
+    hello: Hello,
+) -> Result<ControlReader<T::Recv>, Closing> {
+    let (send, recv) = transport.control_stream().await.map_err(|_| Closing::SETUP_FAILED)?;
+    let send = control.insert(send);
+    write(send, &RelayPacket::Hello(hello)).await.map_err(|_| Closing::SETUP_FAILED)?;
     let mut reader = ControlReader { recv, buf: Vec::new() };
     match reader.next().await {
-        Ok(Some(ClientPacket::Hello(hello))) if hello.compatible() => Ok((send, reader)),
+        Ok(Some(ClientPacket::Hello(hello))) if hello.compatible() => Ok(reader),
         Ok(Some(ClientPacket::Hello(_))) => {
             Err(Closing(close::VERSION_MISMATCH, "the client's version does not suit the relay"))
         }
@@ -747,7 +823,6 @@ mod tests {
         relay: Arc<Shared>,
         policy: Probe,
         setup_slots: Arc<Semaphore>,
-        draining: CancellationToken,
         ended: JoinHandle<Result<()>>,
     }
 
@@ -762,13 +837,10 @@ mod tests {
                 permit: setup_slots.clone().try_acquire_owned().unwrap(),
                 deadline: Instant::now() + SETUP_TIME,
             };
-            let draining = CancellationToken::new();
-            let session =
-                run(Arc::new(transport), policy.clone(), relay.clone(), auth, udp_carrier, setup, draining.clone());
-            let ended = tokio::spawn(session);
+            let ended = tokio::spawn(run(Arc::new(transport), policy.clone(), relay.clone(), auth, udp_carrier, setup));
             let mut control = client.control().await;
             let Some(RelayPacket::Hello(hello)) = control.next().await else { panic!("the relay's first frame") };
-            Self { client, control, hello, relay, policy, setup_slots, draining, ended }
+            Self { client, control, hello, relay, policy, setup_slots, ended }
         }
 
         /// A session past its hello exchange.
@@ -857,7 +929,7 @@ mod tests {
         let mut harness = Harness::start(Config::default(), Auth::None, UdpCarrier::Bidi).await;
         let hello = Hello { minor: VERSION.1 + 1, ..Hello::new(0, "client under test") };
         harness.control.send(ClientPacket::Hello(hello)).await;
-        assert_eq!(harness.client.closed().await.0, close::VERSION_MISMATCH);
+        assert_eq!(testing::bye(&mut harness.control, &mut harness.client).await.0, close::VERSION_MISMATCH);
         assert!(ended(harness.ended).await.is_err());
         assert_eq!(harness.setup_slots.available_permits(), 1);
         assert_eq!(harness.relay.metrics.get(Counter::Sessions), 0);
@@ -867,7 +939,7 @@ mod tests {
     async fn a_first_frame_that_is_not_a_hello_closes_with_protocol_error() {
         let mut harness = Harness::start(Config::default(), Auth::None, UdpCarrier::Bidi).await;
         harness.control.send(ClientPacket::AuthClear { id: 1 }).await;
-        assert_eq!(harness.client.closed().await.0, close::PROTOCOL_ERROR);
+        assert_eq!(testing::bye(&mut harness.control, &mut harness.client).await.0, close::PROTOCOL_ERROR);
         assert!(ended(harness.ended).await.is_err());
     }
 
@@ -881,7 +953,7 @@ mod tests {
         for frame in [second_hello, too_long] {
             let mut harness = Harness::open(Config::default(), Auth::None).await;
             harness.control.write(&frame).await;
-            assert_eq!(harness.client.closed().await.0, close::PROTOCOL_ERROR);
+            assert_eq!(testing::bye(&mut harness.control, &mut harness.client).await.0, close::PROTOCOL_ERROR);
             assert!(ended(harness.ended).await.is_err());
         }
     }
@@ -890,7 +962,7 @@ mod tests {
     async fn a_setup_past_its_deadline_closes_with_protocol_error() {
         let mut harness = Harness::start(Config::default(), Auth::None, UdpCarrier::Bidi).await;
         tokio::time::advance(SETUP_TIME + Duration::from_secs(1)).await;
-        assert_eq!(harness.client.closed().await.0, close::PROTOCOL_ERROR);
+        assert_eq!(testing::bye(&mut harness.control, &mut harness.client).await.0, close::PROTOCOL_ERROR);
         assert!(ended(harness.ended).await.is_err());
         assert_eq!(harness.setup_slots.available_permits(), 1);
     }
@@ -988,7 +1060,7 @@ mod tests {
     #[tokio::test]
     async fn the_relay_s_stop_sends_draining_once_and_the_session_carries_on() {
         let mut harness = Harness::open(Config::default(), Auth::None).await;
-        harness.draining.cancel();
+        harness.relay.stopping.cancel();
         assert_eq!(harness.control.next().await, Some(RelayPacket::Draining));
         for id in [7, 8] {
             assert_eq!(harness.ask(ClientPacket::AuthClear { id }).await, RelayPacket::Ok { id });

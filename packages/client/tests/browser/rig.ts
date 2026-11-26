@@ -18,7 +18,8 @@ declare module 'vitest' {
 
 declare module 'vitest/browser' {
   interface BrowserCommands {
-    startRelay: () => Promise<RelayInfo>,
+    /** Starts a relay of its own, with these environment variables on top of the rig's. */
+    startRelay: (env?: Record<string, string>) => Promise<RelayInfo>,
     stopRelay: (id: number) => Promise<void>,
     dialTcp: (port: number, text: string) => Promise<string>,
   }
@@ -92,7 +93,7 @@ const stopRelay = async (id: number) => {
 
 /** Commands a test in the page runs in Node. */
 export const commands = {
-  startRelay: () => startRelay(),
+  startRelay: (_: unknown, env?: Record<string, string>) => startRelay(env),
   stopRelay: (_: unknown, id: number) => stopRelay(id),
   /** Connects to a port on loopback, sends `text`, finishes, and answers with all it read before the peer's end. */
   dialTcp: (_: unknown, port: number, text: string) => limited(new Promise<string>((resolve, reject) => {

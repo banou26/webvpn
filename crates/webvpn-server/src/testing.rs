@@ -192,6 +192,14 @@ impl Client {
     }
 }
 
+/// The `Bye` the relay says as the last frame of `control`, which the session's close must match: its code and reason.
+pub(crate) async fn bye(control: &mut Control, client: &mut Client) -> (u32, String) {
+    let Some(RelayPacket::Bye { code, reason }) = control.next().await else { panic!("the relay said no Bye") };
+    assert_eq!(control.next().await, None, "the Bye is the last frame");
+    assert_eq!(client.closed().await, (code, reason.clone()), "the close matches the Bye");
+    (code, reason)
+}
+
 /// The client's side of the control stream, as frames.
 pub(crate) struct Control {
     to_relay: DuplexStream,
@@ -209,6 +217,11 @@ impl Control {
     /// Writes bytes as they are, for a frame the protocol does not lay out.
     pub(crate) async fn write(&mut self, bytes: &[u8]) {
         self.to_relay.write_all(bytes).await.expect("the relay reads the control stream");
+    }
+
+    /// Finishes the client's side of the stream, as a client that ends its session does.
+    pub(crate) async fn finish(&mut self) {
+        self.to_relay.shutdown().await.expect("the relay reads the control stream");
     }
 
     /// The next frame from the relay, or `None` once the relay finished the stream.

@@ -5,15 +5,19 @@ import { ErrorCode } from './protocol'
 /**
  * A request the relay refused, or one the client refused on its own: a feature the relay has off, no answer in
  * time, a session that is closed. `code` is an `ErrorCode`; a code this package does not name is kept as the relay
- * sent it and means `OTHER`. `message` is the relay's text for a person, or the client's.
+ * sent it and means `OTHER`. `message` is the relay's text for a person, or the client's. `closeCode` is the
+ * session's `CloseCode` when the session's end is why it failed, as for a `connect` that a full relay refused with
+ * `SESSION_LIMIT`, and absent otherwise.
  */
 export class WebVpnError extends Error {
   readonly code: number
+  readonly closeCode?: number
 
-  constructor(code: number, message: string) {
+  constructor(code: number, message: string, closeCode?: number) {
     super(message)
     this.name = 'WebVpnError'
     this.code = code
+    this.closeCode = closeCode
   }
 }
 
@@ -41,7 +45,7 @@ export type Carrier = {
   openUni?: () => Promise<WritableStream<Uint8Array>>,
   /**
    * Resolves once, with the first of the close this side asked for and the end the relay or the network caused. An
-   * end that carried no session close code reads as `PROTOCOL_ERROR`. Never rejects.
+   * end that carried no session close code reads as `LOST`. Never rejects.
    */
   closed: Promise<CloseInfo>,
   /** Closes the carrier with a `CloseCode`, and does nothing once it ended. */

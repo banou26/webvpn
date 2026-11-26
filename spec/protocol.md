@@ -11,7 +11,7 @@ big-endian. A boolean is one byte, 0 for false and any other value for true.
 A session is one WebTransport session, or one WebSocket connection carrying the [mux](#websocket-mux). The relay
 opens every stream. The first bidirectional stream it opens is the control stream.
 
-1. The relay writes `Hello`.
+1. The relay writes `Hello`. A relay that turns the session away writes `Bye` instead, as its only frame.
 2. The client reads it. If the version does not suit it, it closes the session with `VERSION_MISMATCH`.
 3. The client writes `Hello` as its first frame. A relay that the version does not suit closes with
    `VERSION_MISMATCH`.
@@ -95,6 +95,7 @@ Any request may be answered by `Error` instead.
 | `0x11` | `AcceptRefused` | `listener u32`, `code u16`, `remote Address` |
 | `0x12` | `Closed` | `socket u32`, `code u16` |
 | `0x20` | `Draining` | nothing |
+| `0x21` | `Bye` | `code u32`, a session close code, then `reason`, the rest, UTF-8, for a person |
 
 ### Error codes
 
@@ -223,9 +224,19 @@ closes it with `RESTARTING`. The client opens new sockets on a new session.
 | 2 | `VERSION_MISMATCH` | the peer's version does not suit |
 | 3 | `SESSION_LIMIT` | the relay holds as many sessions as it allows for this client or in all |
 | 4 | `RESTARTING` | the relay is stopping; another session may be opened at once |
+| 5 | `LOST` | never sent: what a client reports when its carrier ended with neither a `Bye` nor a code |
 
-WebTransport carries the code and a reason for a person in its session close. A WebSocket closes with close code
-4000 plus the code.
+Before the relay closes a session on its own, it sends `Bye` on the control stream, whenever the stream can carry
+it. `Bye` holds the code and the reason the relay closes with, and is the last frame on the control stream. A relay
+that closes a session before its `Hello` opens the control stream for the `Bye` alone.
+
+A client that read a `Bye` closes the session at once. Over WebTransport the relay waits for that close, at most a
+second, before its own: a browser may drop a stream it already received when the connection's close comes right
+behind it.
+
+A client that read a `Bye` takes the code and the reason from it. It takes the carrier's own only when no `Bye` came:
+WebTransport carries a code and a reason in its session close, and a WebSocket closes with close code 4000 plus the
+code. A browser shows a page no code of a QUIC connection close, which is why the `Bye` exists.
 
 ## WebSocket mux
 

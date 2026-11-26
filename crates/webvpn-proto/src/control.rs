@@ -103,6 +103,7 @@ mod relay {
     pub const ACCEPT_REFUSED: u8 = 0x11;
     pub const CLOSED: u8 = 0x12;
     pub const DRAINING: u8 = 0x20;
+    pub const BYE: u8 = 0x21;
 }
 
 /// A control frame a client sends. `id` names the request in its reply.
@@ -267,6 +268,10 @@ pub enum RelayPacket {
     Closed { socket: u32, code: ErrorCode },
     /// The relay is about to stop: this session keeps its sockets, and new ones belong on a new session.
     Draining,
+    /// The relay closes the session on its own right after this frame, the last on the control stream. `code` is the
+    /// session close code it closes with, from `webvpn_proto::close`, and `reason` is for a person. A client takes the
+    /// session's code from it, since a carrier may not show its own close to the client.
+    Bye { code: u32, reason: String },
     /// A type this crate does not name, which a client skips.
     Unknown { kind: u8 },
 }
@@ -321,6 +326,11 @@ impl RelayPacket {
                 relay::CLOSED
             }
             Self::Draining => relay::DRAINING,
+            Self::Bye { code, reason } => {
+                put_u32(out, *code);
+                out.extend_from_slice(reason.as_bytes());
+                relay::BYE
+            }
             Self::Unknown { kind } => *kind,
         };
         seal(out, at, kind);
@@ -359,6 +369,7 @@ impl RelayPacket {
             }
             relay::CLOSED => Self::Closed { socket: r.u32()?, code: ErrorCode(r.u16()?) },
             relay::DRAINING => Self::Draining,
+            relay::BYE => Self::Bye { code: r.u32()?, reason: String::from_utf8_lossy(r.rest()).into_owned() },
             kind => Self::Unknown { kind },
         };
         Ok(Some((packet, taken)))

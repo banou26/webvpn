@@ -151,7 +151,7 @@ describe.for(['webtransport', 'websocket'] as const)('over %s', (transport) => {
     await socket.close()
   })
 
-  it('resolves draining, then closed, when the relay stops', async () => {
+  it('resolves draining, then closed with RESTARTING, when the relay stops', async () => {
     const relay = await commands.startRelay()
     const session = await opened(relay)
     let drained = false
@@ -161,7 +161,18 @@ describe.for(['webtransport', 'websocket'] as const)('over %s', (transport) => {
     const closed = await limited(session.closed)
     expect(drained).toBe(true)
     await stopped
-    // a browser reads no close code from the relay's WebTransport close (see the report on the relay's close-capsule)
-    if (transport === 'websocket') expect(closed).toMatchObject({ code: CloseCode.RESTARTING })
+    expect(closed).toEqual({ code: CloseCode.RESTARTING, reason: 'the relay is stopping' })
+  })
+
+  it('reads a full relay\'s refusal as SESSION_LIMIT', async () => {
+    const full = await commands.startRelay({ WEBVPN_MAX_SESSIONS: '1' })
+    try {
+      await opened(full)
+      const refused = await outcome(limited(connect(options(full))))
+      expect(refused).toBeInstanceOf(WebVpnError)
+      expect(refused).toMatchObject({ code: ErrorCode.CAPACITY, closeCode: CloseCode.SESSION_LIMIT })
+    } finally {
+      await commands.stopRelay(full.id)
+    }
   })
 })

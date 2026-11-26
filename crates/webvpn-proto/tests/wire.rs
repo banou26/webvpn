@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use webvpn_proto::{
-    features, mux, ClientPacket, DecodeError, ErrorCode, Hello, RelayPacket, TcpOption, UdpOption, UdpPacket,
+    close, features, mux, ClientPacket, DecodeError, ErrorCode, Hello, RelayPacket, TcpOption, UdpOption, UdpPacket,
     MAX_CLIENT_FRAME_BYTES, MAX_UDP_PAYLOAD_BYTES, VERSION,
 };
 
@@ -97,6 +97,7 @@ fn relay_packet(name: &str) -> RelayPacket {
         },
         "closed" => RelayPacket::Closed { socket: 9, code: ErrorCode::CAPACITY },
         "draining" => RelayPacket::Draining,
+        "bye" => RelayPacket::Bye { code: close::RESTARTING, reason: "the relay is stopping".into() },
         other => panic!("no relay packet is named {other}"),
     }
 }
@@ -117,7 +118,7 @@ fn client_frames_match_the_vectors_both_ways() {
 #[test]
 fn relay_frames_match_the_vectors_both_ways() {
     let vectors = vectors("relay");
-    assert_eq!(vectors.len(), 10);
+    assert_eq!(vectors.len(), 11);
     for (name, bytes) in vectors {
         let packet = relay_packet(name);
         let mut written = Vec::new();

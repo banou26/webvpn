@@ -907,6 +907,13 @@ async fn writer_task<S>(
 
         match next {
             Next::Close(code, reason) => {
+                // What the control stream queued ahead of the close, its `Bye` last, goes out first. The lane holds at
+                // most PRIORITY_LANE_CAP frames, and `WsSessionTasks::shutdown` gives this writer a second in all.
+                while let Ok(frame) = priority_rx.try_recv() {
+                    if ws_sink.send(Message::Binary(Bytes::from(frame))).await.is_err() {
+                        break;
+                    }
+                }
                 let close = CloseFrame { code: CloseCode::from(code), reason: reason.into() };
                 let _ = ws_sink.send(Message::Close(Some(close))).await;
                 let _ = ws_sink.flush().await;

@@ -85,6 +85,12 @@ export type RelayPacket =
   | { type: 'closed', socket: number, code: number }
   /** The relay is about to stop: this session keeps its sockets, and new ones belong on a new session. */
   | { type: 'draining' }
+  /**
+   * The relay closes the session on its own right after this frame, the last on the control stream. `code` is the
+   * `CloseCode` it closes with and `reason` is for a person. The session's code comes from it, since a carrier may
+   * not show its own close to the page.
+   */
+  | { type: 'bye', code: number, reason: string }
   /** A type this package does not name, which a client skips. */
   | { type: 'unknown', kind: number }
 
@@ -117,6 +123,7 @@ const RELAY = {
   acceptRefused: 0x11,
   closed: 0x12,
   draining: 0x20,
+  bye: 0x21,
 } as const
 
 const putHello = (w: Writer, packet: Hello) => {
@@ -266,6 +273,9 @@ export const encodeRelayPacket = (packet: RelayPacket) => {
     case 'closed':
       w.u32(packet.socket).u16(packet.code)
       break
+    case 'bye':
+      w.u32(packet.code).put(encoder.encode(packet.reason))
+      break
   }
   return seal(w)
 }
@@ -284,6 +294,7 @@ const readRelayPacket = (kind: number, r: Reader): RelayPacket => {
       return { type: 'acceptRefused', listener: r.u32(), code: r.u16(), remote: r.address() }
     case RELAY.closed: return { type: 'closed', socket: r.u32(), code: r.u16() }
     case RELAY.draining: return { type: 'draining' }
+    case RELAY.bye: return { type: 'bye', code: r.u32(), reason: decoder.decode(r.rest()) }
     default: return { type: 'unknown', kind }
   }
 }

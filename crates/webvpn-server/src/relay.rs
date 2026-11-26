@@ -11,17 +11,17 @@ use webvpn_proto::{close, features};
 
 use crate::dns::Dns;
 use crate::hairpin::Hairpin;
-use crate::metrics::{Counter, Metrics};
+use crate::metrics::Metrics;
 use crate::policy::{Auth, Policy};
 use crate::session::{self, Setup, UdpCarrier};
 use crate::transport::Transport;
 
 /// The reason a session closed with `RESTARTING` carries, for a person.
-const STOPPING: &str = "the relay is stopping";
+pub(crate) const STOPPING: &str = "the relay is stopping";
 
-/// How long a stop waits for closes to go out. It is spent twice: once for the sessions to send their close and
-/// release, once more for QUIC to deliver its closes (that second wait is the WebTransport carrier's, on its
-/// endpoint).
+/// How long a stop waits for closes to go out. It is spent twice: once for the sessions to say `Bye`, close and
+/// release (a session takes at most `session::BYE_WAIT` of it), once more for QUIC to deliver its closes (that second
+/// wait is the WebTransport carrier's, on its endpoint).
 pub(crate) const CLOSE_WAIT: Duration = Duration::from_secs(2);
 
 /// How a relay is set up, apart from its policy.
@@ -68,6 +68,10 @@ pub(crate) struct Shared {
     pub hairpin: Hairpin,
     pub dns: Option<Dns>,
     pub metrics: Arc<Metrics>,
+    /// Cancelled when the stop begins: sessions are told `Draining`, and no new one is served.
+    pub stopping: CancellationToken,
+    /// Cancelled when the stop's grace has passed: every session still open says `Bye` and closes.
+    pub closing: CancellationToken,
 }
 
 impl Shared {
@@ -76,6 +80,8 @@ impl Shared {
             hairpin: Hairpin::new(config.own_addresses.clone()),
             dns: config.dns_upstream.clone().map(Dns::new),
             metrics: Arc::default(),
+            stopping: CancellationToken::new(),
+            closing: CancellationToken::new(),
             config,
         })
     }
@@ -109,10 +115,6 @@ struct Inner<P> {
     shared: Arc<Shared>,
     /// One permit for each session still setting up.
     setup_slots: Arc<Semaphore>,
-    /// Cancelled when the stop begins: sessions are told `Draining`, and no new one is served.
-    stopping: CancellationToken,
-    /// Cancelled when the stop's grace has passed: every session still open is closed.
-    closing: CancellationToken,
     /// Holds a token for each session from its admission until it ends.
     sessions: TaskTracker,
 }
@@ -132,8 +134,6 @@ impl<P: Policy> Relay<P> {
             policy,
             shared: Shared::new(config),
             setup_slots,
-            stopping: CancellationToken::new(),
-            closing: CancellationToken::new(),
             sessions: TaskTracker::new(),
         }))
     }
@@ -161,6 +161,7 @@ impl<P: Policy> Relay<P> {
     }
 
     /// The same counters as [`metrics`](Self::metrics), for a carrier's tasks that outlive a borrow of the relay.
+    #[cfg(feature = "websocket")]
     pub(crate) fn shared_metrics(&self) -> Arc<Metrics> {
         self.0.shared.metrics.clone()
     }
@@ -188,11 +189,14 @@ impl<P: Policy> Relay<P> {
     ///   version does not suit;
     /// - `NORMAL` when the client ends it.
     ///
+    /// Before each close the client is told the same code and reason in a `Bye` on the control stream, whenever the
+    /// stream can carry it. A session closed before its hello gets a control stream with the `Bye` alone.
+    ///
     /// Nothing is returned: what ended a session is logged at debug level, and names no client.
     pub async fn serve<T: Transport>(&self, transport: T, carrier: UdpCarrier) {
         let Some(setup) = self.pending() else {
-            transport.close(close::SESSION_LIMIT, "the relay holds as many sessions in setup as it allows").await;
-            return;
+            let reason = "the relay holds as many sessions in setup as it allows";
+            return session::refuse(&transport, close::SESSION_LIMIT, reason).await;
         };
         self.serve_setup(transport, carrier, setup).await;
     }
@@ -210,58 +214,40 @@ impl<P: Policy> Relay<P> {
     pub(crate) async fn serve_setup<T: Transport>(&self, transport: T, carrier: UdpCarrier, setup: Setup) {
         let relay = &*self.0;
         if self.stopping() {
-            transport.close(close::RESTARTING, STOPPING).await;
-            return;
+            return session::refuse(&transport, close::RESTARTING, STOPPING).await;
         }
         let policy = match relay.policy.admit(transport.remote_ip()) {
             Ok(policy) => policy,
-            Err(refusal) => {
-                transport.close(close::SESSION_LIMIT, &refusal.message).await;
-                return;
-            }
+            Err(refusal) => return session::refuse(&transport, close::SESSION_LIMIT, &refusal.message).await,
         };
         let _open = relay.sessions.token();
-        let transport = Arc::new(transport);
-        let (shared, auth, draining) = (relay.shared.clone(), relay.policy.auth(), relay.stopping.clone());
-        let run = session::run(transport.clone(), policy, shared, auth, carrier, setup, draining);
-        tokio::pin!(run);
-        tokio::select! {
-            ended = &mut run => match ended {
-                Ok(()) => transport.close(close::NORMAL, "the session ended").await,
-                Err(error) => debug!("a session ended: {error:#}"),
-            },
-            () = relay.closing.cancelled() => {
-                relay.shared.metrics.count(Counter::DrainCapCloses);
-                // The close goes out while the session's streams are still open, so the client reads the reason
-                // before any of its sockets ends.
-                transport.close(close::RESTARTING, STOPPING).await;
-                // The close ends the carrier's streams, so `run` then ends by itself and stops the tasks it started,
-                // which a dropped `run` would leave running.
-                let _ = tokio::time::timeout(CLOSE_WAIT, run).await;
-            }
+        let (shared, auth) = (relay.shared.clone(), relay.policy.auth());
+        if let Err(error) = session::run(Arc::new(transport), policy, shared, auth, carrier, setup).await {
+            debug!("a session ended: {error:#}");
         }
     }
 
     /// True once [`stop`](Self::stop) was called. A carrier's listener refuses whatever arrives from then on.
     pub fn stopping(&self) -> bool {
-        self.0.stopping.is_cancelled()
+        self.0.shared.stopping.is_cancelled()
     }
 
     /// Resolves once [`stop`](Self::stop) was called.
     pub async fn stopped(&self) {
-        self.0.stopping.cancelled().await
+        self.0.shared.stopping.cancelled().await
     }
 
     /// Stops the relay. Every open session is sent `Draining` once and keeps its sockets, and every session served
-    /// from now on is closed with `RESTARTING`. Then waits until every session ended or `grace` passed, closes the
-    /// ones still open with `RESTARTING` (counted as [`Counter::DrainCapCloses`]), and waits up to 2 seconds more for
-    /// those closes to go out. Returns at once when no session is open. Calling it again is harmless.
+    /// from now on is closed with `RESTARTING`. Then waits until every session ended or `grace` passed, has the ones
+    /// still open say `Bye` and close with `RESTARTING` (counted as [`Counter::DrainCapCloses`](crate::Counter)), and
+    /// waits up to 2 seconds more for those closes to go out. Returns at once when no session is open. Calling it again
+    /// is harmless.
     pub async fn stop(&self, grace: Duration) {
         let relay = &*self.0;
-        relay.stopping.cancel();
+        relay.shared.stopping.cancel();
         relay.sessions.close();
         let _ = tokio::time::timeout(grace, relay.sessions.wait()).await;
-        relay.closing.cancel();
+        relay.shared.closing.cancel();
         let _ = tokio::time::timeout(CLOSE_WAIT, relay.sessions.wait()).await;
     }
 }
@@ -278,7 +264,9 @@ mod tests {
     use webvpn_proto::{ClientPacket, Hello, RelayPacket};
 
     use super::*;
+    use crate::metrics::Counter;
     use crate::policy::Basic;
+    use crate::session::BYE_WAIT;
     use crate::testing::{self, Client, Control, Opened, WAIT};
 
     const CLIENT: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
@@ -349,9 +337,9 @@ mod tests {
         open.bind().await;
         assert_eq!(relay.sessions(), 1);
 
-        drop(open.control);
+        open.control.finish().await;
+        assert_eq!(testing::bye(&mut open.control, &mut open.client).await.0, close::NORMAL);
         within(open.serving).await.unwrap();
-        assert_eq!(open.client.closed().await.0, close::NORMAL);
         assert_eq!(relay.sessions(), 0);
         let counted = [Counter::Sessions, Counter::SocketsOpened, Counter::SocketsClosed];
         assert_eq!(counted.map(|counter| relay.metrics().get(counter)), [1, 1, 1]);
@@ -363,8 +351,11 @@ mod tests {
         let refusal = policy.admit(CLIENT).unwrap_err();
         let relay = Relay::new(policy, Config::default());
         let (mut client, serving) = arrive(&relay);
+        // the `Bye` is the only frame: no hello comes before it
+        let mut control = client.control().await;
+        let said = testing::bye(&mut control, &mut client).await;
+        assert_eq!(said, (close::SESSION_LIMIT, refusal.message.into_owned()));
         within(serving).await.unwrap();
-        assert_eq!(client.closed().await, (close::SESSION_LIMIT, refusal.message.into_owned()));
         assert_eq!(relay.sessions(), 0);
     }
 
@@ -378,10 +369,11 @@ mod tests {
         assert!(matches!(never_answered.next().await, Some(RelayPacket::Hello(_))));
 
         let (mut turned_away, second) = arrive(&relay);
+        let mut refused = turned_away.control().await;
+        assert_eq!(testing::bye(&mut refused, &mut turned_away).await.0, close::SESSION_LIMIT);
         within(second).await.unwrap();
-        assert_eq!(turned_away.closed().await.0, close::SESSION_LIMIT);
 
-        assert_eq!(silent.closed().await.0, close::PROTOCOL_ERROR);
+        assert_eq!(testing::bye(&mut never_answered, &mut silent).await.0, close::PROTOCOL_ERROR);
         assert_eq!(start.elapsed(), Duration::from_secs(3));
         within(first).await.unwrap();
         // The place the silent client held is free again.
@@ -399,9 +391,9 @@ mod tests {
         tokio::time::advance(Duration::from_secs(30)).await;
         assert!(!stopping.is_finished());
 
-        drop(open.control);
+        open.control.finish().await;
+        assert_eq!(testing::bye(&mut open.control, &mut open.client).await.0, close::NORMAL);
         within(stopping).await.unwrap();
-        assert_eq!(open.client.closed().await.0, close::NORMAL);
         assert_eq!(relay.metrics().get(Counter::DrainCapCloses), 0);
     }
 
@@ -417,7 +409,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_session_open_after_the_grace_is_closed_restarting_and_counted_before_its_sockets_end() {
+    async fn a_session_open_after_the_grace_says_bye_restarting_before_its_sockets_end_and_is_counted() {
         let relay = relay();
         let mut open = open(&relay).await;
         open.bind().await;
@@ -428,28 +420,34 @@ mod tests {
         let start = Instant::now();
         let stopping = stop(&relay, GRACE);
         assert_eq!(open.control.next().await, Some(RelayPacket::Draining));
+        // Once the socket's stream ended, the `Bye` is already there to read.
+        assert_eq!(within(socket.recv.read(&mut [0; 1])).await.unwrap(), 0);
+        let bye = RelayPacket::Bye { code: close::RESTARTING, reason: STOPPING.into() };
+        assert_eq!(open.control.next().now_or_never(), Some(Some(bye)));
         assert_eq!(open.client.closed().await.0, close::RESTARTING);
-        assert_eq!(start.elapsed(), GRACE);
-        assert!(socket.recv.read(&mut [0; 1]).now_or_never().is_none(), "the socket's stream is still open");
         assert_eq!(relay.metrics().get(Counter::DrainCapCloses), 1);
 
-        // A carrier's close ends the session's streams, which ends the session.
-        drop(open.control);
+        // The session ends by itself once it said `Bye` and closed.
         within(stopping).await.unwrap();
         within(open.serving).await.unwrap();
+        assert_eq!(start.elapsed(), GRACE);
         assert_eq!(relay.sessions(), 0);
         assert_eq!(relay.metrics().get(Counter::SocketsClosed), 1);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_session_that_ignores_the_close_is_dropped_once_the_close_had_its_time() {
+    async fn a_session_whose_client_reads_nothing_still_closes_once_its_bye_had_its_time() {
         let relay = relay();
         let mut open = open(&relay).await;
+        // Enough answers, never read, to fill the control stream and the reply queue, so the `Bye` finds no room.
+        for id in 0..8000 {
+            open.control.send(ClientPacket::AuthClear { id }).await;
+        }
         let start = Instant::now();
         within(relay.stop(GRACE)).await;
         assert_eq!(open.client.closed().await.0, close::RESTARTING);
         within(open.serving).await.unwrap();
-        assert_eq!(start.elapsed(), GRACE + CLOSE_WAIT);
+        assert_eq!(start.elapsed(), GRACE + BYE_WAIT);
         assert_eq!(relay.sessions(), 0);
     }
 
@@ -458,8 +456,9 @@ mod tests {
         let relay = Relay::new(full(), Config::default());
         within(relay.stop(GRACE)).await;
         let (mut client, serving) = arrive(&relay);
+        let mut control = client.control().await;
+        assert_eq!(testing::bye(&mut control, &mut client).await, (close::RESTARTING, STOPPING.to_owned()));
         within(serving).await.unwrap();
-        assert_eq!(client.closed().await.0, close::RESTARTING);
         assert_eq!(relay.metrics().get(Counter::DrainCapCloses), 0);
     }
 

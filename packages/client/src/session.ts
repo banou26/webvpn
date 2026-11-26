@@ -52,9 +52,8 @@ export type Session = {
   /** The `Feature` bits of the relay's hello. */
   features: number,
   /**
-   * Resolves when the session ended, with the `CloseCode` and reason of the side that closed it. Never rejects. An end
-   * that carried no code reads as `PROTOCOL_ERROR`, which is how a browser reports any close a relay sends over
-   * WebTransport as a plain QUIC close.
+   * Resolves when the session ended, with a `CloseCode` and a reason: the relay's `bye` when it said one, else the
+   * carrier's close, else `LOST` for a carrier that ended with no code. Never rejects.
    */
   closed: Promise<CloseInfo>,
   /** Resolves when the relay says it is about to stop. The sockets keep working; new ones belong on a new session. */
@@ -80,6 +79,7 @@ const closeError = ({ code, reason }: CloseInfo) => new WebVpnError(
   : code === CloseCode.VERSION_MISMATCH ? ErrorCode.UNSUPPORTED
   : ErrorCode.OTHER,
   `the session closed: ${reason}`,
+  code,
 )
 
 // keeps the map in stamping order, so the oldest entries go first once they outlive `ms` or outnumber `max`
@@ -111,7 +111,8 @@ const dispose = ({ reader, writable }: Omit<SocketStream, 'head'>) => {
 /**
  * Runs a session on `carrier`: reads the relay's hello from the first stream the relay opens, answers with the
  * client's, and serves requests from then on. Rejects, with the carrier closed, when the relay's version does not
- * suit (`VERSION_MISMATCH`), when the setup breaks the protocol, ends, or does not finish within 4 seconds.
+ * suit (`VERSION_MISMATCH`), when the relay closes the session in its setup (the error's `closeCode` says why, as
+ * `SESSION_LIMIT` for a full relay), when the setup breaks the protocol, ends, or does not finish within 4 seconds.
  */
 export const openSession = async (carrier: Carrier, options: { agent?: string } = {}): Promise<Session> => {
   let ended: WebVpnError | undefined
@@ -159,6 +160,10 @@ export const openSession = async (carrier: Carrier, options: { agent?: string } 
       return backlog.shift()
     }
     const relayHello = await next()
+    if (relayHello?.type === 'bye') {
+      fail(relayHello.code, relayHello.reason)
+      throw closeError(relayHello)
+    }
     if (relayHello?.type !== 'hello') throw new ProtocolError('the relay did not start with its hello')
     if (!compatible(relayHello)) {
       const reason = `the relay speaks WebVPN ${relayHello.major}.${relayHello.minor}`
@@ -348,6 +353,9 @@ export const openSession = async (carrier: Carrier, options: { agent?: string } 
           case 'draining':
             announceDraining()
             break
+          // the last frame: closing the carrier with its code and reason makes them the session's
+          case 'bye':
+            return fail(packet.code, packet.reason)
         }
       }
       fail(CloseCode.PROTOCOL_ERROR, 'the relay ended the control stream')

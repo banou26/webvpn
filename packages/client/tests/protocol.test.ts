@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { expect, it } from 'vite-plus/test'
 
 import {
+  CloseCode,
   compatible,
   decodeClientPacket,
   decodeMuxFrame,
@@ -85,6 +86,7 @@ const relayPackets: Record<string, RelayPacket> = {
   'accept-refused': { type: 'acceptRefused', listener: 6, code: ErrorCode.CAPACITY, remote: RELAY_PORT },
   'closed': { type: 'closed', socket: 9, code: ErrorCode.CAPACITY },
   'draining': { type: 'draining' },
+  'bye': { type: 'bye', code: CloseCode.RESTARTING, reason: 'the relay is stopping' },
 }
 
 it('client frames match the vectors both ways', () => {
@@ -100,7 +102,7 @@ it('client frames match the vectors both ways', () => {
 
 it('relay frames match the vectors both ways', () => {
   const group = vectors('relay')
-  expect(group).toHaveLength(10)
+  expect(group).toHaveLength(11)
   for (const { name, bytes } of group) {
     const packet = relayPackets[name]
     expect(packet, name).toBeDefined()
