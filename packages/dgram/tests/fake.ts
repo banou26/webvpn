@@ -1,4 +1,4 @@
-import type { Address, UdpDatagram, UdpOption, UdpSocket } from '@webvpn/client'
+import type { Address, ClosedBy, UdpDatagram, UdpOption, UdpSocket } from '@webvpn/client'
 import type { Provider } from '../src'
 
 import { ErrorCode, formatIp, parseIp, WebVpnError } from '@webvpn/client'
@@ -19,18 +19,18 @@ export const gate = () => {
 /** A UDP socket as the relay hands it over: the test delivers datagrams to it and reads what it sent. */
 export const fakeUdp = (local: Address) => {
   let down!: ReadableStreamDefaultController<UdpDatagram>
-  let finish!: (code?: number) => void
+  let finish!: (by: ClosedBy) => void
   let done = false
   const sent: { to: string, data: string }[] = []
   const options: UdpOption[] = []
   const calls: string[] = []
   const failures: { connect?: Error, disconnect?: Error, option?: Error } = {}
-  const stop = (code?: number) => {
+  const stop = (by: ClosedBy) => {
     done = true
     try {
       down.close()
     } catch {}
-    finish(code)
+    finish(by)
   }
   const socket: UdpSocket = {
     id: 3,
@@ -57,7 +57,7 @@ export const fakeUdp = (local: Address) => {
     closed: new Promise((resolve) => { finish = resolve }),
     close: async () => {
       calls.push('close')
-      stop()
+      stop({ by: 'client' })
     },
   }
   return {
@@ -67,7 +67,7 @@ export const fakeUdp = (local: Address) => {
     calls,
     failures,
     deliver: (from: Address, data: string) => down.enqueue({ remote: from, data: new TextEncoder().encode(data) }),
-    /** Ends the socket from the relay's side, with the code of a `Closed` notice, or none as when the session ended. */
+    /** Ends the socket as the relay's `Closed` notice or the session's end does. */
     end: stop,
   }
 }

@@ -324,7 +324,7 @@ describe('the control stream', () => {
       const connections = (await listening).connections.getReader()
       expect((await connections.read()).value, at).toMatchObject({ id: 21, remote: SITE })
       expect((await connections.read()).value, at).toMatchObject({ id: 22, remote: RELAY_END })
-      expect(await (await binding).closed, at).toBe(ErrorCode.CAPACITY)
+      expect(await (await binding).closed, at).toEqual({ by: 'relay', code: ErrorCode.CAPACITY })
       await session.draining
       // a frame read twice would claim its socket again, give up after 30 seconds and close it
       await vi.advanceTimersByTimeAsync(30_000)
@@ -502,7 +502,7 @@ describe('a TCP listener', () => {
     const { relay, session } = await opened(Feature.LISTEN)
     const listener = await listening(relay, session)
     relay.send({ type: 'closed', socket: 4, code: ErrorCode.OTHER })
-    expect(await listener.closed).toBe(ErrorCode.OTHER)
+    expect(await listener.closed).toEqual({ by: 'relay', code: ErrorCode.OTHER })
     expect((await listener.connections.getReader().read()).done).toBe(true)
   })
 
@@ -512,18 +512,43 @@ describe('a TCP listener', () => {
     const closing = listener.close()
     expect(await answer(relay, (id) => ({ type: 'ok', id }))).toMatchObject({ type: 'tcpUnlisten', socket: 4 })
     await closing
-    expect(await listener.closed).toBeUndefined()
+    expect(await listener.closed).toEqual({ by: 'client' })
     const late = relay.open(10)
     relay.send({ type: 'accepted', listener: 4, socket: 10, local: v4('192.0.2.1', 4000), remote: SITE })
     expect(await relay.next()).toMatchObject({ type: 'tcpClose', socket: 10 })
     await vi.waitFor(() => expect(late.seen.cancelled).toBe(true))
   })
 
-  it('resolves closed with undefined when the session ends', async () => {
+  it('resolves closed as the session\'s when the session ends', async () => {
     const { relay, session } = await opened(Feature.LISTEN)
     const listener = await listening(relay, session)
     session.close()
-    expect(await listener.closed).toBeUndefined()
+    expect(await listener.closed).toEqual({ by: 'session' })
+  })
+
+  it('closes the connections it did not hand out, whichever way it stops', async () => {
+    for (const way of ['close', 'notice', 'session'] as const) {
+      const { relay, session } = await opened(Feature.LISTEN)
+      const listener = await listening(relay, session)
+      for (const socket of [9, 10]) {
+        relay.open(socket)
+        relay.send({ type: 'accepted', listener: 4, socket, local: v4('192.0.2.1', 4000), remote: SITE })
+      }
+      await settle()
+      if (way === 'close') {
+        const closing = listener.close()
+        await answer(relay, (id) => ({ type: 'ok', id }))
+        await closing
+      }
+      if (way === 'notice') relay.send({ type: 'closed', socket: 4, code: ErrorCode.OTHER })
+      if (way === 'session') session.close()
+      await listener.closed
+      expect((await listener.connections.getReader().read()).done, way).toBe(true)
+      const closes = () => relay.packets.flatMap((packet) => packet.type === 'tcpClose' ? [packet.socket] : [])
+      // a session that ended has no relay left to tell
+      if (way === 'session') expect(closes()).toEqual([])
+      else await vi.waitFor(() => expect(closes(), way).toEqual([9, 10]))
+    }
   })
 })
 
@@ -574,17 +599,38 @@ describe('a UDP socket over WebTransport', () => {
     const { relay, session } = await opened()
     const udp = await bound(relay, session)
     relay.send({ type: 'closed', socket: 7, code: ErrorCode.CAPACITY })
-    expect(await udp.closed).toBe(ErrorCode.CAPACITY)
+    expect(await udp.closed).toEqual({ by: 'relay', code: ErrorCode.CAPACITY })
     expect((await udp.readable.getReader().read()).done).toBe(true)
   })
 
-  it('closes with UdpClose, and resolves closed with undefined', async () => {
+  it('closes with UdpClose, and resolves closed as the client\'s', async () => {
     const { relay, session } = await opened()
     const udp = await bound(relay, session)
     const closing = udp.close()
     expect(await answer(relay, (id) => ({ type: 'ok', id }))).toMatchObject({ type: 'udpClose', socket: 7 })
     await closing
-    expect(await udp.closed).toBeUndefined()
+    expect(await udp.closed).toEqual({ by: 'client' })
+  })
+
+  it('resolves closed as the session\'s when the session ends', async () => {
+    const { relay, session } = await opened()
+    const udp = await bound(relay, session)
+    session.close()
+    expect(await udp.closed).toEqual({ by: 'session' })
+  })
+
+  it('fails a write over 65536 bytes with a WebVpnError, which errors its writable and leaves the socket open', async () => {
+    const { relay, session } = await opened()
+    const udp = await bound(relay, session)
+    const writer = udp.writable.getWriter()
+    await writer.write({ remote: SITE, data: new Uint8Array(65_536) })
+    const error = await outcome(writer.write({ remote: SITE, data: new Uint8Array(65_537) }))
+    expect(error).toBeInstanceOf(WebVpnError)
+    expect(error).toMatchObject({ code: ErrorCode.OTHER, message: expect.stringContaining('the datagram is too large') })
+    expect(await outcome(writer.write({ remote: SITE, data: Uint8Array.of(1) }))).toBe(error)
+    expect(relay.sentDatagrams.map(({ data }) => data.byteLength)).toEqual([65_536])
+    relay.datagram({ socket: 7, remote: SITE, data: Uint8Array.of(2) })
+    expect((await udp.readable.getReader().read()).value).toEqual({ remote: SITE, data: Uint8Array.of(2) })
   })
 
   it('holds at most 4 MiB unread for one socket and 32 MiB for the session, and drops the rest', async () => {

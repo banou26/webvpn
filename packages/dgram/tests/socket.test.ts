@@ -405,18 +405,22 @@ describe('close', () => {
     expect(log).toEqual(['close'])
   })
 
-  it('emits error then close when the relay ends the socket, and close alone with no error listener', async () => {
-    const { socket, udp } = await bound()
-    const log: string[] = []
-    socket.on('error', (error) => log.push(`error ${error.message}`))
-    socket.on('close', () => log.push('close'))
-    udp.end(ErrorCode.CAPACITY)
-    await wait(0)
-    expect(log).toEqual(['error the relay closed the socket', 'close'])
+  it('emits error then close when the relay ends the socket or the session ends, and close alone with no error listener', async () => {
+    for (const closed of [{ by: 'relay', code: ErrorCode.CAPACITY }, { by: 'session' }] as const) {
+      const { socket, udp } = await bound()
+      const log: string[] = []
+      socket.on('error', (error) => log.push(`error ${error.message} ${(error as { code?: number }).code}`))
+      socket.on('close', () => log.push('close'))
+      udp.end(closed)
+      await wait(0)
+      expect(log).toEqual([closed.by === 'relay'
+        ? `error the relay closed the socket ${ErrorCode.CAPACITY}`
+        : `error the session ended ${ErrorCode.OTHER}`, 'close'])
+    }
 
     const bare = await bound()
     const closed = new Promise((resolve) => bare.socket.once('close', resolve))
-    bare.udp.end()
+    bare.udp.end({ by: 'session' })
     await closed
   })
 

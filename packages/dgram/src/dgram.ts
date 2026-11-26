@@ -1,4 +1,4 @@
-import type { Address, UdpOption, UdpSocket } from '@webvpn/client'
+import type { Address, ClosedBy, UdpOption, UdpSocket } from '@webvpn/client'
 import type { Provider } from './index'
 
 import { dnsAddresses, dnsQuery, ErrorCode, formatIp, parseIp, WebVpnError } from '@webvpn/client'
@@ -105,11 +105,13 @@ class Socket extends EventEmitter {
     }
   }
 
-  // a socket the relay ended on its own, or whose session ended
-  _ended(code: number | undefined) {
+  // a socket the relay ended on its own, or whose session ended; one this socket's close() ended is _closed already
+  _ended(closed: ClosedBy) {
     if (this._closed) return
     this._closed = true
-    const error = new WebVpnError(code ?? ErrorCode.OTHER, code === undefined ? 'the session ended' : 'the relay closed the socket')
+    const error = closed.by === 'relay'
+      ? new WebVpnError(closed.code, 'the relay closed the socket')
+      : new WebVpnError(ErrorCode.OTHER, 'the session ended')
     // with no 'error' listener, emit('error') throws, and an unfenced one would lose 'close' too
     try {
       if (this.listenerCount('error') > 0) this.emit('error', error)
@@ -135,7 +137,7 @@ class Socket extends EventEmitter {
       })
       this._local = endpoint(socket.local)
       this._receive(socket)
-      socket.closed.then((code) => this._ended(code))
+      socket.closed.then((closed) => this._ended(closed))
       return { provider: ready, socket, writer: socket.writable.getWriter() }
     }).catch((error: unknown) => {
       if (!this._closed) this.emit('error', error)

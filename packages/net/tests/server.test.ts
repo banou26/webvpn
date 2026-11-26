@@ -194,20 +194,20 @@ describe('close', () => {
     expect(server.listening).toBe(false)
     await wait(0)
     expect(log).toEqual(['close', 'callback undefined'])
-    expect(await listener.listener.closed).toBeUndefined()
+    expect(await listener.listener.closed).toEqual({ by: 'client' })
   })
 
-  it('closes the accepted sockets still waiting to be handed out, and hands out none after close', async () => {
+  // the listener closes the sockets still waiting in it, and this one already left it
+  it('hands out no socket after close, and closes one the listener gave it in the same turn', async () => {
     const { server, listener } = await listening()
     const handed: Socket[] = []
     server.on('connection', (socket: Socket) => handed.push(socket))
-    const waiting = [fakeSocket(), fakeSocket()]
-    listener.accept(waiting[0]!.socket)
-    listener.accept(waiting[1]!.socket)
+    const late = fakeSocket()
+    listener.accept(late.socket)
     server.close()
     await wait(10)
     expect(handed).toEqual([])
-    expect(waiting.map(({ teardown }) => teardown)).toEqual([['close'], ['close']])
+    expect(late.teardown).toEqual(['close'])
   })
 
   it('calls back with ERR_SERVER_NOT_RUNNING when the server is not listening', async () => {
@@ -219,22 +219,33 @@ describe('close', () => {
   it('emits error then close when the relay ends the listener on its own, and close alone with no error listener', async () => {
     const watched = await listening()
     const log: string[] = []
-    watched.server.on('error', (error) => log.push(`error ${error.message}`))
+    watched.server.on('error', (error) => log.push(`error ${error.message} ${(error as { code?: number }).code}`))
     watched.server.on('close', () => log.push('close'))
-    watched.listener.end(ErrorCode.CAPACITY)
+    watched.listener.end({ by: 'relay', code: ErrorCode.CAPACITY })
     await wait(0)
-    expect(log).toEqual(['error the relay closed the listener', 'close'])
+    expect(log).toEqual([`error the relay closed the listener ${ErrorCode.CAPACITY}`, 'close'])
     expect(watched.server.address()).toBe(null)
 
     const bare = await listening()
     const closed = new Promise((resolve) => bare.server.once('close', resolve))
-    bare.listener.end(ErrorCode.CAPACITY)
+    bare.listener.end({ by: 'relay', code: ErrorCode.CAPACITY })
     await closed
+  })
+
+  it('emits close alone when the session ends', async () => {
+    const { server, listener } = await listening()
+    const log: string[] = []
+    server.on('error', (error) => log.push(`error ${error.message}`))
+    server.on('close', () => log.push('close'))
+    listener.end({ by: 'session' })
+    await wait(0)
+    expect(log).toEqual(['close'])
+    expect(server.address()).toBe(null)
   })
 
   it('closes on Symbol.asyncDispose', async () => {
     const { server, listener } = await listening()
     await (server as unknown as AsyncDisposable)[Symbol.asyncDispose]()
-    expect(await listener.listener.closed).toBeUndefined()
+    expect(await listener.listener.closed).toEqual({ by: 'client' })
   })
 })

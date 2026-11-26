@@ -109,7 +109,7 @@ describe.for(['webtransport', 'websocket'] as const)('over %s', (transport) => {
     await writer.close()
     expect(await limited(dialed)).toBe('from the page')
     await listener.close()
-    expect(await listener.closed).toBeUndefined()
+    expect(await listener.closed).toEqual({ by: 'client' })
   })
 
   it('echoes over UDP', async () => {
@@ -122,7 +122,7 @@ describe.for(['webtransport', 'websocket'] as const)('over %s', (transport) => {
     const { value } = await limited(reader.read())
     expect(value).toEqual({ remote: { ip: LOOPBACK, port: echo.udp }, data: encoder.encode('ping') })
     await udp.close()
-    expect(await udp.closed).toBeUndefined()
+    expect(await udp.closed).toEqual({ by: 'client' })
   })
 
   it('connects by name and looks a name up through the relay\'s resolver', async () => {

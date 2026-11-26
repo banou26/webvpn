@@ -374,14 +374,12 @@ class Server extends EventEmitter {
     if (listener) this.on('connection', listener)
   }
 
-  // the sockets the relay accepted wait in `connections`, and those still there once the server closed are closed
+  // A socket can come out of `connections` in the same turn as close(), before the listener heard of it, and Node hands
+  // out none after close(), so that one is closed here; the listener closes the ones still waiting
   async _serve(listener: TcpListener, listening: Promise<unknown>) {
     const reader = listener.connections.getReader()
     for (let read = await reader.read(); !read.done; read = await reader.read()) {
-      if (this._listening !== listening) {
-        read.value.close().catch(noop)
-        continue
-      }
+      if (this._listening !== listening) return void read.value.close().catch(noop)
       const socket = new this._Socket({ allowHalfOpen: this._allowHalfOpen })
       socket.server = this
       socket._accept(read.value)
@@ -417,12 +415,12 @@ class Server extends EventEmitter {
       if (this._listening !== listening) return
       this._local = endpoint(listener.local)
       this.emit('listening')
-      listener.closed.then((code) => {
+      listener.closed.then((closed) => {
         if (this._listening !== listening) return
         this._listening = this._local = undefined
         // with no 'error' listener, emit('error') throws, and an unfenced one would lose 'close' too
         try {
-          if (code !== undefined && this.listenerCount('error') > 0) this.emit('error', new WebVpnError(code, 'the relay closed the listener'))
+          if (closed.by === 'relay' && this.listenerCount('error') > 0) this.emit('error', new WebVpnError(closed.code, 'the relay closed the listener'))
         } finally {
           this._emitClose()
         }

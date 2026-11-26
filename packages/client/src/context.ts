@@ -28,6 +28,12 @@ export type Duplex = { readable: ReadableStream<Uint8Array>, writable: WritableS
 export type CloseInfo = { code: number, reason: string }
 
 /**
+ * Who closed a listener or a UDP socket: the client with its `close()`, the relay with a `Closed` notice and its
+ * `ErrorCode`, or the end of the session.
+ */
+export type ClosedBy = { by: 'client' } | { by: 'relay', code: number } | { by: 'session' }
+
+/**
  * What a session needs of its carrier, WebTransport or the WebSocket mux. The relay opens every stream, and the
  * client opens only what `openUni` gives.
  */

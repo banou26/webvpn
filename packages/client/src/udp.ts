@@ -1,4 +1,4 @@
-import type { Context, Opened, SocketStream } from './context'
+import type { ClosedBy, Context, Opened, SocketStream } from './context'
 import type { Address, UdpOption, UdpPacket } from './protocol'
 
 import { framed, noop, ok, readU32, u32, WebVpnError } from './context'
@@ -35,10 +35,11 @@ export type UdpDatagram = { remote: Address, data: Uint8Array }
  *
  * `readable` gives each datagram the relay received for the socket. Datagrams wait for the reader up to 4 MiB for
  * the socket and 32 MiB for the session, and past that are dropped. `writable` sends a datagram to `remote`, or to
- * the connected peer when `remote` is absent; it never waits, and drops a datagram the carrier cannot take now or one
- * over 65536 bytes, as a network would. `closed` resolves with the code of the relay's `Closed` notice when the relay
- * ended the socket on its own, and `undefined` when the client closed it or the session ended; `readable` ends then.
- * Cancelling `readable` closes the socket.
+ * the connected peer when `remote` is absent; it never waits, and drops a datagram the carrier cannot take now, as a
+ * network would. A datagram over 65536 bytes fails its write with a `WebVpnError`, and since a failed write errors a
+ * `WritableStream`, every later write fails too; the socket stays open to read and to close. The socket stops at its
+ * own `close()`, at the relay's `Closed` notice, or when the session ends: `readable` ends then, and `closed` resolves
+ * with which of the three it was. Cancelling `readable` closes the socket.
  */
 export type UdpSocket = {
   /** The socket's id in its session. */
@@ -51,7 +52,9 @@ export type UdpSocket = {
   connect: (remote: Address) => Promise<void>,
   disconnect: () => Promise<void>,
   setOption: (option: UdpOption) => Promise<void>,
-  closed: Promise<number | undefined>,
+  /** Resolves once the socket stopped, with who stopped it. Never rejects. */
+  closed: Promise<ClosedBy>,
+  /** Stops the socket at once and closes it at the relay. Rejects with the relay's refusal while the session lasts. */
   close: () => Promise<void>,
 }
 
@@ -72,8 +75,8 @@ const decodeFramed = (bytes: Uint8Array) => {
 export const udpSocket = (context: Context, { socket, local }: Opened): UdpSocket => {
   let done = false
   let closing: Promise<void> | undefined
-  let finish!: (code?: number) => void
-  const closed = new Promise<number | undefined>((resolve) => { finish = resolve })
+  let finish!: (by: ClosedBy) => void
+  const closed = new Promise<ClosedBy>((resolve) => { finish = resolve })
   const queue: UdpDatagram[] = []
   let unread = 0
   let wake: (() => void) | undefined
@@ -98,12 +101,12 @@ export const udpSocket = (context: Context, { socket, local }: Opened): UdpSocke
 
   const close = () => closing ??= (async () => {
     if (done) return
+    const asked = context.request({ type: 'udpClose', socket }, ok)
+    stop({ by: 'client' })
     try {
-      await context.request({ type: 'udpClose', socket }, ok)
+      await asked
     } catch (error) {
       if (!context.ended()) throw error
-    } finally {
-      stop()
     }
   })()
 
@@ -156,7 +159,6 @@ export const udpSocket = (context: Context, { socket, local }: Opened): UdpSocke
   }, UNI_FALLBACK_MS)
 
   const send = ({ remote, data }: { remote?: Address, data: Uint8Array }) => {
-    if (data.byteLength > MAX_UDP_PAYLOAD_BYTES) return
     const packet = { socket, remote, data }
     const writer = uplink
     if (!writer) return context.carrier.sendDatagram(encodeUdpPacket(packet))
@@ -173,11 +175,14 @@ export const udpSocket = (context: Context, { socket, local }: Opened): UdpSocke
   const writable = new WritableStream<{ remote?: Address, data: Uint8Array }>({
     write: (datagram) => {
       if (done) throw context.ended() ?? new WebVpnError(ErrorCode.OTHER, 'the socket is closed')
+      if (datagram.data.byteLength > MAX_UDP_PAYLOAD_BYTES) {
+        throw new WebVpnError(ErrorCode.OTHER, `the datagram is too large: a UDP payload holds at most ${MAX_UDP_PAYLOAD_BYTES} bytes`)
+      }
       send(datagram)
     },
   })
 
-  const stop = (code?: number) => {
+  const stop = (by: ClosedBy) => {
     if (done) return
     done = true
     unown()
@@ -186,15 +191,15 @@ export const udpSocket = (context: Context, { socket, local }: Opened): UdpSocke
     drop()
     wake?.()
     uplink?.close().catch(noop)
-    finish(code)
+    finish(by)
   }
 
   const unown = context.own(socket, {
     notice: (packet) => {
-      if (packet.type === 'closed') stop(packet.code)
+      if (packet.type === 'closed') stop({ by: 'relay', code: packet.code })
     },
     packet: deliver,
-    end: () => stop(),
+    end: () => stop({ by: 'session' }),
   })
 
   return {

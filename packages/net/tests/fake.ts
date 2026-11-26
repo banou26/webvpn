@@ -1,4 +1,4 @@
-import type { Address, TcpListener, TcpOption, TcpSocket } from '@webvpn/client'
+import type { Address, ClosedBy, TcpListener, TcpOption, TcpSocket } from '@webvpn/client'
 import type { Provider } from '../src'
 
 import { ErrorCode, parseIp, WebVpnError } from '@webvpn/client'
@@ -97,21 +97,22 @@ export type FakeSocket = ReturnType<typeof fakeSocket>
 /** A listener as the relay hands it over: the test accepts connections on it and may end it. */
 export const fakeListener = (local: Address) => {
   let accepted!: ReadableStreamDefaultController<TcpSocket>
-  let finish!: (code?: number) => void
-  const closed = new Promise<number | undefined>((resolve) => { finish = resolve })
-  const stop = (code?: number) => {
+  let finish!: (by: ClosedBy) => void
+  const closed = new Promise<ClosedBy>((resolve) => { finish = resolve })
+  const stop = (by: ClosedBy) => {
     try {
       accepted.close()
     } catch {}
-    finish(code)
+    finish(by)
   }
   const listener: TcpListener = {
     id: 2,
     local,
     connections: new ReadableStream({ start: (controller) => { accepted = controller } }),
     closed,
-    close: async () => stop(),
+    close: async () => stop({ by: 'client' }),
   }
+  /** `end` stops the listener as the relay's notice or the session's end does. */
   return { listener, accept: (socket: TcpSocket) => accepted.enqueue(socket), end: stop }
 }
 
