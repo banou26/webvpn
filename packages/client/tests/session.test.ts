@@ -1,0 +1,639 @@
+import type { Session, UdpSocket } from '../src'
+import type { ClientPacket, RelayPacket } from '../src/protocol'
+import type { FakeRelay } from './relay'
+
+import { afterEach, describe, expect, it, vi } from 'vite-plus/test'
+
+import { WebVpnError } from '../src'
+import { concat, u32 } from '../src/context'
+import { dnsQuery } from '../src/dns'
+import {
+  CloseCode,
+  encodeFramedUdpPacket,
+  encodeRelayPacket,
+  ErrorCode,
+  Feature,
+  hello,
+  MAX_RELAY_FRAME_BYTES,
+  ResetCode,
+  VERSION,
+} from '../src/protocol'
+import { openSession } from '../src/session'
+import { fakeRelay, opened, settle, v4 } from './relay'
+
+const SITE = v4('192.0.2.7', 443)
+const RELAY_END = v4('198.51.100.4', 50000)
+const ANY = v4('0.0.0.0', 0)
+const QUERY = Uint8Array.of(1, 2, 3)
+
+const idOf = (packet: ClientPacket) => (packet as { id: number }).id
+
+/** What a promise settled with, a value or an error, so a rejection is never left unhandled. */
+const outcome = <T>(promise: Promise<T>) => promise.then((value) => value, (error: unknown) => error)
+
+const isPending = async (promise: Promise<unknown>) => {
+  let pending = true
+  promise.then(() => { pending = false }, () => { pending = false })
+  await settle()
+  return pending
+}
+
+const answer = async (relay: FakeRelay, reply: (id: number, packet: ClientPacket) => RelayPacket) => {
+  const packet = await relay.next()
+  relay.send(reply(idOf(packet), packet))
+  return packet
+}
+
+const connected = async (relay: FakeRelay, session: Session, socket = 5) => {
+  const connecting = session.tcpConnect(SITE)
+  const stream = relay.open(socket)
+  await answer(relay, (id) => ({ type: 'socket', id, socket, local: RELAY_END, remote: SITE }))
+  return { socket: await connecting, stream }
+}
+
+const bound = async (relay: FakeRelay, session: Session, socket = 7) => {
+  const binding = session.udpBind(ANY)
+  await answer(relay, (id) => ({ type: 'socket', id, socket, local: v4('0.0.0.0', 5000) }))
+  return binding
+}
+
+afterEach(() => {
+  vi.useRealTimers()
+})
+
+describe('the hello exchange', () => {
+  it('answers the relay\'s hello with the client\'s, as its first frame, and keeps the relay\'s features', async () => {
+    const { relay, session, clientHello } = await opened(Feature.LISTEN | Feature.DNS)
+    expect(clientHello).toEqual(hello(0, 'test client'))
+    expect(relay.packets).toHaveLength(1)
+    expect(session.features).toBe(Feature.LISTEN | Feature.DNS)
+    expect(session.carrier).toBe('webtransport')
+  })
+
+  it('closes the session with VERSION_MISMATCH for a relay of another minor version', async () => {
+    const relay = fakeRelay()
+    relay.start()
+    const session = outcome(openSession(relay.carrier))
+    relay.send({ ...hello(0, 'relay'), minor: VERSION.minor + 1 })
+    expect(await session).toMatchObject({ code: ErrorCode.UNSUPPORTED })
+    expect((await relay.carrier.closed).code).toBe(CloseCode.VERSION_MISMATCH)
+    expect(relay.packets).toEqual([])
+  })
+
+  it('closes the session with PROTOCOL_ERROR when the relay does not start with its hello', async () => {
+    const relay = fakeRelay()
+    relay.start()
+    const session = outcome(openSession(relay.carrier))
+    relay.send({ type: 'draining' })
+    expect(await session).toBeInstanceOf(Error)
+    expect((await relay.carrier.closed).code).toBe(CloseCode.PROTOCOL_ERROR)
+  })
+
+  it('gives up after 4 seconds without a hello', async () => {
+    vi.useFakeTimers()
+    const relay = fakeRelay()
+    relay.start()
+    const session = outcome(openSession(relay.carrier))
+    await vi.advanceTimersByTimeAsync(3999)
+    expect(await isPending(session)).toBe(true)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(await session).toMatchObject({ code: ErrorCode.TIMED_OUT })
+    expect((await relay.carrier.closed).code).toBe(CloseCode.PROTOCOL_ERROR)
+  })
+
+  it('reads a hello split at every byte', async () => {
+    const frame = encodeRelayPacket(hello(Feature.DNS, 'a relay with a longer agent'))
+    for (let cut = 1; cut < frame.byteLength; cut++) {
+      const relay = fakeRelay()
+      relay.start()
+      const session = openSession(relay.carrier)
+      relay.write(frame.subarray(0, cut))
+      await settle()
+      relay.write(frame.subarray(cut))
+      expect((await session).features, `cut at ${cut}`).toBe(Feature.DNS)
+    }
+  })
+})
+
+describe('requests', () => {
+  it('match their replies by id, in whatever order the replies come', async () => {
+    const { relay, session } = await opened(Feature.DNS)
+    const first = session.lookup(Uint8Array.of(1))
+    const second = session.lookup(Uint8Array.of(2))
+    const [a, b] = [await relay.next(), await relay.next()]
+    expect(a).toMatchObject({ type: 'dnsQuery', query: Uint8Array.of(1) })
+    expect(idOf(a)).not.toBe(idOf(b))
+    relay.send({ type: 'dnsAnswer', id: idOf(b), answer: Uint8Array.of(20) })
+    relay.send({ type: 'dnsAnswer', id: idOf(a), answer: Uint8Array.of(10) })
+    expect(await first).toEqual(Uint8Array.of(10))
+    expect(await second).toEqual(Uint8Array.of(20))
+  })
+
+  it('reject with the relay\'s code and message when it refuses them', async () => {
+    const { relay, session } = await opened()
+    const connecting = outcome(session.tcpConnect(SITE))
+    const request = await answer(relay, (id) => ({
+      type: 'error',
+      id,
+      code: ErrorCode.CONNECTION_REFUSED,
+      message: 'connection refused',
+    }))
+    expect(request).toEqual({ type: 'tcpConnect', id: idOf(request), remote: SITE })
+    const error = await connecting
+    expect(error).toBeInstanceOf(WebVpnError)
+    expect(error).toMatchObject({ code: ErrorCode.CONNECTION_REFUSED, message: 'connection refused' })
+  })
+
+  it('reject after 10 seconds without an answer, and a late answer that opened a socket closes it', async () => {
+    vi.useFakeTimers()
+    const { relay, session } = await opened()
+    await bound(relay, session, 1)
+    const late = outcome(session.udpBind(ANY))
+    const request = await relay.next()
+    await vi.advanceTimersByTimeAsync(9999)
+    expect(await isPending(late)).toBe(true)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(await late).toMatchObject({ code: ErrorCode.TIMED_OUT })
+
+    relay.send({ type: 'socket', id: idOf(request), socket: 2, local: ANY })
+    expect(await relay.next()).toMatchObject({ type: 'udpClose', socket: 2 })
+    // the session carries on, and a stream for the late socket is dropped
+    const stream = relay.open(2)
+    await vi.waitFor(() => expect(stream.seen.cancelled).toBe(true))
+    const next = bound(relay, session, 3)
+    expect((await next).id).toBe(3)
+  })
+
+  it('close a session that answered nothing since its hello when one times out', async () => {
+    vi.useFakeTimers()
+    const { relay, session } = await opened()
+    const binding = outcome(session.udpBind(ANY))
+    await relay.next()
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(await binding).toMatchObject({ code: ErrorCode.TIMED_OUT })
+    expect(await session.closed).toMatchObject({ code: CloseCode.PROTOCOL_ERROR })
+  })
+
+  it('wait 12 seconds for a connect, which the relay bounds at 10', async () => {
+    vi.useFakeTimers()
+    const { relay, session } = await opened()
+    await bound(relay, session, 1)
+    const connecting = outcome(session.tcpConnect(SITE))
+    await relay.next()
+    await vi.advanceTimersByTimeAsync(11_999)
+    expect(await isPending(connecting)).toBe(true)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(await connecting).toMatchObject({ code: ErrorCode.TIMED_OUT })
+  })
+
+  it('are refused without being sent when they are longer than a relay reads', async () => {
+    const { relay, session } = await opened(Feature.AUTH)
+    expect(await outcome(session.authenticate(new Uint8Array(5000)))).toMatchObject({ code: ErrorCode.OTHER })
+    await settle()
+    expect(relay.packets).toHaveLength(1)
+  })
+})
+
+describe('the control stream', () => {
+  it('skips frames of a type the client does not know', async () => {
+    const { relay, session } = await opened(Feature.AUTH)
+    const cleared = session.clearAuth()
+    const request = await relay.next()
+    relay.write(Uint8Array.of(0x7f, 0, 0, 0, 3, 1, 2, 3))
+    relay.send({ type: 'ok', id: idOf(request) })
+    await cleared
+  })
+
+  it('resolves draining on the relay\'s notice and keeps serving', async () => {
+    const { relay, session } = await opened(Feature.AUTH)
+    let drained = false
+    session.draining.then(() => { drained = true })
+    await settle()
+    expect(drained).toBe(false)
+    relay.send({ type: 'draining' })
+    await vi.waitFor(() => expect(drained).toBe(true))
+    const cleared = session.clearAuth()
+    await answer(relay, (id) => ({ type: 'ok', id }))
+    await cleared
+  })
+
+  it('closes the session and rejects every waiting request when it ends', async () => {
+    const { relay, session } = await opened(Feature.DNS)
+    const waiting = outcome(session.lookup(QUERY))
+    await relay.next()
+    relay.endControl()
+    expect(await waiting).toMatchObject({ code: ErrorCode.OTHER })
+    expect(await session.closed).toMatchObject({ code: CloseCode.PROTOCOL_ERROR })
+    expect(await outcome(session.lookup(QUERY))).toBeInstanceOf(WebVpnError)
+    expect(await outcome(session.udpBind(ANY))).toBeInstanceOf(WebVpnError)
+  })
+
+  it('closes the session with PROTOCOL_ERROR on a frame over the limit', async () => {
+    const { relay, session } = await opened()
+    const header = Uint8Array.of(0x01, 0, 0, 0, 0)
+    new DataView(header.buffer).setUint32(1, MAX_RELAY_FRAME_BYTES + 1)
+    relay.write(header)
+    expect(await session.closed).toMatchObject({ code: CloseCode.PROTOCOL_ERROR })
+  })
+
+  // the old wire's desync came from a packet cut inside its last field, read as whole: every cut of a recorded
+  // sequence must give the same frames, each exactly once
+  it('reads a recorded sequence split at every byte exactly as whole, each frame once', async () => {
+    vi.useFakeTimers()
+    const LISTENER = v4('0.0.0.0', 4000)
+    const sequence = [
+      Uint8Array.of(0x7f, 0, 0, 0, 3, 9, 9, 9),
+      encodeRelayPacket({ type: 'ok', id: 1 }),
+      encodeRelayPacket({ type: 'error', id: 2, code: ErrorCode.LOOKUP_FAILED, message: 'the resolver did not answer' }),
+      encodeRelayPacket({ type: 'dnsAnswer', id: 3, answer: Uint8Array.from({ length: 40 }, (_, at) => at) }),
+      encodeRelayPacket({ type: 'socket', id: 4, socket: 20, local: LISTENER }),
+      encodeRelayPacket({ type: 'accepted', listener: 20, socket: 21, local: LISTENER, remote: SITE }),
+      encodeRelayPacket({ type: 'accepted', listener: 20, socket: 22, local: LISTENER, remote: RELAY_END }),
+      encodeRelayPacket({ type: 'socket', id: 5, socket: 23, local: ANY }),
+      encodeRelayPacket({ type: 'closed', socket: 23, code: ErrorCode.CAPACITY }),
+      encodeRelayPacket({ type: 'draining' }),
+    ].reduce(concat)
+    const pieces = (cut: number) => cut < 0
+      ? Array.from(sequence, (byte) => Uint8Array.of(byte))
+      : [sequence.subarray(0, cut), sequence.subarray(cut)]
+
+    for (let cut = -1; cut < sequence.byteLength; cut++) {
+      const { relay, session } = await opened(Feature.AUTH | Feature.DNS | Feature.LISTEN, 'websocket')
+      const auth = session.authenticate(Uint8Array.of(1))
+      const failed = outcome(session.lookup(QUERY))
+      const looked = session.lookup(QUERY)
+      const listening = session.tcpListen(LISTENER)
+      const binding = session.udpBind(ANY)
+      for (let request = 0; request < 5; request++) await relay.next()
+      relay.open(21)
+      relay.open(22)
+      for (const piece of pieces(cut)) {
+        relay.write(piece)
+        await settle()
+      }
+
+      const at = `cut at ${cut}`
+      await auth
+      expect(await failed, at).toMatchObject({ code: ErrorCode.LOOKUP_FAILED, message: 'the resolver did not answer' })
+      expect(await looked, at).toEqual(Uint8Array.from({ length: 40 }, (_, at) => at))
+      const connections = (await listening).connections.getReader()
+      expect((await connections.read()).value, at).toMatchObject({ id: 21, remote: SITE })
+      expect((await connections.read()).value, at).toMatchObject({ id: 22, remote: RELAY_END })
+      expect(await (await binding).closed, at).toBe(ErrorCode.CAPACITY)
+      await session.draining
+      // a frame read twice would claim its socket again, give up after 30 seconds and close it
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(relay.packets, at).toHaveLength(6)
+      session.close()
+    }
+  })
+})
+
+describe('socket streams', () => {
+  it('wait for the reply that names their socket when they come first', async () => {
+    const { relay, session } = await opened()
+    const connecting = session.tcpConnect(SITE)
+    const request = await relay.next()
+    relay.open(5).write(Uint8Array.of(1, 2))
+    await settle()
+    relay.send({ type: 'socket', id: idOf(request), socket: 5, local: RELAY_END, remote: SITE })
+    const socket = await connecting
+    expect(socket).toMatchObject({ id: 5, local: RELAY_END, remote: SITE })
+    expect((await socket.readable.getReader().read()).value).toEqual(Uint8Array.of(1, 2))
+  })
+
+  it('are taken by a socket whose reply came first, with an id split across reads', async () => {
+    const { relay, session } = await opened()
+    const connecting = session.tcpConnect(SITE)
+    await answer(relay, (id) => ({ type: 'socket', id, socket: 5, local: RELAY_END, remote: SITE }))
+    await settle()
+    const stream = relay.open(5, true, Uint8Array.of(0, 0))
+    stream.write(Uint8Array.of(0, 5, 7))
+    const socket = await connecting
+    expect((await socket.readable.getReader().read()).value).toEqual(Uint8Array.of(7))
+  })
+
+  it('are dropped after 30 seconds when no socket claims them', async () => {
+    vi.useFakeTimers()
+    const { relay } = await opened()
+    const stray = relay.open(9)
+    await vi.advanceTimersByTimeAsync(29_999)
+    expect(stray.seen.cancelled).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(stray.seen).toMatchObject({ cancelled: true, aborted: true })
+  })
+
+  it('give up a connect whose stream does not come in 30 seconds, and close its socket', async () => {
+    vi.useFakeTimers()
+    const { relay, session } = await opened()
+    const connecting = outcome(session.tcpConnect(SITE))
+    await answer(relay, (id) => ({ type: 'socket', id, socket: 5, local: RELAY_END, remote: SITE }))
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(await connecting).toMatchObject({ code: ErrorCode.NO_STREAM })
+    expect(await relay.next()).toMatchObject({ type: 'tcpClose', socket: 5 })
+  })
+
+  it('are dropped at once for a socket that ended', async () => {
+    const { relay, session } = await opened()
+    const udp = await bound(relay, session, 7)
+    const closing = udp.close()
+    await answer(relay, (id) => ({ type: 'ok', id }))
+    await closing
+    const late = relay.open(7)
+    await vi.waitFor(() => expect(late.seen.cancelled).toBe(true))
+  })
+})
+
+describe('a TCP socket', () => {
+  it('errors its readable with CONNECTION_RESET when the peer reset the connection', async () => {
+    const { relay, session } = await opened()
+    const { socket, stream } = await connected(relay, session)
+    stream.reset(ResetCode.PEER_RESET)
+    const error = await outcome(socket.readable.getReader().read())
+    expect(error).toBeInstanceOf(WebVpnError)
+    expect(error).toMatchObject({ code: ErrorCode.CONNECTION_RESET })
+  })
+
+  it('fails a write with CONNECTION_RESET when the upload fails just ahead of the peer\'s reset', async () => {
+    const { relay, session } = await opened()
+    const { socket, stream } = await connected(relay, session)
+    socket.readable.getReader().read().catch(() => {})
+    stream.breakWrites(new Error('error writing data'))
+    const written = outcome(socket.writable.getWriter().write(Uint8Array.of(1)))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    stream.reset(ResetCode.PEER_RESET)
+    expect(await written).toMatchObject({ code: ErrorCode.CONNECTION_RESET })
+  })
+
+  it('half closes when its writable closes, and keeps reading', async () => {
+    const { relay, session } = await opened()
+    const { socket, stream } = await connected(relay, session)
+    await socket.writable.close()
+    expect(stream.seen.finished).toBe(true)
+    stream.write(Uint8Array.of(4))
+    stream.finish()
+    const reader = socket.readable.getReader()
+    expect(await reader.read()).toEqual({ done: false, value: Uint8Array.of(4) })
+    expect(await reader.read()).toEqual({ done: true, value: undefined })
+  })
+
+  it('closes with TcpClose, resolves on its Ok, ends its readable cleanly and drops the rest', async () => {
+    const { relay, session } = await opened()
+    const { socket, stream } = await connected(relay, session)
+    const reader = socket.readable.getReader()
+    const closing = socket.close()
+    const request = await relay.next()
+    expect(request).toEqual({ type: 'tcpClose', id: idOf(request), socket: 5 })
+    expect(await isPending(closing)).toBe(true)
+    // the relay's reset of code 0 can come ahead of its answer
+    stream.write(new Uint8Array(100))
+    relay.send({ type: 'ok', id: idOf(request) })
+    await closing
+    expect(await reader.read()).toEqual({ done: true, value: undefined })
+    await vi.waitFor(() => expect(stream.desiredSize()).toBe(1))
+    stream.reset(ResetCode.CLOSED)
+    expect(await isPending(socket.reset())).toBe(false)
+    // the hello, the connect and the one close
+    expect(relay.packets).toHaveLength(3)
+  })
+
+  it('reads the relay\'s reset of code 0 as a clean end', async () => {
+    const { relay, session } = await opened()
+    const { socket, stream } = await connected(relay, session)
+    const reader = socket.readable.getReader()
+    stream.reset(ResetCode.CLOSED)
+    expect(await reader.read()).toEqual({ done: true, value: undefined })
+  })
+
+  it('resets with TcpReset', async () => {
+    const { relay, session } = await opened()
+    const { socket } = await connected(relay, session)
+    const resetting = socket.reset()
+    expect(await answer(relay, (id) => ({ type: 'ok', id }))).toMatchObject({ type: 'tcpReset', socket: 5 })
+    await resetting
+  })
+
+  it('holds back only its own stream when nobody reads it', async () => {
+    const { relay, session } = await opened(Feature.AUTH)
+    const { stream } = await connected(relay, session)
+    for (let chunk = 0; chunk < 16; chunk++) stream.write(new Uint8Array(64 * 1024))
+    const other = await connected(relay, session, 6)
+    other.stream.write(Uint8Array.of(9))
+    expect((await other.socket.readable.getReader().read()).value).toEqual(Uint8Array.of(9))
+    const cleared = session.clearAuth()
+    await answer(relay, (id) => ({ type: 'ok', id }))
+    await cleared
+  })
+
+  it('errors its readable with the session\'s error when the session ends', async () => {
+    const { relay, session } = await opened()
+    const { socket } = await connected(relay, session)
+    relay.close(CloseCode.RESTARTING, 'the relay is stopping')
+    expect(await outcome(socket.readable.getReader().read())).toMatchObject({ code: ErrorCode.OTHER })
+    expect(await session.closed).toEqual({ code: CloseCode.RESTARTING, reason: 'the relay is stopping' })
+  })
+})
+
+describe('a TCP listener', () => {
+  const listening = async (relay: FakeRelay, session: Session) => {
+    const listen = session.tcpListen(ANY)
+    await answer(relay, (id) => ({ type: 'socket', id, socket: 4, local: v4('0.0.0.0', 4000) }))
+    return listen
+  }
+
+  it('gives each accepted connection with its stream', async () => {
+    const { relay, session } = await opened(Feature.LISTEN)
+    const listener = await listening(relay, session)
+    expect(listener).toMatchObject({ id: 4, local: v4('0.0.0.0', 4000) })
+    relay.send({ type: 'accepted', listener: 4, socket: 9, local: v4('192.0.2.1', 4000), remote: SITE })
+    await settle()
+    relay.open(9).write(Uint8Array.of(3))
+    const { value: connection } = await listener.connections.getReader().read()
+    expect(connection).toMatchObject({ id: 9, remote: SITE })
+    expect((await connection!.readable.getReader().read()).value).toEqual(Uint8Array.of(3))
+  })
+
+  it('resolves closed with the code of the relay\'s Closed notice, and ends its connections', async () => {
+    const { relay, session } = await opened(Feature.LISTEN)
+    const listener = await listening(relay, session)
+    relay.send({ type: 'closed', socket: 4, code: ErrorCode.OTHER })
+    expect(await listener.closed).toBe(ErrorCode.OTHER)
+    expect((await listener.connections.getReader().read()).done).toBe(true)
+  })
+
+  it('closes with TcpUnlisten, and closes a connection accepted after that', async () => {
+    const { relay, session } = await opened(Feature.LISTEN)
+    const listener = await listening(relay, session)
+    const closing = listener.close()
+    expect(await answer(relay, (id) => ({ type: 'ok', id }))).toMatchObject({ type: 'tcpUnlisten', socket: 4 })
+    await closing
+    expect(await listener.closed).toBeUndefined()
+    const late = relay.open(10)
+    relay.send({ type: 'accepted', listener: 4, socket: 10, local: v4('192.0.2.1', 4000), remote: SITE })
+    expect(await relay.next()).toMatchObject({ type: 'tcpClose', socket: 10 })
+    await vi.waitFor(() => expect(late.seen.cancelled).toBe(true))
+  })
+
+  it('resolves closed with undefined when the session ends', async () => {
+    const { relay, session } = await opened(Feature.LISTEN)
+    const listener = await listening(relay, session)
+    session.close()
+    expect(await listener.closed).toBeUndefined()
+  })
+})
+
+describe('a UDP socket over WebTransport', () => {
+  it('sends datagrams until its stream comes, then sends and reads on the stream', async () => {
+    const { relay, session } = await opened()
+    const udp = await bound(relay, session)
+    const writer = udp.writable.getWriter()
+    await writer.write({ remote: SITE, data: Uint8Array.of(1) })
+    expect(relay.sentDatagrams).toEqual([{ socket: 7, remote: SITE, data: Uint8Array.of(1) }])
+
+    const stream = relay.open(7)
+    await settle()
+    await writer.write({ remote: SITE, data: Uint8Array.of(2) })
+    await writer.write({ data: Uint8Array.of(3) })
+    const sent = concat(
+      encodeFramedUdpPacket({ socket: 7, remote: SITE, data: Uint8Array.of(2) }),
+      encodeFramedUdpPacket({ socket: 7, data: Uint8Array.of(3) }),
+    )
+    await vi.waitFor(() => expect(stream.received()).toEqual(concat(u32(7), sent)))
+    expect(relay.sentDatagrams).toHaveLength(1)
+
+    // a frame split across reads, then one in a datagram
+    const framed = encodeFramedUdpPacket({ socket: 7, remote: RELAY_END, data: Uint8Array.of(4, 4) })
+    stream.write(framed.subarray(0, 6))
+    stream.write(framed.subarray(6))
+    const reader = udp.readable.getReader()
+    expect((await reader.read()).value).toEqual({ remote: RELAY_END, data: Uint8Array.of(4, 4) })
+    relay.datagram({ socket: 7, remote: SITE, data: Uint8Array.of(5) })
+    expect((await reader.read()).value).toEqual({ remote: SITE, data: Uint8Array.of(5) })
+  })
+
+  it('opens a stream of its own when none came in 8 seconds', async () => {
+    vi.useFakeTimers()
+    const { relay, session } = await opened()
+    const udp = await bound(relay, session)
+    await vi.advanceTimersByTimeAsync(7999)
+    expect(relay.uplinks).toHaveLength(0)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(relay.uplinks).toHaveLength(1)
+    await udp.writable.getWriter().write({ remote: SITE, data: Uint8Array.of(6) })
+    const sent = encodeFramedUdpPacket({ socket: 7, remote: SITE, data: Uint8Array.of(6) })
+    await vi.waitFor(() => expect(relay.uplinks[0]!.received()).toEqual(concat(u32(7), sent)))
+    expect(relay.sentDatagrams).toEqual([])
+  })
+
+  it('resolves closed with the code of the relay\'s Closed notice, and ends its readable', async () => {
+    const { relay, session } = await opened()
+    const udp = await bound(relay, session)
+    relay.send({ type: 'closed', socket: 7, code: ErrorCode.CAPACITY })
+    expect(await udp.closed).toBe(ErrorCode.CAPACITY)
+    expect((await udp.readable.getReader().read()).done).toBe(true)
+  })
+
+  it('closes with UdpClose, and resolves closed with undefined', async () => {
+    const { relay, session } = await opened()
+    const udp = await bound(relay, session)
+    const closing = udp.close()
+    expect(await answer(relay, (id) => ({ type: 'ok', id }))).toMatchObject({ type: 'udpClose', socket: 7 })
+    await closing
+    expect(await udp.closed).toBeUndefined()
+  })
+
+  it('holds at most 4 MiB unread for one socket and 32 MiB for the session, and drops the rest', async () => {
+    const { relay, session } = await opened()
+    const data = new Uint8Array(65_536)
+    const sockets: UdpSocket[] = []
+    for (let socket = 10; socket < 19; socket++) sockets.push(await bound(relay, session, socket))
+    for (const { id } of sockets) {
+      for (let packet = 0; packet < 70; packet++) relay.datagram({ socket: id, remote: SITE, data })
+    }
+    // datagrams are taken in order, so once this one is read every one before it was taken or dropped
+    const last = await bound(relay, session, 19)
+    relay.datagram({ socket: 19, remote: SITE, data: Uint8Array.of(0) })
+    expect((await last.readable.getReader().read()).value?.data).toEqual(Uint8Array.of(0))
+    // each packet counts its payload and 256 bytes: 63 fit in 4 MiB, 8 sockets of them leave room for 6 more
+    const reads = async (socket: UdpSocket, expected: number) => {
+      const reader = socket.readable.getReader()
+      for (let packet = 0; packet < expected; packet++) expect((await reader.read()).value?.data.byteLength).toBe(65_536)
+      relay.datagram({ socket: socket.id, remote: SITE, data: Uint8Array.of(1) })
+      expect((await reader.read()).value?.data).toEqual(Uint8Array.of(1))
+      reader.releaseLock()
+    }
+    await reads(sockets[8]!, 6)
+    await reads(sockets[0]!, 63)
+  })
+})
+
+describe('a UDP socket over the WebSocket mux', () => {
+  it('reads the stream the relay opens toward it before the reply, and sends datagrams', async () => {
+    vi.useFakeTimers()
+    const { relay, session } = await opened(0, 'websocket')
+    const binding = session.udpBind(ANY)
+    const request = await relay.next()
+    const stream = relay.open(7, false)
+    relay.send({ type: 'socket', id: idOf(request), socket: 7, local: v4('0.0.0.0', 5000) })
+    const udp = await binding
+    stream.write(encodeFramedUdpPacket({ socket: 7, remote: SITE, data: Uint8Array.of(1) }))
+    expect((await udp.readable.getReader().read()).value).toEqual({ remote: SITE, data: Uint8Array.of(1) })
+    await vi.advanceTimersByTimeAsync(8000)
+    await udp.writable.getWriter().write({ remote: SITE, data: Uint8Array.of(2) })
+    expect(relay.sentDatagrams).toEqual([{ socket: 7, remote: SITE, data: Uint8Array.of(2) }])
+  })
+})
+
+describe('the relay\'s features', () => {
+  it('are checked before a request is sent', async () => {
+    const { relay, session } = await opened(0)
+    const attempts: Promise<unknown>[] = [
+      session.lookup(QUERY),
+      session.tcpConnect({ name: 'example.com', port: 443 }),
+      session.tcpListen(ANY),
+      session.authenticate(Uint8Array.of(1)),
+      session.clearAuth(),
+    ]
+    for (const attempt of attempts) expect(await outcome(attempt)).toMatchObject({ code: ErrorCode.UNSUPPORTED })
+    await settle()
+    expect(relay.packets).toHaveLength(1)
+  })
+
+  it('let a connect by name ask for the name\'s A records', async () => {
+    const { relay, session } = await opened(Feature.DNS)
+    session.tcpConnect({ name: 'example.com', port: 443 }).catch(() => {})
+    expect(await relay.next()).toMatchObject({ type: 'tcpConnectName', port: 443, query: dnsQuery('example.com', 'A') })
+  })
+})
+
+describe('two sessions', () => {
+  it('share nothing', async () => {
+    const one = await opened(Feature.AUTH)
+    const two = await opened(Feature.AUTH)
+    const cleared = [one.session.clearAuth(), two.session.clearAuth()]
+    const [first, second] = [await one.relay.next(), await two.relay.next()]
+    expect(idOf(first)).toBe(idOf(second))
+    one.relay.send({ type: 'ok', id: idOf(first) })
+    two.relay.send({ type: 'ok', id: idOf(second) })
+    await Promise.all(cleared)
+
+    let drained = 0
+    one.session.draining.then(() => { drained++ })
+    two.session.draining.then(() => { drained += 10 })
+    one.relay.send({ type: 'draining' })
+    await vi.waitFor(() => expect(drained).toBe(1))
+
+    // a socket id retired in one is a new socket in the other
+    const udp = await bound(one.relay, one.session, 7)
+    const closing = udp.close()
+    await answer(one.relay, (id) => ({ type: 'ok', id }))
+    await closing
+    await connected(two.relay, two.session, 7)
+
+    one.session.close()
+    expect(await one.session.closed).toMatchObject({ code: CloseCode.NORMAL })
+    const again = two.session.clearAuth()
+    await answer(two.relay, (id) => ({ type: 'ok', id }))
+    await again
+  })
+})

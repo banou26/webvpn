@@ -8,7 +8,7 @@ Real TCP and UDP sockets for a web page, through a relay, over WebTransport with
 - [`crates/webvpn-server`](crates/webvpn-server): the relay as a library: sessions, sockets, both carriers, and the policy a relay's operator plugs in.
 - [`crates/webvpnd`](crates/webvpnd): the relay as a program, set up by environment variables. The
   [`Dockerfile`](Dockerfile) builds it into an image.
-- [`packages/client`](packages/client): `@webvpn/client`, so far the protocol in TypeScript.
+- [`packages/client`](packages/client): `@webvpn/client`, the client for a page or a worker: sessions over WebTransport or the WebSocket mux, with TCP and UDP sockets, listeners and name lookups.
 - [`site`](site): the webvpn.dev site, whose protocol page is the spec above.
 
 ```sh

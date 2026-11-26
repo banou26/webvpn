@@ -20,7 +20,17 @@
   "scripts": {
     "build": "vp build && tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vp test run"
+    "test": "vp test run",
+    "test:unit": "vp test run --project unit",
+    "test:browser": "vp test run --project browser"
+  },
+  "dependencies": {
+    "@banou/ponyfill": "^0.0.11"
+  },
+  "devDependencies": {
+    "@vitest/browser": "5.0.5",
+    "@vitest/browser-playwright": "5.0.5",
+    "playwright": "^1.56.0"
   },
   "repository": {
     "type": "git",
