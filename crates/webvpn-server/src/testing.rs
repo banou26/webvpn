@@ -16,7 +16,7 @@ use crate::transport::{SendHalf, Transport};
 pub(crate) const WAIT: Duration = Duration::from_secs(5);
 
 /// The bytes each direction of a stream holds unread before its writer waits.
-const STREAM_BUFFER: usize = 64 * 1024;
+pub(crate) const STREAM_BUFFER: usize = 64 * 1024;
 
 impl SendHalf for DuplexStream {}
 
@@ -46,7 +46,10 @@ pub(crate) struct MemoryTransport {
     opened: mpsc::UnboundedSender<Stream>,
     datagrams: Mutex<mpsc::UnboundedReceiver<Vec<u8>>>,
     streams: Mutex<mpsc::UnboundedReceiver<DuplexStream>>,
+    to_client: mpsc::UnboundedSender<Vec<u8>>,
     closed: watch::Sender<Closed>,
+    /// Makes every stream the relay opens fail, as on a session with no room for more streams.
+    pub refuse_streams: bool,
 }
 
 /// The client's side of an in-memory session.
@@ -54,6 +57,7 @@ pub(crate) struct Client {
     opened: mpsc::UnboundedReceiver<Stream>,
     datagrams: mpsc::UnboundedSender<Vec<u8>>,
     streams: mpsc::UnboundedSender<DuplexStream>,
+    from_relay: mpsc::UnboundedReceiver<Vec<u8>>,
     closed: watch::Receiver<Closed>,
 }
 
@@ -62,13 +66,22 @@ pub(crate) fn session(peer: IpAddr) -> (MemoryTransport, Client) {
     let (opened, opened_by_relay) = mpsc::unbounded_channel();
     let (datagrams_to_relay, datagrams) = mpsc::unbounded_channel();
     let (streams_to_relay, streams) = mpsc::unbounded_channel();
+    let (to_client, from_relay) = mpsc::unbounded_channel();
     let (closed, closed_by_relay) = watch::channel(None);
-    let transport =
-        MemoryTransport { peer, opened, datagrams: Mutex::new(datagrams), streams: Mutex::new(streams), closed };
+    let transport = MemoryTransport {
+        peer,
+        opened,
+        datagrams: Mutex::new(datagrams),
+        streams: Mutex::new(streams),
+        to_client,
+        closed,
+        refuse_streams: false,
+    };
     let client = Client {
         opened: opened_by_relay,
         datagrams: datagrams_to_relay,
         streams: streams_to_relay,
+        from_relay,
         closed: closed_by_relay,
     };
     (transport, client)
@@ -76,6 +89,9 @@ pub(crate) fn session(peer: IpAddr) -> (MemoryTransport, Client) {
 
 impl MemoryTransport {
     fn open(&self, opened: Opened) -> Result<(DuplexStream, DuplexStream)> {
+        if self.refuse_streams {
+            bail!("the session has no room for more streams");
+        }
         let (relay_send, client_recv) = duplex(STREAM_BUFFER);
         let (client_send, relay_recv) = duplex(STREAM_BUFFER);
         let send = (opened != Opened::Uni).then_some(client_send);
@@ -103,8 +119,8 @@ impl Transport for MemoryTransport {
         });
     }
 
-    fn send_datagram(&self, _data: Vec<u8>) -> Result<()> {
-        bail!("the in-memory transport carries no datagrams toward the client")
+    fn send_datagram(&self, data: Vec<u8>) -> Result<()> {
+        self.to_client.send(data).map_err(|_| anyhow!("the client is gone"))
     }
 
     async fn control_stream(&self) -> Result<(DuplexStream, DuplexStream)> {
@@ -149,6 +165,14 @@ impl Client {
     /// Sends one datagram, which the relay's `recv_datagram` returns.
     pub(crate) fn send_datagram(&self, datagram: Vec<u8>) {
         self.datagrams.send(datagram).expect("the relay is there");
+    }
+
+    /// The next datagram the relay sent with `send_datagram`.
+    pub(crate) async fn datagram(&mut self) -> Vec<u8> {
+        timeout(WAIT, self.from_relay.recv())
+            .await
+            .expect("the relay sends a datagram in time")
+            .expect("the relay is gone")
     }
 
     /// Opens a stream toward the relay, which its `accept_uni` returns, and gives the client's end.

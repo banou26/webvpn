@@ -602,7 +602,7 @@ async fn accept_upload_streams<T: Transport, S: Session>(
 /// Reads a stream a client opened for a UDP socket: the socket id once, which routing does not use since every
 /// packet names its own socket, then `[u32 length][UdpPacket]` until the client finishes it. A frame over the limit
 /// ends this stream only; a packet that cannot be read, or that the budget cannot hold, is dropped alone.
-async fn read_upload_stream(
+pub(crate) async fn read_upload_stream(
     stream: &mut (impl AsyncRead + Unpin),
     queue: &mpsc::Sender<QueuedDatagram>,
     budget: &Arc<Semaphore>,
