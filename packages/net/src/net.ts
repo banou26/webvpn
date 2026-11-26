@@ -165,9 +165,12 @@ class Socket extends Duplex {
       }, (error: unknown) => this._fail(error))
   }
 
-  // The relay closes in order on `close`, sending the peer what it holds of this side, and resets on `reset`. Node
-  // emits 'close' once the handle closed, a turn of the event loop later, so what destroy() put on the next tick (a
-  // write's callback, then 'error') comes first; a timer is that turn here, and also where `process.nextTick` is one
+  // The relay closes in order on `close`, sending the peer what it holds of this side, as Linux sends what Node handed
+  // it before the close, and resets on `reset`. The writer is left alone: aborting it would drop what the browser has
+  // not sent yet, and the relay takes that reset as a half close (spec/protocol.md, TCP), so the peer would read a
+  // cut stream as whole. Node emits 'close' once the handle closed, a turn of the event loop later, so what destroy()
+  // put on the next tick (a write's callback, then 'error') comes first; a timer is that turn here, and also where
+  // `process.nextTick` is one
   _destroy(error: Error | null, callback: Callback): void {
     this._destroyError = error ?? undefined
     clearTimeout(this._timer)

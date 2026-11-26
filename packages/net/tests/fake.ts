@@ -52,6 +52,7 @@ export const fakeSocket = (local = address('10.0.0.1', 40000), remote = address(
         if (endError) throw endError
         state.finished = true
       },
+      abort: () => { teardown.push('abort') },
     }),
     setOption: async (option) => {
       await step()

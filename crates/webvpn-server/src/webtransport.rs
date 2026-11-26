@@ -503,6 +503,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_client_s_reset_of_its_side_of_a_socket_s_stream_is_a_half_close_toward_the_peer() {
+        let listener = TcpListener::bind(loopback()).await.unwrap();
+        let remote = listener.local_addr().unwrap();
+        let served = served(local(), Config::default());
+        let (connection, mut control) = served.open().await;
+        let socket = tcp_connect(&mut control, 1, remote).await;
+        let (mut peer, _) = within(listener.accept()).await.unwrap();
+        let (mut send, mut recv) = socket_stream(&connection, socket).await;
+
+        within(send.write_all(b"sent")).await.unwrap();
+        within(peer.read_exact(&mut [0; 4])).await.unwrap();
+        send.reset(VarInt::from_u32(0)).unwrap();
+        let end = within(peer.read(&mut [0; 16])).await;
+        assert_eq!(end.expect("the peer was reset"), 0, "the peer read more than the client sent");
+
+        within(peer.write_all(b"after")).await.unwrap();
+        let mut after = [0; 5];
+        within(recv.read_exact(&mut after)).await.unwrap();
+        assert_eq!(&after, b"after", "the peer's bytes still reach the client");
+    }
+
+    #[tokio::test]
     async fn the_tuned_config_keeps_its_numbers_and_its_congestion_controller() {
         let (identity, hash) = identity();
         let config = server_config(ServerConfig::builder().with_bind_address(loopback()), identity);

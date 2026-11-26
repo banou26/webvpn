@@ -41,6 +41,8 @@ webpack and esbuild have the same setting, `resolve.alias` and `alias`. The pack
 - The `lookup` event, and `connect` options other than `host`, `port` and `allowHalfOpen`.
 - The relay looks host names up, A records only, and needs its `DNS` feature for them; a server needs its `LISTEN`
   feature.
+- A failed connect to a host name names the host in its message, where Node names the address it tried, and has no
+  `address`: the relay does not say which address of the name it tried.
 - `server.close()` emits `close` once the relay closed the listener, without waiting for the accepted sockets to end.
 - `bytesWritten` counts what the relay took, not what waits in the buffer.
 - A socket option set before `connect`, or one the relay refuses, emits `error`. `setTypeOfService` keeps the value

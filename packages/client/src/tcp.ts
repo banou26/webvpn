@@ -15,7 +15,10 @@ const PEER_RESET_WAIT_MS = 1000
  * `readable` carries the peer's bytes and ends when the peer finished its side. It errors with a `WebVpnError` of
  * `CONNECTION_RESET` when the peer reset the connection, and with the session's error when the session ended first.
  * `writable` carries bytes to the peer, and closing it is a half close: the peer reads its end, and `readable` stays
- * open. After `close` or `reset`, `readable` ends without an error, and what the relay still sends is dropped.
+ * open. Aborting it resets this side of the socket's stream, which the relay also takes as a half close, so the peer
+ * reads a clean end and never gets what the abort dropped; over the WebSocket mux it ends `readable` too. `reset` is
+ * the way to reset the connection. After `close` or `reset`, `readable` ends without an error, and what the relay
+ * still sends is dropped.
  */
 export type TcpSocket = {
   /** The socket's id in its session. */

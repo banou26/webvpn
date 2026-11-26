@@ -1,4 +1,4 @@
-import { ErrorCode } from '@webvpn/client'
+import { ErrorCode, parseIp } from '@webvpn/client'
 
 // errno and the text libuv gives for each code, on Linux
 const ERRORS = {
@@ -38,14 +38,17 @@ export const lookupError = (hostname: string) =>
   Object.assign(new Error(`getaddrinfo ENOTFOUND ${hostname}`), { errno: -3008, code: 'ENOTFOUND', syscall: 'getaddrinfo', hostname })
 
 /**
- * What a socket fails with when its connect to `address` does, as Node 26.12.1 gives it on Linux (measured
- * 2026-11-15): refused, timed out, no route to the host or its network.
+ * What a socket fails with when its connect to `host` does, as Node 26.12.1 gives it on Linux (measured
+ * 2026-11-15): refused, timed out, no route to the host or its network. For a host name with one address, Node names
+ * that address in the message and in `address`, and the name nowhere (measured 2026-11-27). The relay connects to the
+ * name's first A record and its refusal does not say which address that was, so the message names the host instead,
+ * and `address`, which Node only ever gives an address, is left out.
  */
-const connectError = (code: Code, address: string, port: number) => {
-  const local = AT_ONCE.has(code) ? ` - Local (${address.includes(':') ? '::' : '0.0.0.0'}:0)` : ''
+const connectError = (code: Code, host: string, port: number) => {
+  const local = AT_ONCE.has(code) ? ` - Local (${host.includes(':') ? '::' : '0.0.0.0'}:0)` : ''
   return Object.assign(
-    new Error(`connect ${code} ${address}:${port}${local}`),
-    { errno: ERRORS[code][0], code, syscall: 'connect', address, port },
+    new Error(`connect ${code} ${host}:${port}${local}`),
+    { errno: ERRORS[code][0], code, syscall: 'connect', ...parseIp(host) ? { address: host } : {}, port },
   )
 }
 
@@ -59,8 +62,9 @@ const listenError = (code: Code, address: string, port: number) => Object.assign
 )
 
 /**
- * Node's error for a request the relay refused, as a connect to or a listen on `address`, or on the socket's data
- * (`read`). A `WebVpnError` whose code Node has no counterpart for, and any other error, comes back as it is.
+ * Node's error for a request the relay refused, as a connect to `address` (an address or a host name) or a listen on
+ * it, or on the socket's data (`read`). A `WebVpnError` whose code Node has no counterpart for, and any other error,
+ * comes back as it is.
  */
 export const nodeError = (error: unknown, syscall: 'connect' | 'listen' | 'read', address = '', port = 0) => {
   const { name, code } = (error ?? {}) as { name?: unknown, code?: unknown }

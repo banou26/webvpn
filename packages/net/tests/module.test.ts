@@ -116,6 +116,21 @@ describe('a failed connect', () => {
     expect(log).toEqual(['close true'])
   })
 
+  // Node 26.12.1 on Linux (measured 2026-11-27) names the one address of the name it tried, which the relay does not
+  // say, so the host takes its place in the message and `address` is left out
+  it.each([
+    [ErrorCode.CONNECTION_REFUSED, 'connect ECONNREFUSED echo.test:6881', { errno: -111, code: 'ECONNREFUSED' }],
+    [ErrorCode.NETWORK_UNREACHABLE, 'connect ENETUNREACH echo.test:6881 - Local (0.0.0.0:0)', { errno: -101, code: 'ENETUNREACH' }],
+  ])('to a host name is Node\'s error with no address: code %i', async (code, message, fields) => {
+    const relay = fakeProvider()
+    relay.next = relayError(code)
+    const socket = createNet(relay.provider).connect(6881, 'echo.test')
+    const error = await new Promise<Error>((resolve) => socket.once('error', resolve))
+    const expected = { ...fields, syscall: 'connect', port: 6881 }
+    expect(error).toMatchObject({ message, ...expected })
+    expect(Object.keys(error)).toEqual(Object.keys(expected))
+  })
+
   // Node 26.12.1 on Linux (measured 2026-11-15): a connect to a name with no address
   it('to a name with no address is Node\'s ENOTFOUND', async () => {
     const relay = fakeProvider()

@@ -147,6 +147,8 @@ yet. The same holds for a UDP socket's stream and its `Socket` reply.
 - After the id, the stream carries the connection's bytes in both directions.
 - The client finishing its side of the stream is a half close toward the peer. The peer's half close finishes the
   relay's side.
+- The client resetting its side of the stream is a half close too: the peer reads a clean end, and what the reset
+  dropped never reaches it. A client resets the connection with `TcpReset`.
 - A peer that resets the connection makes the relay reset its side of the stream with code 1.
 - `TcpClose` ends the socket in order. `TcpReset` ends it with a reset toward the peer and drops what was not sent.
   Both are answered `Ok`, also for a socket that is already gone, and the relay then ends its side of the stream:
@@ -266,6 +268,7 @@ For a client without WebTransport, one WebSocket carries the same streams. Every
   `CREDIT` adds to it. A client credits the bytes it has taken off a stream, so a slow reader on one stream holds
   back that stream only.
 - Every other stream starts as its WebTransport twin does, with the socket id.
+- A client's `RESET` ends both sides of the stream.
 - A UDP socket has one stream toward the client, and its datagrams toward the relay travel as `DATAGRAM` frames. A
   `DATAGRAM` frame's stream is 0.
 - A receiver ignores a message shorter than five bytes and a kind it does not know.

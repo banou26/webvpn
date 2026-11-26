@@ -112,6 +112,18 @@ describe.for(['webtransport', 'websocket'] as const)('over %s', (transport) => {
     expect(await listener.closed).toEqual({ by: 'client' })
   })
 
+  it('reaches the peer as a half close when the page aborts its side of a socket', async () => {
+    const session = await opened()
+    const listener = await session.tcpListen({ ip: LOOPBACK, port: 0 })
+    const dialed = commands.dialTcp(listener.local.port, 'from node')
+    const { value: connection } = await limited(listener.connections.getReader().read())
+    expect(await readText(connection!.readable)).toBe('from node')
+    await connection!.writable.abort()
+    // a reset toward Node would reject this with ECONNRESET
+    expect(await limited(dialed)).toBe('')
+    await listener.close()
+  })
+
   it('echoes over UDP', async () => {
     const session = await opened()
     const udp = await session.udpBind({ ip: LOOPBACK, port: 0 })

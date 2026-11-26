@@ -29,7 +29,8 @@ export type Net = {
    * `bytesWritten`, and, beyond Node, `setSendBufferSize` and `setRecvBufferSize`. Unlike Node: `bytesWritten`
    * counts what the relay took, not what waits in the buffer; setting an option before `connect` emits an `error`,
    * and so does an option the relay refuses; the type of service is kept but not sent; there is no `lookup` event,
-   * and `connect` reads only `host`, `port` and `allowHalfOpen`.
+   * and `connect` reads only `host`, `port` and `allowHalfOpen`; a failed connect to a host name names the host in
+   * its message where Node names the address it tried, and has no `address`, since the relay does not say which.
    */
   Socket: typeof NodeNet.Socket,
   /**

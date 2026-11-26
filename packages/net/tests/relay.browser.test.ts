@@ -51,7 +51,7 @@ describe('net over a real relay', () => {
     expect([socket.bytesRead, socket.bytesWritten]).toEqual([8, 8])
   })
 
-  it('fails a connect to a closed port with Node\'s ECONNREFUSED', async () => {
+  it('fails a connect to a closed port with Node\'s ECONNREFUSED, by address and by name', async () => {
     const server = net.createServer().listen(0, '127.0.0.1')
     await once(server, 'listening')
     const { port } = server.address() as { port: number }
@@ -67,6 +67,11 @@ describe('net over a real relay', () => {
       port,
     })
     expect(socket.destroyed).toBe(true)
+
+    // the relay does not say which address of the name it tried
+    const named = await once<Error>(net.connect(port, 'echo.test'), 'error')
+    expect(named).toMatchObject({ message: `connect ECONNREFUSED echo.test:${port}`, errno: -111, code: 'ECONNREFUSED', syscall: 'connect', port })
+    expect(Object.keys(named)).toEqual(['errno', 'code', 'syscall', 'port'])
   })
 
   it('accepts a connection the rig dials from Node on a server', async () => {
