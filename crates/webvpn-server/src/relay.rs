@@ -1,12 +1,27 @@
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
-use webvpn_proto::features;
+use tokio::sync::Semaphore;
+use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
+use tracing::debug;
+use webvpn_proto::{close, features};
 
 use crate::dns::Dns;
 use crate::hairpin::Hairpin;
-use crate::metrics::Metrics;
-use crate::policy::Auth;
+use crate::metrics::{Counter, Metrics};
+use crate::policy::{Auth, Policy};
+use crate::session::{self, Setup, UdpCarrier};
+use crate::transport::Transport;
+
+/// The reason a session closed with `RESTARTING` carries, for a person.
+const STOPPING: &str = "the relay is stopping";
+
+// once for the sessions to send their close and release, once more for QUIC to deliver its closes (that second wait
+// is the WebTransport carrier's, on its endpoint)
+const CLOSE_WAIT: Duration = Duration::from_secs(2);
 
 /// How a relay is set up, apart from its policy.
 #[derive(Debug, Clone)]
@@ -22,6 +37,12 @@ pub struct Config {
     /// The relay's own public addresses. A connection to one of them goes to the socket another session bound on
     /// that port, and is refused when there is none.
     pub own_addresses: Vec<IpAddr>,
+    /// Sessions the relay holds in setup at once, from the client's arrival to its hello. A client that arrives
+    /// while that many are setting up is closed with `SESSION_LIMIT` at once.
+    pub max_pending_sessions: usize,
+    /// How long a session's setup may take, from the client's arrival (for a carrier of your own, from its call to
+    /// [`Relay::serve`]) to its hello. A session past it is closed with `PROTOCOL_ERROR`.
+    pub setup_timeout: Duration,
 }
 
 impl Default for Config {
@@ -32,6 +53,8 @@ impl Default for Config {
             dns_upstream: None,
             max_sockets_per_session: 4096,
             own_addresses: Vec::new(),
+            max_pending_sessions: 256,
+            setup_timeout: Duration::from_secs(15),
         }
     }
 }
@@ -69,5 +92,401 @@ impl Shared {
             Auth::Required => bits |= features::AUTH | features::AUTH_REQUIRED,
         }
         bits
+    }
+}
+
+/// A relay: its policy, its settings and the sessions it holds. Cheap to clone; clones are the same relay.
+///
+/// A carrier accepts clients and hands each one's session to [`serve`](Self::serve); [`stop`](Self::stop) ends them
+/// all. Nothing in it is process-wide, so one process may run several relays, each with its own counts.
+pub struct Relay<P: Policy>(Arc<Inner<P>>);
+
+struct Inner<P> {
+    policy: P,
+    shared: Arc<Shared>,
+    /// One permit for each session still setting up.
+    setup_slots: Arc<Semaphore>,
+    /// Cancelled when the stop begins: sessions are told `Draining`, and no new one is served.
+    stopping: CancellationToken,
+    /// Cancelled when the stop's grace has passed: every session still open is closed.
+    closing: CancellationToken,
+    /// Holds a token for each session from its admission until it ends.
+    sessions: TaskTracker,
+}
+
+impl<P: Policy> Clone for Relay<P> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<P: Policy> Relay<P> {
+    /// A relay that admits sessions under `policy` and runs them as `config` says. It serves nothing until a carrier
+    /// hands it a session.
+    pub fn new(policy: P, config: Config) -> Self {
+        let setup_slots = Arc::new(Semaphore::new(config.max_pending_sessions.min(Semaphore::MAX_PERMITS)));
+        Self(Arc::new(Inner {
+            policy,
+            shared: Shared::new(config),
+            setup_slots,
+            stopping: CancellationToken::new(),
+            closing: CancellationToken::new(),
+            sessions: TaskTracker::new(),
+        }))
+    }
+
+    /// The policy the relay asks about every session.
+    pub fn policy(&self) -> &P {
+        &self.0.policy
+    }
+
+    /// What this relay counted since it was made, and nothing another relay counted.
+    pub fn metrics(&self) -> &Metrics {
+        &self.0.shared.metrics
+    }
+
+    /// Sessions open right now, the ones still setting up included.
+    pub fn sessions(&self) -> usize {
+        self.0.sessions.len()
+    }
+
+    /// The relay's counters in the Prometheus text format, with [`sessions`](Self::sessions) as the open sessions
+    /// gauge. See [`Metrics::render`].
+    pub fn render_metrics(&self) -> String {
+        self.metrics().render(self.sessions())
+    }
+
+    /// Runs one client's session on `transport` until it ends, on any carrier. `carrier` says how the session's UDP
+    /// sockets reach the client, and must match what the carrier's clients read.
+    ///
+    /// The session is closed with:
+    /// - `RESTARTING` once [`stop`](Self::stop) was called, before the policy is asked;
+    /// - `SESSION_LIMIT` when [`Config::max_pending_sessions`] sessions are setting up already, and with the policy's
+    ///   message when [`Policy::admit`] refuses it;
+    /// - `PROTOCOL_ERROR` when its setup, from this call to the client's hello, takes longer than
+    ///   [`Config::setup_timeout`] or the client breaks the protocol, and `VERSION_MISMATCH` when the client's
+    ///   version does not suit;
+    /// - `NORMAL` when the client ends it.
+    ///
+    /// Nothing is returned: what ended a session is logged at debug level, and names no client.
+    pub async fn serve<T: Transport>(&self, transport: T, carrier: UdpCarrier) {
+        let Some(setup) = self.pending() else {
+            transport.close(close::SESSION_LIMIT, "the relay holds as many sessions in setup as it allows").await;
+            return;
+        };
+        self.serve_setup(transport, carrier, setup).await;
+    }
+
+    /// A place among the sessions still setting up, with a deadline [`Config::setup_timeout`] from now. A built-in
+    /// carrier takes it as a client arrives, before its own handshake, and hands it to
+    /// [`serve_setup`](Self::serve_setup), so the place and the deadline cover the handshake too. `None` when
+    /// [`Config::max_pending_sessions`] are setting up: the carrier then turns the client away.
+    pub(crate) fn pending(&self) -> Option<Setup> {
+        let permit = self.0.setup_slots.clone().try_acquire_owned().ok()?;
+        Some(Setup { permit, deadline: Instant::now() + self.0.shared.config.setup_timeout })
+    }
+
+    /// [`serve`](Self::serve) with the place and deadline a carrier took itself, from [`pending`](Self::pending).
+    pub(crate) async fn serve_setup<T: Transport>(&self, transport: T, carrier: UdpCarrier, setup: Setup) {
+        let relay = &*self.0;
+        if self.stopping() {
+            transport.close(close::RESTARTING, STOPPING).await;
+            return;
+        }
+        let policy = match relay.policy.admit(transport.remote_ip()) {
+            Ok(policy) => policy,
+            Err(refusal) => {
+                transport.close(close::SESSION_LIMIT, &refusal.message).await;
+                return;
+            }
+        };
+        let _open = relay.sessions.token();
+        let transport = Arc::new(transport);
+        let (shared, auth, draining) = (relay.shared.clone(), relay.policy.auth(), relay.stopping.clone());
+        let run = session::run(transport.clone(), policy, shared, auth, carrier, setup, draining);
+        tokio::pin!(run);
+        tokio::select! {
+            ended = &mut run => match ended {
+                Ok(()) => transport.close(close::NORMAL, "the session ended").await,
+                Err(error) => debug!("a session ended: {error:#}"),
+            },
+            () = relay.closing.cancelled() => {
+                relay.shared.metrics.count(Counter::DrainCapCloses);
+                // The close goes out while the session's streams are still open, so the client reads the reason
+                // before any of its sockets ends.
+                transport.close(close::RESTARTING, STOPPING).await;
+                // The close ends the carrier's streams, so `run` then ends by itself and stops the tasks it started,
+                // which a dropped `run` would leave running.
+                let _ = tokio::time::timeout(CLOSE_WAIT, run).await;
+            }
+        }
+    }
+
+    /// True once [`stop`](Self::stop) was called. A carrier's listener refuses whatever arrives from then on.
+    pub fn stopping(&self) -> bool {
+        self.0.stopping.is_cancelled()
+    }
+
+    /// Resolves once [`stop`](Self::stop) was called.
+    pub async fn stopped(&self) {
+        self.0.stopping.cancelled().await
+    }
+
+    /// Stops the relay. Every open session is sent `Draining` once and keeps its sockets, and every session served
+    /// from now on is closed with `RESTARTING`. Then waits until every session ended or `grace` passed, closes the
+    /// ones still open with `RESTARTING` (counted as [`Counter::DrainCapCloses`]), and waits up to 2 seconds more for
+    /// those closes to go out. Returns at once when no session is open. Calling it again is harmless.
+    pub async fn stop(&self, grace: Duration) {
+        let relay = &*self.0;
+        relay.stopping.cancel();
+        relay.sessions.close();
+        let _ = tokio::time::timeout(grace, relay.sessions.wait()).await;
+        relay.closing.cancel();
+        let _ = tokio::time::timeout(CLOSE_WAIT, relay.sessions.wait()).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    use futures::FutureExt;
+    use tokio::io::AsyncReadExt;
+    use tokio::task::JoinHandle;
+    use tokio::time::timeout;
+    use webvpn_proto::{ClientPacket, Hello, RelayPacket};
+
+    use super::*;
+    use crate::policy::Basic;
+    use crate::testing::{self, Client, Control, Opened, WAIT};
+
+    const CLIENT: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+    const GRACE: Duration = Duration::from_secs(1);
+
+    async fn within<F: Future>(future: F) -> F::Output {
+        timeout(WAIT, future).await.expect("done in time")
+    }
+
+    fn relay() -> Relay<Basic> {
+        Relay::new(Basic::default(), Config::default())
+    }
+
+    /// A policy that admits no session.
+    fn full() -> Basic {
+        let mut policy = Basic::default();
+        policy.max_sessions = 0;
+        policy
+    }
+
+    /// A client arriving at `relay`, and the task serving its session.
+    fn arrive<P: Policy>(relay: &Relay<P>) -> (Client, JoinHandle<()>) {
+        let (transport, client) = testing::session(CLIENT);
+        let relay = relay.clone();
+        (client, tokio::spawn(async move { relay.serve(transport, UdpCarrier::Bidi).await }))
+    }
+
+    /// A client whose session is past its hello exchange.
+    struct Open {
+        client: Client,
+        control: Control,
+        serving: JoinHandle<()>,
+    }
+
+    impl Open {
+        async fn ask(&mut self, request: ClientPacket) -> RelayPacket {
+            self.control.send(request).await;
+            self.control.next().await.expect("the relay answers")
+        }
+
+        /// Binds a UDP socket, and gives the address it was bound on.
+        async fn bind(&mut self) -> SocketAddr {
+            let local = "127.0.0.1:0".parse().unwrap();
+            let RelayPacket::Socket { id: 1, local, .. } = self.ask(ClientPacket::UdpBind { id: 1, local }).await else {
+                panic!("the bind was not answered with its socket");
+            };
+            local
+        }
+    }
+
+    async fn open<P: Policy>(relay: &Relay<P>) -> Open {
+        let (mut client, serving) = arrive(relay);
+        let mut control = client.control().await;
+        assert!(matches!(control.next().await, Some(RelayPacket::Hello(_))));
+        control.send(ClientPacket::Hello(Hello::new(0, "client under test"))).await;
+        Open { client, control, serving }
+    }
+
+    fn stop(relay: &Relay<Basic>, grace: Duration) -> JoinHandle<()> {
+        let relay = relay.clone();
+        tokio::spawn(async move { relay.stop(grace).await })
+    }
+
+    #[tokio::test]
+    async fn a_served_session_answers_counts_as_open_and_is_closed_normal_when_it_ends() {
+        let relay = relay();
+        let mut open = open(&relay).await;
+        open.bind().await;
+        assert_eq!(relay.sessions(), 1);
+
+        drop(open.control);
+        within(open.serving).await.unwrap();
+        assert_eq!(open.client.closed().await.0, close::NORMAL);
+        assert_eq!(relay.sessions(), 0);
+        let counted = [Counter::Sessions, Counter::SocketsOpened, Counter::SocketsClosed];
+        assert_eq!(counted.map(|counter| relay.metrics().get(counter)), [1, 1, 1]);
+    }
+
+    #[tokio::test]
+    async fn a_refused_admission_closes_with_session_limit_and_the_policy_s_message() {
+        let policy = full();
+        let refusal = policy.admit(CLIENT).unwrap_err();
+        let relay = Relay::new(policy, Config::default());
+        let (mut client, serving) = arrive(&relay);
+        within(serving).await.unwrap();
+        assert_eq!(client.closed().await, (close::SESSION_LIMIT, refusal.message.into_owned()));
+        assert_eq!(relay.sessions(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_client_arriving_while_setup_is_full_is_closed_with_session_limit_and_setup_has_its_timeout() {
+        let config = Config { max_pending_sessions: 1, setup_timeout: Duration::from_secs(3), ..Config::default() };
+        let relay = Relay::new(Basic::default(), config);
+        let start = Instant::now();
+        let (mut silent, first) = arrive(&relay);
+        let mut never_answered = silent.control().await;
+        assert!(matches!(never_answered.next().await, Some(RelayPacket::Hello(_))));
+
+        let (mut turned_away, second) = arrive(&relay);
+        within(second).await.unwrap();
+        assert_eq!(turned_away.closed().await.0, close::SESSION_LIMIT);
+
+        assert_eq!(silent.closed().await.0, close::PROTOCOL_ERROR);
+        assert_eq!(start.elapsed(), Duration::from_secs(3));
+        within(first).await.unwrap();
+        // The place the silent client held is free again.
+        open(&relay).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_sends_draining_and_waits_for_a_session_that_ends_within_the_grace() {
+        let relay = relay();
+        let mut open = open(&relay).await;
+        let stopping = stop(&relay, Duration::from_secs(60));
+        assert_eq!(open.control.next().await, Some(RelayPacket::Draining));
+        within(relay.stopped()).await;
+        assert!(relay.stopping());
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert!(!stopping.is_finished());
+
+        drop(open.control);
+        within(stopping).await.unwrap();
+        assert_eq!(open.client.closed().await.0, close::NORMAL);
+        assert_eq!(relay.metrics().get(Counter::DrainCapCloses), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_returns_at_once_when_no_session_is_open_and_twice_is_harmless() {
+        let relay = relay();
+        let start = Instant::now();
+        for _ in 0..2 {
+            within(relay.stop(Duration::from_secs(60))).await;
+        }
+        assert_eq!(start.elapsed(), Duration::ZERO);
+        assert!(relay.stopping());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_session_open_after_the_grace_is_closed_restarting_and_counted_before_its_sockets_end() {
+        let relay = relay();
+        let mut open = open(&relay).await;
+        open.bind().await;
+        let mut socket = open.client.next_stream().await;
+        assert_eq!(socket.opened, Opened::UdpBi);
+        within(socket.recv.read_exact(&mut [0; 4])).await.unwrap();
+
+        let start = Instant::now();
+        let stopping = stop(&relay, GRACE);
+        assert_eq!(open.control.next().await, Some(RelayPacket::Draining));
+        assert_eq!(open.client.closed().await.0, close::RESTARTING);
+        assert_eq!(start.elapsed(), GRACE);
+        assert!(socket.recv.read(&mut [0; 1]).now_or_never().is_none(), "the socket's stream is still open");
+        assert_eq!(relay.metrics().get(Counter::DrainCapCloses), 1);
+
+        // A carrier's close ends the session's streams, which ends the session.
+        drop(open.control);
+        within(stopping).await.unwrap();
+        within(open.serving).await.unwrap();
+        assert_eq!(relay.sessions(), 0);
+        assert_eq!(relay.metrics().get(Counter::SocketsClosed), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_session_that_ignores_the_close_is_dropped_once_the_close_had_its_time() {
+        let relay = relay();
+        let mut open = open(&relay).await;
+        let start = Instant::now();
+        within(relay.stop(GRACE)).await;
+        assert_eq!(open.client.closed().await.0, close::RESTARTING);
+        within(open.serving).await.unwrap();
+        assert_eq!(start.elapsed(), GRACE + CLOSE_WAIT);
+        assert_eq!(relay.sessions(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_client_arriving_after_stop_is_closed_restarting_before_the_policy_is_asked() {
+        let relay = Relay::new(full(), Config::default());
+        within(relay.stop(GRACE)).await;
+        let (mut client, serving) = arrive(&relay);
+        within(serving).await.unwrap();
+        assert_eq!(client.closed().await.0, close::RESTARTING);
+        assert_eq!(relay.metrics().get(Counter::DrainCapCloses), 0);
+    }
+
+    #[tokio::test]
+    async fn two_relays_in_one_process_keep_their_counts_and_their_stop_apart() {
+        let (one, two) = (relay(), relay());
+        let mut on_one = open(&one).await;
+        let mut on_two = open(&two).await;
+        on_one.bind().await;
+        assert_eq!(on_two.ask(ClientPacket::AuthClear { id: 1 }).await, RelayPacket::Ok { id: 1 });
+        assert_eq!((one.sessions(), two.sessions()), (1, 1));
+        let sockets = |relay: &Relay<Basic>| relay.metrics().get(Counter::SocketsOpened);
+        assert_eq!((sockets(&one), sockets(&two)), (1, 0));
+
+        let stopping = stop(&two, Duration::from_secs(60));
+        assert_eq!(on_two.control.next().await, Some(RelayPacket::Draining));
+        drop(on_two.control);
+        within(stopping).await.unwrap();
+        assert!(!one.stopping());
+        assert_eq!(on_one.ask(ClientPacket::AuthClear { id: 2 }).await, RelayPacket::Ok { id: 2 });
+        assert_eq!((one.sessions(), two.sessions()), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn render_keeps_the_old_names_and_no_line_carries_an_address() {
+        let relay = relay();
+        let mut open = open(&relay).await;
+        let local = open.bind().await;
+        let rendered = relay.render_metrics();
+        for expected in [
+            "# TYPE webvpn_active_connections_total gauge",
+            "webvpn_active_connections_total 1",
+            "webvpn_active_sockets 1",
+            "webvpn_handshakes_total 1",
+            r#"webvpn_bandwidth_bytes_total{direction="down"} 0"#,
+            r#"webvpn_udp_dropped_total{reason="channel_full"} 0"#,
+        ] {
+            assert!(rendered.lines().any(|line| line == expected), "{expected:?} is not in\n{rendered}");
+        }
+        let addresses = [CLIENT.to_string(), local.ip().to_string(), local.port().to_string()];
+        for line in rendered.lines() {
+            assert!(!addresses.iter().any(|address| line.contains(address.as_str())), "{line:?} names an address");
+            let labels = line.split_once('{').map_or("", |(_, labels)| labels);
+            for label in labels.split(',').filter(|label| !label.is_empty()) {
+                let key = label.split('=').next().unwrap();
+                assert!(["direction", "reason", "outcome", "stage"].contains(&key), "{line:?} has label {key}");
+            }
+        }
     }
 }
