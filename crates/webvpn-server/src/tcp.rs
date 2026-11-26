@@ -405,7 +405,6 @@ pub(crate) mod tests {
             transport: Arc::new(transport),
             policy: Arc::new(policy),
             relay,
-            peer: CLIENT,
             replies,
             udp_carrier: UdpCarrier::Bidi,
             upload_budget: Arc::new(Semaphore::new(0)),

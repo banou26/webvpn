@@ -510,7 +510,6 @@ mod tests {
                 transport: Arc::new(transport),
                 policy: Arc::new(self.policy),
                 relay: self.relay,
-                peer: IpAddr::from([127, 0, 0, 1]),
                 replies,
                 udp_carrier: self.carrier,
                 upload_budget: Arc::new(Semaphore::new(self.budget)),

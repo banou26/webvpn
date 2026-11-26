@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::io::ErrorKind;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -52,7 +52,6 @@ pub(crate) struct SessionHandle<T: Transport, S: Session> {
     pub transport: Arc<T>,
     pub policy: Arc<S>,
     pub relay: Arc<Shared>,
-    pub peer: IpAddr,
     /// Frames for the client's control stream, written in order by the session.
     pub replies: mpsc::Sender<RelayPacket>,
     pub udp_carrier: UdpCarrier,
@@ -141,8 +140,7 @@ pub(crate) async fn run<T: Transport, S: Session>(
         Ok::<_, std::io::Error>(())
     }));
 
-    let peer = transport.remote_ip();
-    let lookup_slots = relay.dns.as_ref().map(|dns| dns.visitor_slots(peer));
+    let lookup_slots = relay.dns.as_ref().map(|dns| dns.visitor_slots(transport.remote_ip()));
     let (register, mut register_queue) = mpsc::channel(100);
     let mut state = State {
         sockets: Registry::new(relay.config.max_sockets_per_session, relay.metrics.clone()),
@@ -150,7 +148,6 @@ pub(crate) async fn run<T: Transport, S: Session>(
             transport,
             policy: Arc::new(policy),
             relay,
-            peer,
             replies,
             udp_carrier,
             upload_budget: Arc::new(Semaphore::new(UDP_UPLOAD_QUEUED_BYTES_BUDGET)),
@@ -670,6 +667,7 @@ pub(crate) async fn read_upload_stream(
 
 #[cfg(test)]
 mod tests {
+    use std::net::IpAddr;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 

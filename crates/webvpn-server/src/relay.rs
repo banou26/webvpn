@@ -19,9 +19,10 @@ use crate::transport::Transport;
 /// The reason a session closed with `RESTARTING` carries, for a person.
 const STOPPING: &str = "the relay is stopping";
 
-// once for the sessions to send their close and release, once more for QUIC to deliver its closes (that second wait
-// is the WebTransport carrier's, on its endpoint)
-const CLOSE_WAIT: Duration = Duration::from_secs(2);
+/// How long a stop waits for closes to go out. It is spent twice: once for the sessions to send their close and
+/// release, once more for QUIC to deliver its closes (that second wait is the WebTransport carrier's, on its
+/// endpoint).
+pub(crate) const CLOSE_WAIT: Duration = Duration::from_secs(2);
 
 /// How a relay is set up, apart from its policy.
 #[derive(Debug, Clone)]
@@ -38,7 +39,9 @@ pub struct Config {
     /// that port, and is refused when there is none.
     pub own_addresses: Vec<IpAddr>,
     /// Sessions the relay holds in setup at once, from the client's arrival to its hello. A client that arrives
-    /// while that many are setting up is closed with `SESSION_LIMIT` at once.
+    /// while that many are setting up is turned away at once: the WebSocket listener drops its connection before
+    /// reading anything, the WebTransport acceptor refuses it at the QUIC level, and [`Relay::serve`] closes the
+    /// session with `SESSION_LIMIT`.
     pub max_pending_sessions: usize,
     /// How long a session's setup may take, from the client's arrival (for a carrier of your own, from its call to
     /// [`Relay::serve`]) to its hello. A session past it is closed with `PROTOCOL_ERROR`.
@@ -138,6 +141,18 @@ impl<P: Policy> Relay<P> {
     /// The policy the relay asks about every session.
     pub fn policy(&self) -> &P {
         &self.0.policy
+    }
+
+    /// Reads the relay's own global IPv6 addresses from the system now, then again every second, and treats each as
+    /// one of [`Config::own_addresses`]: a connection to one of them is routed to the socket a session bound on that
+    /// port, or refused, and so is a connection to another address on the same link. Linux only: elsewhere the
+    /// system lists none and nothing is added. Call it once, before the relay takes sessions. The reading ends
+    /// within a second of the relay, its clones and its sessions being dropped.
+    ///
+    /// An error means the system's list exists but could not be read or parsed, and nothing was started; it names no
+    /// address. A later read that fails keeps the addresses read before.
+    pub fn watch_own_ipv6(&self) -> std::io::Result<()> {
+        self.0.shared.hairpin.watch_kernel_ipv6()
     }
 
     /// What this relay counted since it was made, and nothing another relay counted.

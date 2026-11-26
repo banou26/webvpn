@@ -21,12 +21,9 @@ use wtransport::quinn::{self, MtuDiscoveryConfig};
 use wtransport::{Connection, Endpoint, Identity, RecvStream, SendStream, ServerConfig, VarInt};
 
 use crate::policy::Policy;
-use crate::relay::Relay;
+use crate::relay::{Relay, CLOSE_WAIT};
 use crate::session::{Setup, UdpCarrier};
 use crate::transport::{SendHalf, Transport};
-
-/// How long [`serve`] gives the endpoint to send the closes still owed.
-const CLOSE_WAIT: Duration = Duration::from_secs(2);
 
 /// The endpoint settings the relay's sessions are tuned for, with `identity` as the endpoint's certificate.
 ///

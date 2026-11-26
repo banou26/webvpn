@@ -46,9 +46,13 @@ pub trait Transport: Send + Sync + 'static {
         Duration::ZERO
     }
 
-    /// Closes the session with a `webvpn_proto::close` code and a reason for a person, and resolves once the client
-    /// can have read them. A carrier that drops its connection sooner loses both, and a client then reads the end
-    /// of its streams as its peers closing.
+    /// Closes the session with a `webvpn_proto::close` code and a reason for a person, and resolves once the carrier
+    /// holds the close and will send it before its connection ends. A carrier that drops its connection sooner loses
+    /// both, and a client then reads the end of its streams as its peers closing.
+    ///
+    /// Each carrier documents how far its close reaches. The WebTransport carrier's default close is a QUIC
+    /// connection close, whose code and reason a native client reads and a browser does not; its `close-capsule`
+    /// feature sends the close a browser reads, a CLOSE_WEBTRANSPORT_SESSION capsule.
     fn close(&self, code: u32, reason: &str) -> impl Future<Output = ()> + Send;
 
     /// Sends one UDP packet outside any stream. Used for a UDP socket whose stream could not be opened.
