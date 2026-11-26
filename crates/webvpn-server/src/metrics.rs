@@ -55,7 +55,7 @@ pub enum Counter {
     DnsAnswered,
     /// Name lookups the resolver did not answer.
     DnsFailed,
-    /// Name lookups refused because the session had too many waiting.
+    /// Name lookups refused because the session had too many waiting or the query was over 512 bytes.
     DnsRefused,
     /// Sockets sessions took in: connections, listeners and UDP sockets.
     SocketsOpened,

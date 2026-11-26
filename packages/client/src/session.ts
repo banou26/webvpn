@@ -24,9 +24,10 @@ import { udpSocket } from './udp'
 
 const AGENT = '@webvpn/client'
 
+// the relay answers a lookup within 5 seconds and every other request but a connect at once (spec/protocol.md,
+// Limits), so the client waits longer and reads the relay's own answer rather than giving up first
 const REQUEST_TIMEOUT_MS = 10_000
-// the relay answers a connect within 10 seconds of its request (TCP_SETUP_TIMEOUT: a lookup, the connect and the
-// stream's setup), so the client waits longer and reads the relay's own answer rather than giving up first
+// the relay answers a connect within 10 seconds (spec/protocol.md, Limits), the same way
 const CONNECT_TIMEOUT_MS = 12_000
 // a WebTransport session can be ready and then never deliver its control stream (seen on Firefox)
 const SETUP_TIMEOUT_MS = 4000

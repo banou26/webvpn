@@ -13,7 +13,7 @@ export const MuxKind = {
   FIN: 2,
   /** Empty, or the `u32` code a stream reset carries. */
   RESET: 3,
-  /** Client only: one `UdpPacket`. */
+  /** Client only: one `UdpPacket`, on stream 0. */
   DATAGRAM: 4,
   /** Client only: a `u32` of further bytes the relay may send on the stream. */
   CREDIT: 5,

@@ -18,7 +18,7 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, warn};
 use webvpn_proto::{close, ClientPacket, DecodeError, ErrorCode, Hello, RelayPacket, UdpPacket};
 
-use crate::dns::MAX_LOOKUPS_PER_SESSION;
+use crate::dns::{self, MAX_LOOKUPS_PER_SESSION};
 use crate::metrics::{Counter, Metrics};
 use crate::policy::{Auth, Direction, Refusal, Session, SocketKind};
 use crate::relay::{Shared, STOPPING};
@@ -480,6 +480,9 @@ impl<T: Transport, S: Session> State<T, S> {
     /// Starts a lookup, which answers itself. Gives the session's own answer when it may not start.
     fn lookup(&mut self, id: u32, query: Vec<u8>) -> Option<RelayPacket> {
         if let Some(refusal) = self.refusal_to_open(self.handle.relay.dns.is_some()) {
+            return Some(error(id, refusal));
+        }
+        if let Err(refusal) = dns::check_query(&query, &self.handle.relay.metrics) {
             return Some(error(id, refusal));
         }
         if self.lookups.len() >= MAX_LOOKUPS_PER_SESSION {
@@ -1055,6 +1058,20 @@ mod tests {
             ClientPacket::TcpListen { id: 3, local: address(ANY) },
         ];
         assert_eq!(harness.codes(requests).await, [1, 2, 3].map(|id| (id, ErrorCode::UNSUPPORTED)));
+    }
+
+    #[tokio::test]
+    async fn a_query_over_512_bytes_is_refused_and_one_of_512_goes_to_the_resolver() {
+        let nobody = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap();
+        let config = Config { dns_upstream: Some(format!("http://{nobody}/dns-query")), ..Config::default() };
+        let mut harness = Harness::open(config, Auth::None).await;
+        let lookups = [
+            ClientPacket::DnsQuery { id: 1, query: vec![0; dns::MAX_QUERY_BYTES] },
+            ClientPacket::DnsQuery { id: 2, query: vec![0; dns::MAX_QUERY_BYTES + 1] },
+        ];
+        assert_eq!(harness.codes(lookups).await, [(1, ErrorCode::LOOKUP_FAILED), (2, ErrorCode::REFUSED)]);
+        let metrics = &harness.relay.metrics;
+        assert_eq!((metrics.get(Counter::DnsFailed), metrics.get(Counter::DnsRefused)), (1, 1));
     }
 
     #[tokio::test]

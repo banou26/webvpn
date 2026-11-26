@@ -8,6 +8,10 @@ use std::time::Duration;
 
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use tokio::sync::Semaphore;
+use webvpn_proto::ErrorCode;
+
+use crate::metrics::{Counter, Metrics};
+use crate::policy::Refusal;
 
 /// Lookups one session may have waiting or in flight. One more is answered `CAPACITY`.
 pub(crate) const MAX_LOOKUPS_PER_SESSION: usize = 256;
@@ -18,11 +22,12 @@ const MAX_LOOKUPS: usize = 64;
 // so the names of one visitor that never answer wait on each other and leave the other slots to everyone else
 const MAX_VISITOR_LOOKUPS: usize = 16;
 
-// counted from the call, the wait for a slot included, so a lookup that cannot finish is answered, not left waiting
+// counted from the call, the wait for a slot included, so a lookup that cannot finish is answered, not left waiting:
+// the protocol's limit on the relay's answer to a lookup (spec/protocol.md, Limits)
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 
-// one question fits in about 270 bytes
-const MAX_QUERY_BYTES: usize = 512;
+/// The longest query the protocol carries (spec/protocol.md, Limits). One question fits in about 270 bytes.
+pub(crate) const MAX_QUERY_BYTES: usize = 512;
 
 // the longest DNS message, since its length over TCP is two bytes
 const MAX_ANSWER_BYTES: usize = u16::MAX as usize;
@@ -63,12 +68,9 @@ impl Dns {
         slots
     }
 
-    /// The resolver's whole answer to `query`, or `None` when it gave none in time. A query over 512 bytes is not
-    /// sent. No reason is kept, since an error could carry what was asked.
+    /// The resolver's whole answer to `query`, or `None` when it gave none in time. The caller refuses a query over
+    /// [`MAX_QUERY_BYTES`] first, with [`check_query`]. No reason is kept, since an error could carry what was asked.
     pub async fn lookup(&self, visitor_slots: &Semaphore, query: Vec<u8>) -> Option<Vec<u8>> {
-        if query.len() > MAX_QUERY_BYTES {
-            return None;
-        }
         let answer = async {
             let _visitor_slot = visitor_slots.acquire().await.ok()?;
             let _slot = self.slots.acquire().await.ok()?;
@@ -87,6 +89,16 @@ impl Dns {
         };
         tokio::time::timeout(LOOKUP_TIMEOUT, answer).await.ok().flatten()
     }
+}
+
+/// `REFUSED`, counted as [`Counter::DnsRefused`], for a query longer than [`MAX_QUERY_BYTES`], which then never
+/// reaches the resolver. The refusal names nothing of the query.
+pub(crate) fn check_query(query: &[u8], metrics: &Metrics) -> Result<(), Refusal> {
+    if query.len() <= MAX_QUERY_BYTES {
+        return Ok(());
+    }
+    metrics.count(Counter::DnsRefused);
+    Err(Refusal::new(ErrorCode::REFUSED, "a DNS query holds at most 512 bytes"))
 }
 
 // IPv4 as it is, IPv6 as its /64: a client may take any address in its /64, so all of them are one visitor
@@ -300,11 +312,12 @@ mod tests {
         assert_eq!(dns.lookup(&slots, query("oversized.example")).await, None);
     }
 
-    #[tokio::test]
-    async fn a_query_longer_than_a_question_needs_is_not_sent() {
-        let (dns, seen) = upstream().await;
-        assert_eq!(dns.lookup(&Semaphore::new(1), vec![0; MAX_QUERY_BYTES + 1]).await, None);
-        assert_eq!(seen.load(Ordering::SeqCst), 0);
+    #[test]
+    fn a_query_over_512_bytes_is_refused_and_counted() {
+        let metrics = Metrics::default();
+        assert_eq!(check_query(&[0; MAX_QUERY_BYTES], &metrics), Ok(()));
+        let refusal = check_query(&[0; MAX_QUERY_BYTES + 1], &metrics).unwrap_err();
+        assert_eq!((refusal.code, metrics.get(Counter::DnsRefused)), (ErrorCode::REFUSED, 1));
     }
 
     #[tokio::test]

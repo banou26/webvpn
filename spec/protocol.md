@@ -25,8 +25,8 @@ Either side may close the session at any time. Closing it closes every socket it
 [u8 type][u32 length][body: length bytes]
 ```
 
-- A frame toward the relay holds at most 4096 body bytes, a frame toward the client at most 131072. A longer one
-  ends the session with `PROTOCOL_ERROR`.
+- A frame holds at most the body bytes [Limits](#limits) gives for its direction. A longer one ends the session with
+  `PROTOCOL_ERROR`.
 - A receiver ignores bytes that follow the fields it knows, so a later version may append fields.
 - Every request body starts with `id u32`, chosen by the client and unique among its unanswered requests. Every reply
   starts with the id it answers. A relay answers a request type it does not know with `Error` and `UNSUPPORTED`.
@@ -128,6 +128,9 @@ A credential is opaque to the protocol: the relay's operator defines its bytes a
 `Auth` at any time and again later, for example with a renewed credential. `Ok` means the session now carries that
 identity. `Error` leaves the session exactly as it was. `AuthClear` returns the session to no identity.
 
+A credential, like every request body, fits one client frame: it holds at most 4092 bytes, the frame's 4096 less the
+`id`.
+
 ## Sockets
 
 The relay names each socket with a `u32` id. Ids rise through a session and are never used twice, and TCP sockets,
@@ -135,7 +138,7 @@ listeners and UDP sockets share them. A relay that runs out of ids refuses new s
 
 For every TCP socket the relay opens one bidirectional stream whose first four bytes are the socket id. The stream and
 the reply that names the socket may arrive in either order, so a client holds a stream whose socket it does not know
-yet.
+yet. The same holds for a UDP socket's stream and its `Socket` reply.
 
 ### TCP
 
@@ -210,6 +213,9 @@ reads as loss on the path.
 in `DnsAnswer`, so a name with no records is an answer and not an error. A relay applies its egress rules to the
 address a name resolves to exactly as to an address the client gave.
 
+A query, in `DnsQuery` or in `TcpConnectName`, holds at most 512 bytes. The relay answers a longer one `REFUSED`, and
+does not send it to its resolver.
+
 ## Draining
 
 A relay that is about to stop sends `Draining` once. The session keeps its sockets until they end or the relay
@@ -260,5 +266,20 @@ For a client without WebTransport, one WebSocket carries the same streams. Every
   `CREDIT` adds to it. A client credits the bytes it has taken off a stream, so a slow reader on one stream holds
   back that stream only.
 - Every other stream starts as its WebTransport twin does, with the socket id.
-- A UDP socket has one stream toward the client, and its datagrams toward the relay travel as `DATAGRAM` frames.
+- A UDP socket has one stream toward the client, and its datagrams toward the relay travel as `DATAGRAM` frames. A
+  `DATAGRAM` frame's stream is 0.
 - A receiver ignores a message shorter than five bytes and a kind it does not know.
+
+## Limits
+
+| What | Limit |
+| --- | --- |
+| A frame's body toward the relay | 4096 bytes |
+| A frame's body toward the client | 131072 bytes |
+| A DNS query | 512 bytes |
+| A UDP payload | 65536 bytes |
+| The relay's answer to `TcpConnect` or `TcpConnectName` | within 10 seconds |
+| The relay's answer to `DnsQuery` | within 5 seconds |
+
+A client waits a little longer than each answer's limit before it gives up, so it reads the relay's own answer, such as
+`TIMED_OUT` or `LOOKUP_FAILED`.

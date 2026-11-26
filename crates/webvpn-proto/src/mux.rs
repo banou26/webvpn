@@ -14,7 +14,7 @@ pub mod kind {
     pub const FIN: u8 = 2;
     /// Empty, or the `u32` code a stream reset carries.
     pub const RESET: u8 = 3;
-    /// Client only: one `UdpPacket`.
+    /// Client only: one `UdpPacket`, on stream 0.
     pub const DATAGRAM: u8 = 4;
     /// Client only: a `u32` of further bytes the relay may send on the stream.
     pub const CREDIT: u8 = 5;

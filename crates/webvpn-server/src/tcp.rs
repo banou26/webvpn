@@ -15,7 +15,7 @@ use tokio::time::{sleep, timeout, timeout_at, Instant};
 use tracing::debug;
 use webvpn_proto::{ClientPacket, ErrorCode, RelayPacket, TcpOption};
 
-use crate::dns::first_a_record;
+use crate::dns::{check_query, first_a_record};
 use crate::hairpin;
 use crate::metrics::Counter;
 use crate::policy::{Direction, Proto, Refusal, Session};
@@ -29,7 +29,8 @@ pub(crate) const MAX_CLIENT_SOCKET_BUFFER_BYTES: usize = 256 * 1024;
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 
 // Bounds a connect from its request to its reply, which a lookup, the connect and the stream's setup (5 + 8 + 5
-// seconds) would otherwise exceed. It must stay below the 12 seconds a client's library waits for that reply.
+// seconds) would otherwise exceed: the protocol's limit on the relay's answer to a connect (spec/protocol.md, Limits),
+// under the 12 seconds a client's library waits for it.
 const TCP_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 // After a close (not a reset) the relay keeps writing to the peer what the client sent before it, as Node's destroy()
@@ -109,12 +110,13 @@ pub(crate) async fn accepted<T: Transport, S: Session>(
     run(&session, socket, Origin::Listener(listener), requests, connection, streams).await
 }
 
-/// The address the first A record of the answer to `query` names, at `port`. Neither refusal names the query.
+/// The address the first A record of the answer to `query` names, at `port`. No refusal names the query.
 async fn resolve<T: Transport, S: Session>(
     session: &SessionHandle<T, S>,
     port: u16,
     query: Vec<u8>,
 ) -> Result<SocketAddr, Refusal> {
+    check_query(&query, &session.relay.metrics)?;
     let answer = match (&session.relay.dns, &session.lookup_slots) {
         (Some(dns), Some(slots)) => dns.lookup(slots, query).await,
         _ => None,
@@ -810,8 +812,14 @@ pub(crate) mod tests {
         assert_eq!(code(&no_address), (2, ErrorCode::NAME_NOT_FOUND));
         let (failed, ..) = start(&session, &mut replies, 3, name(3)).await;
         assert_eq!(code(&failed), (3, ErrorCode::LOOKUP_FAILED));
+        let mut long = query(1);
+        long.resize(crate::dns::MAX_QUERY_BYTES + 1, 0);
+        let request = ClientPacket::TcpConnectName { id: 4, port, query: long };
+        let (refused, ..) = start(&session, &mut replies, 4, request).await;
+        assert_eq!(code(&refused), (4, ErrorCode::REFUSED));
         let metrics = &session.relay.metrics;
-        assert_eq!((metrics.get(Counter::DnsAnswered), metrics.get(Counter::DnsFailed)), (2, 1));
+        let counted = [Counter::DnsAnswered, Counter::DnsFailed, Counter::DnsRefused].map(|of| metrics.get(of));
+        assert_eq!(counted, [2, 1, 1], "the long query never reached the resolver");
     }
 
     #[tokio::test]
