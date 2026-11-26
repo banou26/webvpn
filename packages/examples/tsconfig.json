@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["esnext", "dom", "dom.iterable"],
+    "types": ["node"],
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "paths": {
+      "@webvpn/client": ["../client/src/index.ts"],
+      "@webvpn/dgram": ["../dgram/src/index.ts"],
+      "@webvpn/net": ["../net/src/index.ts"]
+    }
+  },
+  "include": ["src", "../net/src/readable-stream.d.ts"]
+}

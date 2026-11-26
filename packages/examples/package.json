@@ -1,0 +1,16 @@
+{
+  "name": "@webvpn/examples",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The code samples of the WebVPN site, type-checked against the packages' sources",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@webvpn/client": "^0.1.0",
+    "@webvpn/dgram": "^0.1.0",
+    "@webvpn/net": "^0.1.0"
+  }
+}
