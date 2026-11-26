@@ -15,6 +15,13 @@ export default defineConfig({
         { label: 'The protocol', slug: 'docs/protocol' },
         { label: 'Using it from an app', slug: 'docs/using' },
         {
+          label: 'Run your own relay',
+          items: [
+            { label: 'Running a relay', slug: 'docs/running-a-relay' },
+            { label: 'Embedding the relay', slug: 'docs/embedding' },
+          ],
+        },
+        {
           label: 'The public relays',
           items: [
             { label: 'Relays', slug: 'docs/relays' },

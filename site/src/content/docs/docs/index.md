@@ -15,7 +15,7 @@ A web page can fetch and open WebSockets, but it cannot dial a TCP port, send a 
 ## The parts
 
 - **The protocol:** small binary control frames on one stream, and a stream of its own for each socket. See [how it works](/docs/how-it-works/), and [the protocol](/docs/protocol/) for every frame.
-- **The relay:** a server written in Rust that holds the sessions and opens an operating system socket for each socket an app opens.
+- **The relay:** a server written in Rust that holds the sessions and opens an operating system socket for each socket an app opens. [`webvpnd`](/docs/running-a-relay/) runs it as a program, and the `webvpn-server` library [embeds it](/docs/embedding/) in a program of your own, under a policy of your own.
 - **The client library:** [`@fkn/lib`](/docs/using/). Its `net` and `dgram` modules work like Node's and its `dns` module looks names up, so code written for Node, such as a torrent engine or an IRC client, can run in a page.
 
 ## The public relays
@@ -27,6 +27,8 @@ The public relays are in Prague and Hong Kong, run by Horion Corporation as part
 - [How it works](/docs/how-it-works/): the session, the streams, the real sockets, how a relay is chosen, and who sees what.
 - [The protocol](/docs/protocol/): every frame, code and carrier, version 0.1.
 - [Using it from an app](/docs/using/): connect, listen, UDP and lookups with `@fkn/lib`.
+- [Running a relay](/docs/running-a-relay/): host your own relay with `webvpnd`, its ports, certificate and settings.
+- [Embedding the relay](/docs/embedding/): the relay inside a Rust program, under a policy of your own.
 - [Relays](/docs/relays/): where they are, their addresses, and the fair use limits.
 - [What the relay keeps](/docs/what-the-relay-keeps/).
 - [For network operators and rights holders](/docs/network-operators/).

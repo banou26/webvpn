@@ -1,0 +1,172 @@
+---
+title: Embedding the relay
+description: Run the WebVPN relay inside a Rust program of your own, under a policy of your own, with the webvpn-server library.
+---
+
+import { Code } from '@astrojs/starlight/components'
+import embed from '../../../../../crates/webvpn-server/examples/embed.rs?raw'
+
+The `webvpn-server` crate is the relay as a library. It holds the sessions and the sockets and moves the bytes. A policy you write decides who may open a session, what a credential means, which sockets and destinations a session may use, and how fast its bytes move. [`webvpnd`](/docs/running-a-relay/) is one program built on it.
+
+A program uses the crate from a checkout of the source, with a path dependency. For a checkout in `../webvpn`, the dependencies of the [example](#an-example) are:
+
+```toml
+[dependencies]
+webvpn-server = { path = "../webvpn/crates/webvpn-server" }
+webvpn-proto = { path = "../webvpn/crates/webvpn-proto" }
+anyhow = "1"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal"] }
+```
+
+`webvpn-proto` holds the protocol's codes, which a [refusal](#refusals) carries. The two carriers are cargo features of `webvpn-server`, `webtransport` and `websocket`, both on by default. A program with one carrier turns the defaults off and names it: `default-features = false, features = ["websocket"]`.
+
+## The pieces
+
+### `Relay`
+
+`Relay<P>` is one relay: its policy `P`, its settings and the sessions it holds. `Relay::new(policy, config)` makes one, and it serves nothing until a carrier hands it a session. A relay is cheap to clone, and every clone is the same relay. Nothing in it is process-wide, so one process may run several relays, each with its own counts.
+
+- `policy()` returns the policy, for a program that reads what its policy counted.
+- `sessions()` is the number of sessions the relay holds now.
+- `metrics()` returns the relay's counters, which `get(counter)` reads one by one. `render_metrics()` renders them all in the Prometheus text format.
+- `watch_own_ipv6()` reads the relay's own global IPv6 addresses from the system now and every second after, and treats each as an own address. It works on Linux only. Call it once, before the relay takes sessions.
+- `stop(grace)` [stops the relay](#stop).
+- `stopping()` is true once `stop` was called, and `stopped()` resolves then.
+- `serve(transport, carrier)` runs one session, for a [carrier of your own](#a-carrier-of-your-own).
+
+### `Config`
+
+`Config` holds the settings apart from the policy. Start from `Config::default()` and set the fields that differ.
+
+| Field | Default | What it sets |
+| --- | --- | --- |
+| `agent` | `webvpn-server/` and the crate's version | The name in the relay's hello, for a person reading a client's log. |
+| `listen` | `true` | Whether clients may listen for inbound TCP connections. |
+| `dns_upstream` | `None` | The DNS over HTTPS endpoint (RFC 8484) that answers name lookups. `None` turns lookups off. |
+| `max_sockets_per_session` | `4096` | Sockets one session may hold at once. |
+| `own_addresses` | empty | The relay's own public addresses. A connection to one of them goes to the socket a session bound on that port, and is refused when there is none. |
+| `max_pending_sessions` | `256` | Sessions in setup at once, from the client's arrival to its hello. A client that arrives while that many are in setup is turned away at once. |
+| `setup_timeout` | 15 seconds | How long a session's setup may take. A session past it is closed with `PROTOCOL_ERROR`. |
+
+### The carriers
+
+A carrier accepts clients and hands each one's session to the relay. Each built-in carrier runs until the relay stops.
+
+**`websocket::serve(relay, listener, options)`** takes a tokio `TcpListener`. `websocket::Options::default()` serves plain `ws://` and answers every request that is not a WebSocket upgrade with `404`.
+
+- `Options::tls` takes a `watch::Receiver<Arc<ServerConfig>>`, with the `ServerConfig` of `tokio_rustls::rustls` from `tokio-rustls` 0.26, for `wss://`. A new value applies to the connections accepted after it, so a renewed certificate needs no restart. The listener speaks HTTP/1.1 only, so the config's ALPN protocols must be empty or `http/1.1`.
+- `Options::http` takes a `websocket::Handler`, an `Arc<dyn Fn(&str, &str) -> Option<String> + Send + Sync>`. Given the method and the path without its query, it returns the JSON body of a `200`, or `None` for a `404`. It runs on the async runtime, so it must answer at once. Any origin may read its answer and nothing may cache it, so it should carry counts only.
+
+`websocket::serve` returns once the relay is stopping, and drops the listener.
+
+**`webtransport::serve(relay, endpoint)`** takes an `Arc<Endpoint<Server>>` of the `wtransport` crate, at the version `webvpn-server` pins, `=0.7.2`. Make the endpoint from `webtransport::server_config(bind, identity)`, which holds the endpoint settings the relay's sessions are tuned for, with `bind` such as `ServerConfig::builder().with_bind_address(address)`. The certificate is the program's to load and renew: build the `Identity` with `Identity::load_pemfiles` or `Identity::self_signed`, and reload the endpoint with `Endpoint::reload_config(config, false)` when the certificate changes. Open sessions keep theirs. The endpoint must stay open while `webtransport::serve` runs. It returns once the stop began and every connection it took ended.
+
+### `stop`
+
+`stop(grace)` stops the relay. Every open session is sent `Draining` once and keeps its sockets. Both built-in carriers stop taking clients, and every session handed to `serve` from then on is closed with `RESTARTING`. `stop` then waits until every session ended or `grace` passed, closes the sessions still open with `RESTARTING`, and waits up to 2 seconds more for those closes to go out. It returns at once when no session is open, and calling it again is harmless.
+
+## The policy
+
+A policy is two traits. The relay asks its `Policy` once for each session, and asks the `Session` that `Policy` returns about everything that session does.
+
+### `Policy`
+
+**`admit(peer)`** is called for each client after its carrier's handshake and before the hello exchange. `peer` is the client's address as the carrier saw it. `Ok` returns the session's rules. `Err` closes the session with `SESSION_LIMIT` and the refusal's message. The value `admit` returns lives exactly as long as the session and is dropped when it ends, so what a policy counted at admission is given back in its `Drop`. The relay does not call `admit` once it is stopping, or for a client it turned away because `max_pending_sessions` sessions were in setup.
+
+**`auth()`** says whether the relay takes credentials, which the relay's hello tells every client:
+
+- `Auth::None`, the default: the relay answers a credential `UNSUPPORTED` itself, and never asks the session.
+- `Auth::Optional`: a session works without a credential and may present one.
+- `Auth::Required`: the relay answers socket requests and lookups `AUTH_REQUIRED` until `Session::authenticate` returned `Ok`.
+
+### `Session`
+
+Its methods take `&self`, and the relay may call them from several sockets' tasks at once.
+
+- **`authenticate(credential)`** is called when the client presents a credential, which it may do at any time and again later, for example with a renewed one. `Ok` gives the session that identity from then on: what it may open, and how its bytes are counted and paced, follow from it. `Err` must leave the session exactly as it was. The default refuses with `UNSUPPORTED`.
+- **`clear_auth()`** is called when the client gives its identity up, and returns the session to what `admit` made it. The default does nothing.
+- **`open_socket(kind)`** is called when the client asks for a TCP connection, a listener or a UDP socket (`SocketKind::Tcp`, `TcpListener` or `Udp`), and when one of its listeners accepted a connection (`SocketKind::Tcp`). The relay calls it after its own checks, the credential and `max_sockets_per_session`, and before the socket counts as open. `Ok` returns the socket's [permit](#permits). A refusal reaches the client under the request's id, or as `AcceptRefused` for an accepted connection, and leaves the session untouched.
+- **`check_egress(proto, target)`** decides whether the session may send to `target`, the literal address the bytes go to: a TCP connection's, after its name was looked up, the destination of every UDP datagram, a multicast group a socket joins, and the limited broadcast address when a socket turns broadcast on. The relay never asks it about its own addresses: it routes those to the sockets bound on the relay, or refuses them itself.
+- **`check_bind(proto, local)`** decides whether the session may bind `local`, for a UDP socket or a listener. Port `0` asks for any free port. The default allows every address.
+- **`relayed(direction, bytes)`** is called before `bytes` move, in both directions of every socket, and for a DNS answer as `Direction::Down`. The bytes move once the returned future resolves. The default resolves at once.
+
+### Permits
+
+A permit is the value `open_socket` returns. The relay holds it while the socket is open and drops it when the socket closes, so a ceiling on sockets gives its unit back in the permit's `Drop`. `Slot` is such a permit: `Slot::take(&held, max)` takes one unit of a shared `Arc<AtomicUsize>` unless `max` are taken, and gives it back when it is dropped. A policy with no ceiling of its own returns `()`.
+
+### Refusals
+
+A refusal is `Refusal::new(code, message)`. The code is a `webvpn_proto::ErrorCode`, which the client's library acts on, such as `REFUSED` for a target, port or option the policy refuses, `CAPACITY` for a limit the same request may pass later, or `AUTH_FAILED` for a credential that was not accepted. The message is for a person. A refusal from `admit` sends no code: the relay closes the session with `SESSION_LIMIT` and the message, which a WebSocket client reads as close code `4003`.
+
+### Pacing and counting
+
+Both go in `relayed`. A policy that meters adds `bytes` to its count and resolves at once. A policy that paces waits in the returned future until the bytes may move, for example on a budget for each session or each credential. `Direction::Up` is from the client toward its peer, and `Direction::Down` from the peer toward the client.
+
+### `Basic`
+
+`Basic` is the library's default policy, the one `webvpnd` runs. It neither paces nor meters, and takes no credential.
+
+| Field | Default | What it sets |
+| --- | --- | --- |
+| `max_sessions` | `1024` | Sessions the relay holds at once. |
+| `max_sockets` | `65536` | Sockets the relay holds at once, across every session. |
+| `allow_private_targets` | `false` | Lets sessions reach private, local and reserved addresses. |
+| `min_bind_port` | `1024` | The lowest port a session may bind. Port `0` always passes. |
+
+Make it with `let mut basic = Basic::default();` and set the fields that differ on it. Its counts are private fields, so `Basic { max_sessions: 64, ..Basic::default() }` does not compile. A policy of your own can wrap `Basic` and the `BasicSession` it admits, as the example does. `egress::is_public(ip)` is the test `Basic` applies to a destination.
+
+## An example
+
+`crates/webvpn-server/examples/embed.rs` runs a relay over the WebSocket carrier, on plain `ws://`. Its policy keeps the rules of `Basic`, requires one shared credential, and counts the bytes relayed each way. From a checkout:
+
+```sh
+export RELAY_CREDENTIAL="$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
+cargo run -p webvpn-server --example embed
+```
+
+The first line makes a random credential. A client presents the same bytes in its `Auth` request. The program prints the address it listens on, `127.0.0.1:8443` unless its first argument names another. Ctrl+C stops the relay with a 5 second grace, and the program prints the counts.
+
+<Code code={embed} lang="rust" title="crates/webvpn-server/examples/embed.rs" />
+
+## A carrier of your own
+
+A carrier of your own implements `Transport` for each client's session, and calls `Relay::serve(transport, carrier)`, which resolves when the session ends.
+
+`Transport` is one client's session on the carrier. The relay opens every stream: a client writes only on its side of a stream the relay opened, and in datagrams.
+
+- `remote_ip()` is the client's address as the carrier saw it, which `admit` is asked about.
+- `rtt()` is the smoothed round trip time, or zero, the default, where the carrier measures none.
+- `close(code, reason)` closes the session with a close code and a reason for a person, and resolves once the carrier holds the close and will send it before its connection ends.
+- `control_stream()` opens the control stream. The relay calls it exactly once, before it opens any other stream.
+- `open_bi()` opens a stream for one TCP socket.
+- `open_uni()` opens a stream that carries a UDP socket's packets toward the client only.
+- `open_udp_bi()` opens a stream that carries a UDP socket's packets both ways.
+- `send_datagram(data)` and `recv_datagram()` carry one UDP packet outside any stream.
+- `accept_uni()` returns the one stream a client opens, for a UDP socket whose own stream did not reach it. It never resolves on a carrier whose clients open no streams.
+
+The send half of each stream implements `SendHalf`, an `AsyncWrite` with two ways to end the stream at once and drop what is unsent: `fail()` for a socket whose peer reset its connection, and `abandon()` for a socket the client closed. Both do nothing by default.
+
+`carrier` is a `UdpCarrier`, and must match what the carrier's clients read:
+
+- `UdpCarrier::Bidi` gives each UDP socket one stream both ways, as over WebTransport. A socket whose stream cannot be opened in time sends its packets as datagrams instead, so only a carrier whose clients read datagrams from the relay may pick it.
+- `UdpCarrier::UniStreamRequired` gives each UDP socket one stream toward the client, as over the WebSocket mux, and the client sends its packets as datagrams. A socket whose stream cannot be opened in time is refused.
+
+`serve` closes the session with:
+
+- `RESTARTING` once the relay is stopping, before the policy is asked;
+- `SESSION_LIMIT` when `max_pending_sessions` sessions are in setup already, or when `admit` refuses;
+- `PROTOCOL_ERROR` when the setup, from the call to the client's hello, takes longer than `setup_timeout`, or when the client breaks the protocol;
+- `VERSION_MISMATCH` when the client's version does not suit;
+- `NORMAL` when the client ends the session.
+
+An accept loop of your own stops taking clients once `relay.stopping()` is true. A program with its own WebTransport accept loop wraps each accepted `wtransport::Connection` in `webtransport::WtTransport::new(connection)` and hands it to `serve` with `UdpCarrier::Bidi`.
+
+## What the library leaves to the program
+
+- **It reads no environment variable.** The settings are the `Config` and the policy the program builds.
+- **It logs no address.** It logs through `tracing`, and nothing it logs names a client. The program chooses the subscriber.
+- **It keeps no state between relays.** Each relay has its own sessions and its own counts, and writes nothing to disk. A new relay starts from nothing.
+- **It installs no signal handler.** The program waits for the signal it stops on, and calls `stop`.
+- **It raises no limit.** Every socket a client holds is an open file, so a program that holds many raises its open-files limit itself, as `webvpnd` does.
+- **It loads no certificate.** The program reads it, renews it and hands it to each carrier.
+- **It serves no health or metrics endpoint.** `render_metrics()` returns the text, and `websocket::Options::http` answers plain requests on the WebSocket port, such as a load probe.
