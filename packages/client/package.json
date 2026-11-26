@@ -1,0 +1,30 @@
+{
+  "name": "@webvpn/client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The WebVPN client: real TCP and UDP sockets for a web page, through a relay",
+  "license": "MIT",
+  "type": "module",
+  "main": "build/index.js",
+  "types": "build/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./build/index.d.ts",
+      "import": "./build/index.js"
+    }
+  },
+  "files": [
+    "build"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "vp build && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vp test run"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/banou26/webvpn.git",
+    "directory": "packages/client"
+  }
+}
