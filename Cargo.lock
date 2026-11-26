@@ -1724,6 +1724,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "futures",
+ "rcgen",
  "reqwest",
  "socket2 0.5.10",
  "tokio",

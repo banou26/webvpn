@@ -145,6 +145,11 @@ impl<P: Policy> Relay<P> {
         &self.0.shared.metrics
     }
 
+    /// The same counters as [`metrics`](Self::metrics), for a carrier's tasks that outlive a borrow of the relay.
+    pub(crate) fn shared_metrics(&self) -> Arc<Metrics> {
+        self.0.shared.metrics.clone()
+    }
+
     /// Sessions open right now, the ones still setting up included.
     pub fn sessions(&self) -> usize {
         self.0.sessions.len()
