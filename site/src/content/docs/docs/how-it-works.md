@@ -1,27 +1,26 @@
 ---
 title: How it works
-description: The session to a relay, the streams that carry each socket, the real sockets on the relay, how a relay is chosen, and what each side sees.
+description: The session to a relay, the streams that carry each socket, the real sockets on the relay, and what each side sees.
 ---
 
 ## The session
 
 A client opens one session to a relay and carries every socket over it.
 
-The session is **WebTransport**, which is HTTP/3 over QUIC, on UDP port 443 of the relay. The client uses a **WebSocket** over TLS on TCP port 8443 instead when:
+The session is **WebTransport**, which is HTTP/3 over QUIC, or a **WebSocket** over TLS where WebTransport is missing or does not open. [`webvpnd`](/docs/running-a-relay/#ports) takes WebTransport on UDP port 4433 and the WebSocket on TCP port 8443 by default. `@webvpn/client` takes the WebSocket when:
 
-- the browser has no WebTransport,
-- a WebTransport session fails to open, or does not open within 4 seconds, or
-- for a minute after a WebTransport session stalled right after it opened.
+- the browser has no WebTransport, or the page gave no WebTransport URL, or
+- the WebTransport session fails to open, or is not ready within 4 seconds by default.
 
-Both carry the same protocol. When a session ends, every socket on it closes, and the next socket call opens a new session.
+Both carry the same protocol. When a session ends, every socket on it closes.
 
 ### Where the client runs
 
-With [`@fkn/lib`](/docs/using/), the client is not in the app's own page. The library loads a frame of fkn.app, and fkn.app's code opens the session and carries the app's sockets over it. It holds the session in a shared worker where the browser has one, so pages that share fkn.app's storage in a browser share one session.
+`@webvpn/client` runs in the page or the worker that calls `connect`, and the session it opens belongs to that page or worker. Two pages that each call `connect` hold two sessions. Nothing is shared between them, and no session outlives its page.
 
 ## The protocol
 
-**Setup.** The relay opens the session's first stream, the control stream, and each side sends a hello on it: the protocol's version and, from the relay, the optional parts it offers, such as listening ports, name lookups and credentials.
+**Setup.** The relay opens the session's first stream, the control stream, and writes its hello: the protocol's version, the optional parts it offers, and the name of its implementation for a person. The optional parts are listening ports, name lookups and credentials, and the hello says whether the relay requires a credential. The client answers with its own hello. A side whose peer's version does not suit it closes the session with `VERSION_MISMATCH`. A relay that turns a client away writes a `Bye` instead of its hello.
 
 **Control frames.** Everything else on the control stream is a frame: a one-byte type, a length, then big-endian fields. The client asks to:
 
@@ -31,9 +30,13 @@ With [`@fkn/lib`](/docs/using/), the client is not in the app's own page. The li
 - bind, connect, disconnect or close a UDP socket,
 - set a socket option, such as `TCP_NODELAY`, keepalive or a buffer size,
 - look a name up,
-- present a credential, whose meaning the relay's operator defines. The public relays take a signed token that moves the session onto an account's limits.
+- present a credential, or give it up.
 
 The relay answers each request under the request's id, with the socket it opened or with an error code and a message, and announces each connection that arrives on a listening port. It numbers sockets in the order they open, and never reuses a number within a session. A frame of a type one side does not know is skipped by its length, or refused under its id, so the protocol can grow.
+
+**Credentials.** A credential is bytes whose meaning the relay's operator defines. The client may present one at any time, and again later, for example a renewed one. A refused credential leaves the session as it was. A relay that requires a credential refuses socket requests and lookups with `AUTH_REQUIRED` until the client has presented one. `webvpnd` takes the credentials listed in [`WEBVPN_CREDENTIALS`](/docs/running-a-relay/#credentials).
+
+**Draining and closing.** A relay that is about to stop sends `Draining` once. The session keeps its sockets, and the client opens new sockets on a new session. Before the relay closes a session on its own, it sends a `Bye` on the control stream, with a close code and a reason for a person, such as `RESTARTING` once it stops. The client reads the code from the `Bye`, since a browser shows a page no code of a QUIC connection's close. Over the WebSocket, the relay also closes with close code 4000 plus the session's code.
 
 [The protocol](/docs/protocol/) lists every frame, code and limit.
 
@@ -50,28 +53,18 @@ UDP rides streams rather than WebTransport datagrams because Chromium paces data
 
 For each socket the relay opens a real operating system socket, from its own address:
 
-- **A TCP connection** is dialed by the relay. Given a name, the relay looks it up and dials the first address, in the same round trip.
+- **A TCP connection** is dialed by the relay. Given a name, the relay looks it up and dials its first IPv4 address, in the same round trip.
 - **A UDP socket** is bound on the relay, and its datagrams leave from the relay's address.
 - **A listening port** is a port on the relay's address. Each connection to it is announced on the control stream and carried on a new stream.
-- **A name** is looked up by the relay. The client sends a whole DNS query, the relay sends it over HTTPS to a public resolver, Cloudflare's 1.1.1.1, and passes the answer back.
+- **A name** is looked up by the relay. The client sends a whole DNS query, the relay sends it over HTTPS to the resolver its operator set, and passes the whole answer back. A relay with no resolver set looks no name up.
 
-A relay does not connect to private or local addresses, or to the relays' own servers, except the ports apps listen on through a relay. Every byte, in both directions, is paced to the [fair use rate](/docs/relays/#fair-use-limits) of the person's address or account, DNS answers included.
-
-## How a relay is chosen
-
-The client reads the relay directory, for the public relays [fkn.app/v1/relays](https://fkn.app/v1/relays), then sends one request to each relay's `/load` address on port 8443. That one round trip measures how far the relay is, over the TCP and TLS path the WebSocket would use, and reads how many sessions it holds.
-
-Each relay's score is its round trip time multiplied by 1 plus how full it is, or by 4 once it is 90% full. The lowest score wins. A relay the directory marks unhealthy or draining is left out.
-
-When a relay cannot be reached, the client tries the next one. A relay whose session ended unexpectedly is set aside for a minute.
-
-An app can [ask for a relay](/docs/using/#choosing-a-relay) for each socket, and a person can [pick one](/docs/relays/#choosing-a-relay) instead of the automatic choice.
+The relay's policy decides which addresses a session may reach and which ports it may bind, and may pace and count its bytes. The default rules of `webvpnd` reach public addresses only, bind ports from 1024 up, and neither pace nor count: see [what the default rules allow](/docs/running-a-relay/#what-the-default-rules-allow). The public relays pace each person to their [fair use limits](/docs/relays/#fair-use-limits).
 
 ## Who sees what
 
 | Who | What they see |
 | --- | --- |
 | The person's network | An encrypted connection to the relay: its name, its address and how much data passes. Not where the sockets go or what they carry. |
-| The relay | The person's IP address, each socket's destination address and port, and how much data passes. It carries the bytes as the app sent them: what the app's protocol encrypts, such as HTTPS, it cannot read. See [what it keeps](/docs/what-the-relay-keeps/). |
+| The relay | The person's IP address, each socket's destination address and port, and how much data passes. It carries the bytes as the app sent them: what the app's protocol encrypts, such as HTTPS, it cannot read. [What the relay keeps](/docs/what-the-relay-keeps/) says what the public relays keep. |
 | The DNS resolver | The names looked up, asked by the relay's address. |
 | The other end | A connection from the relay's address, never the person's. |

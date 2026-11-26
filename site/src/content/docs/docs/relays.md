@@ -12,11 +12,13 @@ description: The public WebVPN relays, where they are, their addresses, who runs
 
 The relay's id is the first part of its name, such as `cz-prg-001`. Each relay takes WebTransport on UDP port 443 and the WebSocket on TCP port 8443, and connects out from the address above. The relay names resolve to IPv4 addresses only.
 
+An app reaches the public relays through FKN's own library, `@fkn/lib`, today. They run an earlier version of the protocol than this site describes, so `@webvpn/client` does not connect to them yet.
+
 The live list, with each relay's health and load, is the directory at [fkn.app/v1/relays](https://fkn.app/v1/relays). Each relay also answers `https://<name>:8443/load` with its session count, its session ceiling and its version.
 
 ## Choosing a relay
 
-The client picks one by round trip time and load, as [how it works](/docs/how-it-works/#how-a-relay-is-chosen) describes, and an app can [ask for one](/docs/using/#choosing-a-relay) for each socket. On fkn.app, a person can pick one under **Server** in the FKN bar or **Relay server** on the Usage page. **Auto** is the default.
+`@fkn/lib` picks one by round trip time and load, and an app can [ask it for one](https://docs.fkn.dev/guides/sockets/) for each socket. On fkn.app, a person can pick one under **Server** in the FKN bar or **Relay server** on the Usage page. **Auto** is the default.
 
 ## Who runs them
 
