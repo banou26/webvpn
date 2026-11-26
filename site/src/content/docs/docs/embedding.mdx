@@ -20,6 +20,8 @@ tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal
 
 `webvpn-proto` holds the protocol's codes, which a [refusal](#refusals) carries. The two carriers are cargo features of `webvpn-server`, `webtransport` and `websocket`, both on by default. A program with one carrier turns the defaults off and names it: `default-features = false, features = ["websocket"]`.
 
+Each carrier re-exports the crate its types come from, at the version `webvpn-server` builds with: `webtransport::wtransport` and `websocket::rustls`. A program takes them from there and needs no dependency of its own on them.
+
 ## The pieces
 
 ### `Relay`
@@ -27,7 +29,7 @@ tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal
 `Relay<P>` is one relay: its policy `P`, its settings and the sessions it holds. `Relay::new(policy, config)` makes one, and it serves nothing until a carrier hands it a session. A relay is cheap to clone, and every clone is the same relay. Nothing in it is process-wide, so one process may run several relays, each with its own counts.
 
 - `policy()` returns the policy, for a program that reads what its policy counted.
-- `sessions()` is the number of sessions the relay holds now.
+- `sessions()` is the number of sessions the policy admitted that have not ended, the ones still in their hello exchange included. A client still in its carrier's handshake is not counted.
 - `metrics()` returns the relay's counters, which `get(counter)` reads one by one. `render_metrics()` renders them all in the Prometheus text format.
 - `watch_own_ipv6()` reads the relay's own global IPv6 addresses from the system now and every second after, and treats each as an own address. It works on Linux only. Call it once, before the relay takes sessions.
 - `stop(grace)` [stops the relay](#stop).
@@ -54,16 +56,16 @@ A carrier accepts clients and hands each one's session to the relay. Each built-
 
 **`websocket::serve(relay, listener, options)`** takes a tokio `TcpListener`. `websocket::Options::default()` serves plain `ws://` and answers every request that is not a WebSocket upgrade with `404`.
 
-- `Options::tls` takes a `watch::Receiver<Arc<ServerConfig>>`, with the `ServerConfig` of `tokio_rustls::rustls` from `tokio-rustls` 0.26, for `wss://`. A new value applies to the connections accepted after it, so a renewed certificate needs no restart. The listener speaks HTTP/1.1 only, so the config's ALPN protocols must be empty or `http/1.1`.
+- `Options::tls` takes a `watch::Receiver<Arc<ServerConfig>>`, with the `ServerConfig` of `websocket::rustls`, for `wss://`. A new value applies to the connections accepted after it, so a renewed certificate needs no restart. The listener speaks HTTP/1.1 only, so the config's ALPN protocols must be empty or `http/1.1`.
 - `Options::http` takes a `websocket::Handler`, an `Arc<dyn Fn(&str, &str) -> Option<String> + Send + Sync>`. Given the method and the path without its query, it returns the JSON body of a `200`, or `None` for a `404`. It runs on the async runtime, so it must answer at once. Any origin may read its answer and nothing may cache it, so it should carry counts only.
 
 `websocket::serve` returns once the relay is stopping, and drops the listener.
 
-**`webtransport::serve(relay, endpoint)`** takes an `Arc<Endpoint<Server>>` of the `wtransport` crate, at the version `webvpn-server` pins, `=0.7.2`. Make the endpoint from `webtransport::server_config(bind, identity)`, which holds the endpoint settings the relay's sessions are tuned for, with `bind` such as `ServerConfig::builder().with_bind_address(address)`. The certificate is the program's to load and renew: build the `Identity` with `Identity::load_pemfiles` or `Identity::self_signed`, and reload the endpoint with `Endpoint::reload_config(config, false)` when the certificate changes. Open sessions keep theirs. The endpoint must stay open while `webtransport::serve` runs. It returns once the stop began and every connection it took ended.
+**`webtransport::serve(relay, endpoint)`** takes an `Arc<Endpoint<Server>>` of `webtransport::wtransport`. Make the endpoint from `webtransport::server_config(bind, identity)`, which holds the endpoint settings the relay's sessions are tuned for, with `bind` such as `ServerConfig::builder().with_bind_address(address)`. The certificate is the program's to load and renew: build the `Identity` with `Identity::load_pemfiles` or `Identity::self_signed`, and reload the endpoint with `Endpoint::reload_config(config, false)` when the certificate changes. Open sessions keep theirs. The endpoint must stay open while `webtransport::serve` runs. It returns once the stop began and every connection it took ended.
 
 ### `stop`
 
-`stop(grace)` stops the relay. Every open session is sent `Draining` once and keeps its sockets. Both built-in carriers stop taking clients, and every session handed to `serve` from then on is closed with `RESTARTING`. `stop` then waits until every session ended or `grace` passed, closes the sessions still open with `RESTARTING`, and waits up to 2 seconds more for those closes to go out. It returns at once when no session is open, and calling it again is harmless.
+`stop(grace)` stops the relay. Every open session is sent `Draining` once and keeps its sockets. Both built-in carriers stop taking clients, and every session handed to `serve` from then on is closed with `RESTARTING`. `stop` then waits until every session ended or `grace` passed, has the sessions still open say `Bye` with `RESTARTING` and close, and waits up to 2 seconds more for those closes to go out. It returns at once when no session is open, and calling it again is harmless.
 
 ## The policy
 
@@ -71,7 +73,7 @@ A policy is two traits. The relay asks its `Policy` once for each session, and a
 
 ### `Policy`
 
-**`admit(peer)`** is called for each client after its carrier's handshake and before the hello exchange. `peer` is the client's address as the carrier saw it. `Ok` returns the session's rules. `Err` closes the session with `SESSION_LIMIT` and the refusal's message. The value `admit` returns lives exactly as long as the session and is dropped when it ends, so what a policy counted at admission is given back in its `Drop`. The relay does not call `admit` once it is stopping, or for a client it turned away because `max_pending_sessions` sessions were in setup.
+**`admit(peer)`** is called for each client after its carrier's handshake and before the hello exchange. `peer` is the client's address as the carrier saw it. `Ok` returns the session's rules. `Err` closes the session with `SESSION_LIMIT` and the refusal's message, which the client reads first in a `Bye`. The value `admit` returns lives exactly as long as the session and is dropped when it ends, so what a policy counted at admission is given back in its `Drop`. The relay does not call `admit` once it is stopping, or for a client it turned away because `max_pending_sessions` sessions were in setup.
 
 **`auth()`** says whether the relay takes credentials, which the relay's hello tells every client:
 
@@ -87,7 +89,7 @@ Its methods take `&self`, and the relay may call them from several sockets' task
 - **`clear_auth()`** is called when the client gives its identity up, and returns the session to what `admit` made it. The default does nothing.
 - **`open_socket(kind)`** is called when the client asks for a TCP connection, a listener or a UDP socket (`SocketKind::Tcp`, `TcpListener` or `Udp`), and when one of its listeners accepted a connection (`SocketKind::Tcp`). The relay calls it after its own checks, the credential and `max_sockets_per_session`, and before the socket counts as open. `Ok` returns the socket's [permit](#permits). A refusal reaches the client under the request's id, or as `AcceptRefused` for an accepted connection, and leaves the session untouched.
 - **`check_egress(proto, target)`** decides whether the session may send to `target`, the literal address the bytes go to: a TCP connection's, after its name was looked up, the destination of every UDP datagram, a multicast group a socket joins, and the limited broadcast address when a socket turns broadcast on. The relay never asks it about its own addresses: it routes those to the sockets bound on the relay, or refuses them itself.
-- **`check_bind(proto, local)`** decides whether the session may bind `local`, for a UDP socket or a listener. Port `0` asks for any free port. The default allows every address.
+- **`check_bind(proto, local)`** decides whether the session may bind `local`, for a UDP socket or a listener. Port `0` asks for any free port. It has no default, so a policy that wraps another one forwards it or decides itself.
 - **`relayed(direction, bytes)`** is called before `bytes` move, in both directions of every socket, and for a DNS answer as `Direction::Down`. The bytes move once the returned future resolves. The default resolves at once.
 
 ### Permits
@@ -96,7 +98,11 @@ A permit is the value `open_socket` returns. The relay holds it while the socket
 
 ### Refusals
 
-A refusal is `Refusal::new(code, message)`. The code is a `webvpn_proto::ErrorCode`, which the client's library acts on, such as `REFUSED` for a target, port or option the policy refuses, `CAPACITY` for a limit the same request may pass later, or `AUTH_FAILED` for a credential that was not accepted. The message is for a person. A refusal from `admit` sends no code: the relay closes the session with `SESSION_LIMIT` and the message, which a WebSocket client reads as close code `4003`.
+A refusal is `Refusal::new(code, message)`. The code is a `webvpn_proto::ErrorCode`, which the client's library acts on, such as `REFUSED` for a target, port or option the policy refuses, `CAPACITY` for a limit the same request may pass later, or `AUTH_FAILED` for a credential that was not accepted. The message is for a person. A refusal from `admit` sends no code: the relay says `Bye` with `SESSION_LIMIT` and the message, then closes the session with the same, which a WebSocket client also reads as close code `4003`.
+
+### Credentials
+
+`same_credential(a, b)` tells whether two credentials hold the same bytes. It compares every byte, so the time it takes does not depend on where they differ. Their lengths may be learned from it. A policy that checks a credential against its own, as the example does, compares them with it.
 
 ### Pacing and counting
 
@@ -113,7 +119,7 @@ Both go in `relayed`. A policy that meters adds `bytes` to its count and resolve
 | `allow_private_targets` | `false` | Lets sessions reach private, local and reserved addresses. |
 | `min_bind_port` | `1024` | The lowest port a session may bind. Port `0` always passes. |
 
-Make it with `let mut basic = Basic::default();` and set the fields that differ on it. Its counts are private fields, so `Basic { max_sessions: 64, ..Basic::default() }` does not compile. A policy of your own can wrap `Basic` and the `BasicSession` it admits, as the example does. `egress::is_public(ip)` is the test `Basic` applies to a destination.
+Make it with the fields that differ and the defaults for the rest: `Basic { max_sessions: 64, ..Basic::default() }`. Its last field, `held`, holds the sessions and sockets in use, which its clones share. Leave it at its default. A policy of your own can wrap `Basic` and the `BasicSession` it admits, as the example does. `egress::is_public(ip)` is the test `Basic` applies to a destination.
 
 ## An example
 
@@ -136,7 +142,7 @@ A carrier of your own implements `Transport` for each client's session, and call
 
 - `remote_ip()` is the client's address as the carrier saw it, which `admit` is asked about.
 - `rtt()` is the smoothed round trip time, or zero, the default, where the carrier measures none.
-- `close(code, reason)` closes the session with a close code and a reason for a person, and resolves once the carrier holds the close and will send it before its connection ends.
+- `close(code, reason)` closes the session with a close code and a reason for a person, and resolves once the carrier holds the close and will send it before its connection ends. The relay says `Bye` with the same code and reason on the control stream first.
 - `control_stream()` opens the control stream. The relay calls it exactly once, before it opens any other stream.
 - `open_bi()` opens a stream for one TCP socket.
 - `open_uni()` opens a stream that carries a UDP socket's packets toward the client only.
@@ -144,7 +150,7 @@ A carrier of your own implements `Transport` for each client's session, and call
 - `send_datagram(data)` and `recv_datagram()` carry one UDP packet outside any stream.
 - `accept_uni()` returns the one stream a client opens, for a UDP socket whose own stream did not reach it. It never resolves on a carrier whose clients open no streams.
 
-The send half of each stream implements `SendHalf`, an `AsyncWrite` with two ways to end the stream at once and drop what is unsent: `fail()` for a socket whose peer reset its connection, and `abandon()` for a socket the client closed. Both do nothing by default.
+The send half of each stream implements `SendHalf`, an `AsyncWrite` with two ways to end the stream at once and drop what is unsent: `fail()` for a socket whose peer reset its connection, and `abandon()` for a socket the client closed. Both do nothing by default. Its `deliver()` resolves once the client read what was written on the stream, as far as the carrier can tell. The relay waits on it after a `Bye`, at most a second, before it calls `close`, so a carrier whose close can overtake what was written waits there. By default it resolves at once.
 
 `carrier` is a `UdpCarrier`, and must match what the carrier's clients read:
 
@@ -158,6 +164,8 @@ The send half of each stream implements `SendHalf`, an `AsyncWrite` with two way
 - `PROTOCOL_ERROR` when the setup, from the call to the client's hello, takes longer than `setup_timeout`, or when the client breaks the protocol;
 - `VERSION_MISMATCH` when the client's version does not suit;
 - `NORMAL` when the client ends the session.
+
+Before each close, the client reads the same code and reason in a `Bye` on the control stream, whenever the stream can carry it.
 
 An accept loop of your own stops taking clients once `relay.stopping()` is true. A program with its own WebTransport accept loop wraps each accepted `wtransport::Connection` in `webtransport::WtTransport::new(connection)` and hands it to `serve` with `UdpCarrier::Bidi`.
 

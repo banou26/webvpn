@@ -815,6 +815,10 @@ mod tests {
         fn check_egress(&self, _proto: Proto, _target: SocketAddr) -> Result<(), Refusal> {
             Err(Refusal::new(ErrorCode::REFUSED, "the test reaches nothing"))
         }
+
+        fn check_bind(&self, _proto: Proto, _local: SocketAddr) -> Result<(), Refusal> {
+            Ok(())
+        }
     }
 
     /// One session under test, driven from the client's side.

@@ -1,4 +1,7 @@
 //! The WebSocket carrier: a listener whose clients carry their session over the WebSocket mux.
+//!
+//! The TLS settings [`Options::tls`] takes are of [`rustls`], at the version this crate builds with, which is
+//! re-exported here so a program needs no dependency of its own on it.
 
 use std::io;
 use std::net::IpAddr;
@@ -11,6 +14,7 @@ use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
+pub use tokio_rustls::rustls;
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
@@ -256,9 +260,7 @@ mod tests {
 
     /// A relay whose policy lets sessions reach loopback.
     fn relay(config: Config) -> Relay<Basic> {
-        let mut policy = Basic::default();
-        policy.allow_private_targets = true;
-        Relay::new(policy, config)
+        Relay::new(Basic { allow_private_targets: true, ..Basic::default() }, config)
     }
 
     /// `serve` on a loopback port of its own: the port, and the task serving it.
@@ -461,8 +463,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_refused_admission_reaches_the_client_as_a_bye_then_a_close_with_the_session_code_and_message() {
-        let mut policy = Basic::default();
-        policy.max_sessions = 0;
+        let policy = Basic { max_sessions: 0, ..Basic::default() };
         let refusal = policy.admit(IpAddr::from([127, 0, 0, 1])).unwrap_err();
         let relay = Relay::new(policy, Config::default());
         let (address, _serving) = start(&relay, Options::default()).await;

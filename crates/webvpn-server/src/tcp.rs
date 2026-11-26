@@ -417,9 +417,7 @@ pub(crate) mod tests {
 
     /// The policy of a relay that reaches loopback addresses.
     pub(crate) fn local() -> BasicSession {
-        let mut basic = Basic::default();
-        basic.allow_private_targets = true;
-        basic.admit(CLIENT).unwrap()
+        Basic { allow_private_targets: true, ..Basic::default() }.admit(CLIENT).unwrap()
     }
 
     /// The id and code of an `Error`.
@@ -509,6 +507,10 @@ pub(crate) mod tests {
         }
 
         fn check_egress(&self, _proto: Proto, _target: SocketAddr) -> Result<(), Refusal> {
+            Ok(())
+        }
+
+        fn check_bind(&self, _proto: Proto, _local: SocketAddr) -> Result<(), Refusal> {
             Ok(())
         }
 

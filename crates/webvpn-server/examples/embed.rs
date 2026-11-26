@@ -12,7 +12,8 @@ use tokio::net::TcpListener;
 use webvpn_proto::ErrorCode;
 use webvpn_server::websocket::{self, Options};
 use webvpn_server::{
-    Auth, Basic, BasicSession, Config, Direction, Policy, Proto, Refusal, Relay, Session, Slot, SocketKind,
+    same_credential, Auth, Basic, BasicSession, Config, Direction, Policy, Proto, Refusal, Relay, Session, Slot,
+    SocketKind,
 };
 
 /// Bytes relayed since the start, each way.
@@ -56,10 +57,7 @@ impl Session for CountedSession {
     type Permit = Slot;
 
     fn authenticate(&self, credential: &[u8]) -> Result<(), Refusal> {
-        // Every byte is compared, so the time taken does not show how much of a credential matched.
-        let differs = credential.len() != self.credential.len()
-            || credential.iter().zip(self.credential.iter()).fold(0, |differs, (a, b)| differs | (a ^ b)) != 0;
-        if differs {
+        if !same_credential(credential, &self.credential) {
             return Err(Refusal::new(ErrorCode::AUTH_FAILED, "the credential was not accepted"));
         }
         Ok(())

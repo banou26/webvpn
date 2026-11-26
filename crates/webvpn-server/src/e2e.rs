@@ -23,8 +23,7 @@ struct Harness {
 async fn open() -> Harness {
     let peer = IpAddr::from([192, 0, 2, 1]);
     let (transport, mut client) = testing::session(peer);
-    let mut policy = Basic::default();
-    policy.allow_private_targets = true;
+    let policy = Basic { allow_private_targets: true, ..Basic::default() };
     let setup = Setup {
         permit: Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap(),
         deadline: Instant::now() + WAIT,

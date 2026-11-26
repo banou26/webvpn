@@ -25,7 +25,10 @@ pub mod webtransport;
 mod ws;
 
 pub use metrics::{Counter, Metrics};
-pub use policy::{Auth, Basic, BasicSession, Direction, Policy, Proto, Refusal, Session, Slot, SocketKind};
+pub use policy::{
+    same_credential, Auth, Basic, BasicHeld, BasicSession, Direction, Policy, Proto, Refusal, Session, Slot,
+    SocketKind,
+};
 pub use relay::{Config, Relay};
 pub use session::UdpCarrier;
 pub use transport::{SendHalf, Transport};

@@ -120,11 +120,9 @@ pub trait Session: Send + Sync + 'static {
     /// or refuses them itself.
     fn check_egress(&self, proto: Proto, target: SocketAddr) -> Result<(), Refusal>;
 
-    /// Whether the session may bind `local`. Port 0 asks for any free port.
-    fn check_bind(&self, proto: Proto, local: SocketAddr) -> Result<(), Refusal> {
-        let _ = (proto, local);
-        Ok(())
-    }
+    /// Whether the session may bind `local`, for a UDP socket or a listener. Port 0 asks for any free port. It has no
+    /// default, so a policy that wraps another one forwards it or decides itself.
+    fn check_bind(&self, proto: Proto, local: SocketAddr) -> Result<(), Refusal>;
 
     /// `bytes` are about to be relayed. The future resolves when they may move, so a policy that paces waits here
     /// and a policy that meters counts here. Called for both directions of every socket, and for a DNS answer as
@@ -159,8 +157,17 @@ impl Drop for Slot {
     }
 }
 
+/// Whether two credentials hold the same bytes. Every byte is compared, so the time taken does not depend on where
+/// they differ or how much of them matched. Their lengths may be learned from it: credentials of different lengths
+/// are told apart at once.
+pub fn same_credential(a: &[u8], b: &[u8]) -> bool {
+    // `black_box` keeps the compiler from ending the loop at the first difference
+    a.len() == b.len() && a.iter().zip(b).fold(0, |differs, (x, y)| std::hint::black_box(differs | (x ^ y))) == 0
+}
+
 /// The policy of a relay with no accounts: a ceiling on sessions and on sockets, public destinations only, and no
-/// low ports. It neither paces nor meters. Start from `Basic::default()` and set the fields that differ.
+/// low ports. It neither paces nor meters. Start from `Basic::default()` and set the fields that differ, as in
+/// `Basic { max_sessions: 64, ..Basic::default() }`.
 #[derive(Debug, Clone)]
 pub struct Basic {
     /// Sessions the relay holds at once.
@@ -171,6 +178,14 @@ pub struct Basic {
     pub allow_private_targets: bool,
     /// The lowest port a session may bind. Port 0, any free port, always passes.
     pub min_bind_port: u16,
+    /// The sessions and sockets held now, which every clone shares, and so does a value made from this one with
+    /// struct update syntax. Leave it at its default.
+    pub held: BasicHeld,
+}
+
+/// The sessions and sockets a [`Basic`] holds now. Opaque: `BasicHeld::default()` holds none.
+#[derive(Debug, Clone, Default)]
+pub struct BasicHeld {
     sessions: Arc<AtomicUsize>,
     sockets: Arc<AtomicUsize>,
 }
@@ -182,8 +197,7 @@ impl Default for Basic {
             max_sockets: 65536,
             allow_private_targets: false,
             min_bind_port: 1024,
-            sessions: Arc::default(),
-            sockets: Arc::default(),
+            held: BasicHeld::default(),
         }
     }
 }
@@ -192,7 +206,7 @@ impl Policy for Basic {
     type Session = BasicSession;
 
     fn admit(&self, _peer: IpAddr) -> Result<BasicSession, Refusal> {
-        let slot = Slot::take(&self.sessions, self.max_sessions)
+        let slot = Slot::take(&self.held.sessions, self.max_sessions)
             .ok_or(Refusal::new(ErrorCode::CAPACITY, "the relay holds as many sessions as it allows"))?;
         Ok(BasicSession { rules: self.clone(), _slot: slot })
     }
@@ -209,7 +223,7 @@ impl Session for BasicSession {
     type Permit = Slot;
 
     fn open_socket(&self, _kind: SocketKind) -> Result<Slot, Refusal> {
-        Slot::take(&self.rules.sockets, self.rules.max_sockets)
+        Slot::take(&self.rules.held.sockets, self.rules.max_sockets)
             .ok_or(Refusal::new(ErrorCode::CAPACITY, "the relay holds as many sockets as it allows"))
     }
 

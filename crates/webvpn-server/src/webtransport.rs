@@ -3,6 +3,9 @@
 //! Make an endpoint from [`server_config`] and hand it to [`serve`], which runs every session that arrives on it under
 //! a [`Relay`] until the relay stops. A program with an accept loop of its own wraps each accepted [`Connection`] in a
 //! [`WtTransport`] and hands it to [`Relay::serve`] with [`UdpCarrier::Bidi`].
+//!
+//! The types these take come from [`wtransport`], at the version this crate pins, which is re-exported here so a
+//! program needs no dependency of its own on it.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -19,6 +22,8 @@ use wtransport::endpoint::IncomingSession;
 use wtransport::quinn::congestion::BbrConfig;
 use wtransport::quinn::{self, MtuDiscoveryConfig};
 use wtransport::{Connection, Endpoint, Identity, RecvStream, SendStream, ServerConfig, VarInt};
+
+pub use wtransport;
 
 use crate::policy::Policy;
 use crate::relay::{Relay, CLOSE_WAIT};
@@ -253,9 +258,7 @@ mod tests {
 
     /// A policy that lets sessions reach loopback.
     fn local() -> Basic {
-        let mut policy = Basic::default();
-        policy.allow_private_targets = true;
-        policy
+        Basic { allow_private_targets: true, ..Basic::default() }
     }
 
     /// A relay serving WebTransport on loopback.
@@ -421,8 +424,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_refused_admission_says_bye_then_closes_with_session_limit_and_the_policy_s_message() {
-        let mut policy = Basic::default();
-        policy.max_sessions = 0;
+        let policy = Basic { max_sessions: 0, ..Basic::default() };
         let message = policy.admit(Ipv4Addr::LOCALHOST.into()).unwrap_err().message.into_owned();
         let served = served(policy, Config::default());
         let connection = served.connect().await.unwrap();

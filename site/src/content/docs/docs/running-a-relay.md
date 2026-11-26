@@ -124,7 +124,7 @@ Each credential in the list is trimmed, so none can hold a comma or begin or end
 
 - **Public addresses only.** A client reaches addresses on the public internet, as IANA's special-purpose address registries define them, and no private, loopback, link-local, shared, documentation, multicast or reserved address. An IPv6 address that spells an IPv4 one, such as `::ffff:10.0.0.1`, counts as that IPv4 address. The rule applies to every TCP connection, after its name is looked up, to the destination of every UDP datagram, and to every multicast group a socket joins.
 - **No port under 1024.** A client binds a UDP socket or listens on port 1024 or above, or on port `0` for any free port.
-- **Ceilings.** The relay holds 1024 sessions, 65536 sockets across sessions, and 4096 sockets in one session. A session over the ceiling is closed with `SESSION_LIMIT`. A socket over a ceiling is refused with `CAPACITY`, and the same request may pass later.
+- **Ceilings.** The relay holds 1024 sessions, 65536 sockets across sessions, and 4096 sockets in one session. A session over the ceiling is told `SESSION_LIMIT` in a `Bye` and closed. A socket over a ceiling is refused with `CAPACITY`, and the same request may pass later.
 - **No pacing and no count per client.** The rules do not limit how fast a client moves bytes, or how many. To pace or meter, [embed the relay](/docs/embedding/) with a policy of your own.
 - **Open to every client.** Any client that reaches the relay may open sockets.
 
@@ -177,5 +177,5 @@ On SIGTERM or SIGINT, the relay:
 
 1. takes no new session: WebTransport refuses each arrival, the WebSocket port closes, and `/ready` answers `503`;
 2. sends each open session `Draining` once, and the session keeps its sockets;
-3. after `WEBVPN_DRAIN_SECONDS`, closes every session still open with `RESTARTING` and the reason `the relay is stopping`, which a WebSocket client reads as close code `4004`;
+3. after `WEBVPN_DRAIN_SECONDS`, sends each session still open a `Bye` with `RESTARTING` and the reason `the relay is stopping`, then closes it with the same, which a WebSocket client also reads as close code `4004`;
 4. exits with code `0`, as soon as every session has ended and at most 4 seconds after the grace. Its last log line counts the sessions it closed when the grace ran out.

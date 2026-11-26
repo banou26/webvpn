@@ -25,8 +25,7 @@ fn now<F: Future>(future: F) -> F::Output {
 
 #[test]
 fn basic_holds_sessions_and_sockets_under_their_ceilings_and_frees_them_on_drop() {
-    let mut relay = Basic::default();
-    (relay.max_sessions, relay.max_sockets) = (2, 3);
+    let relay = Basic { max_sessions: 2, max_sockets: 3, ..Basic::default() };
     let first = relay.admit(ip("203.0.113.1")).unwrap();
     let second = relay.admit(ip("203.0.113.2")).unwrap();
     assert_eq!(relay.admit(ip("203.0.113.3")).unwrap_err().code, ErrorCode::CAPACITY);
@@ -52,8 +51,7 @@ fn basic_reaches_public_addresses_only_unless_told_otherwise() {
         assert_eq!(refusal.code, ErrorCode::REFUSED, "{target}");
     }
 
-    let mut trusting = Basic::default();
-    trusting.allow_private_targets = true;
+    let trusting = Basic { allow_private_targets: true, ..Basic::default() };
     let trusted = trusting.admit(ip("10.0.0.2")).unwrap();
     assert!(trusted.check_egress(Proto::Tcp, address("10.0.0.1:80")).is_ok());
 }
@@ -154,6 +152,10 @@ impl Session for AccountSession {
     }
 
     fn check_egress(&self, _proto: Proto, _target: SocketAddr) -> Result<(), Refusal> {
+        Ok(())
+    }
+
+    fn check_bind(&self, _proto: Proto, _local: SocketAddr) -> Result<(), Refusal> {
         Ok(())
     }
 

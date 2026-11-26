@@ -13,14 +13,12 @@ webvpn-server = { path = "../webvpn-server" }
 anyhow = "1"
 axum = { version = "0.7", default-features = false, features = ["http1", "tokio"] }
 rlimit = "0.10"
-subtle = "2.6"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
-wtransport = "=0.7.2"
 
 [dev-dependencies]
 futures = "0.3"
 tokio = { version = "1", features = ["io-util", "process"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 tokio-tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }

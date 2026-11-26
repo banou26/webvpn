@@ -166,7 +166,8 @@ impl<P: Policy> Relay<P> {
         self.0.shared.metrics.clone()
     }
 
-    /// Sessions open right now, the ones still setting up included.
+    /// Sessions the policy admitted that have not ended yet, the ones still in their hello exchange included. A client
+    /// still in its carrier's handshake, or turned away before its admission, is not counted.
     pub fn sessions(&self) -> usize {
         self.0.sessions.len()
     }
@@ -282,9 +283,7 @@ mod tests {
 
     /// A policy that admits no session.
     fn full() -> Basic {
-        let mut policy = Basic::default();
-        policy.max_sessions = 0;
-        policy
+        Basic { max_sessions: 0, ..Basic::default() }
     }
 
     /// A client arriving at `relay`, and the task serving its session.

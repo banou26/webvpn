@@ -1952,7 +1952,6 @@ dependencies = [
  "axum",
  "futures",
  "rlimit",
- "subtle",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
@@ -1960,7 +1959,6 @@ dependencies = [
  "tracing-subscriber",
  "webvpn-proto",
  "webvpn-server",
- "wtransport",
 ]
 
 [[package]]

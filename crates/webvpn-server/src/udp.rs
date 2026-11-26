@@ -469,6 +469,10 @@ mod tests {
             }
         }
 
+        fn check_bind(&self, _proto: Proto, _local: SocketAddr) -> Result<(), Refusal> {
+            Ok(())
+        }
+
         async fn relayed(&self, direction: Direction, bytes: usize) {
             self.paced.lock().unwrap().push((direction, bytes));
             let gate = match direction {
@@ -651,9 +655,7 @@ mod tests {
 
     /// A session of the default policy, which may reach private addresses when `private` is set.
     fn admitted(private: bool) -> BasicSession {
-        let mut rules = Basic::default();
-        rules.allow_private_targets = private;
-        rules.admit(IpAddr::from([127, 0, 0, 1])).unwrap()
+        Basic { allow_private_targets: private, ..Basic::default() }.admit(IpAddr::from([127, 0, 0, 1])).unwrap()
     }
 
     #[tokio::test]

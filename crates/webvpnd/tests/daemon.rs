@@ -21,9 +21,11 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use webvpn_proto::mux::{self, kind, stream_type, CONTROL_STREAM};
 use webvpn_proto::{close, features, ClientPacket, ErrorCode, Hello, RelayPacket};
+use webvpn_server::webtransport::wtransport;
+use webvpn_server::webtransport::wtransport::tls::{Sha256Digest, Sha256DigestFmt};
+use webvpn_server::webtransport::wtransport::{Connection, Endpoint, Identity, RecvStream, SendStream};
+use webvpn_server::Basic;
 use webvpnd::{CertificateFiles, Daemon, Settings};
-use wtransport::tls::{Sha256Digest, Sha256DigestFmt};
-use wtransport::{Connection, Endpoint, Identity, RecvStream, SendStream};
 
 /// How long a test waits on the relay, or on the program, before it fails.
 const WAIT: Duration = Duration::from_secs(5);
@@ -38,7 +40,7 @@ fn settings() -> Settings {
     let mut settings = Settings::parse(|_| Err(VarError::NotPresent)).unwrap();
     settings.address = LOCALHOST;
     (settings.webtransport_port, settings.websocket_port, settings.http_port) = (0, 0, 0);
-    settings.policy.allow_private_targets = true;
+    settings.policy = Basic { allow_private_targets: true, ..settings.policy };
     settings
 }
 
@@ -265,7 +267,7 @@ async fn the_http_listener_answers_health_ready_metrics_and_the_certificate_hash
 async fn a_websocket_session_runs_end_to_end_and_load_counts_it() {
     let pair = Pair::new("websocket");
     let mut settings = settings();
-    settings.policy.max_sessions = 7;
+    settings.policy = Basic { max_sessions: 7, ..settings.policy };
     let daemon = start(settings, &pair).await;
     let port = daemon.ports().websocket.unwrap();
     let load = |sessions: usize| {
@@ -358,7 +360,7 @@ async fn a_webtransport_session_runs_end_to_end_on_the_self_signed_certificate_b
 #[tokio::test]
 async fn a_full_relay_says_bye_with_session_limit_over_webtransport_before_it_closes() {
     let mut settings = settings();
-    settings.policy.max_sessions = 0;
+    settings.policy = Basic { max_sessions: 0, ..settings.policy };
     let daemon = within(Daemon::start(settings)).await.unwrap();
     let (connection, mut control) = webtransport(&daemon).await;
     let reason = "the relay holds as many sessions as it allows";

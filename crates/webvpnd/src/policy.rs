@@ -1,9 +1,8 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
-use subtle::{Choice, ConstantTimeEq};
 use webvpn_proto::ErrorCode;
-use webvpn_server::{Auth, Basic, BasicSession, Policy, Proto, Refusal, Session, Slot, SocketKind};
+use webvpn_server::{same_credential, Auth, Basic, BasicSession, Policy, Proto, Refusal, Session, Slot, SocketKind};
 
 /// The program's policy: [`Basic`], and when credentials are configured, a client must present one of them before it
 /// may open a socket. Without credentials the relay is open and takes none, as `Basic` does.
@@ -45,12 +44,13 @@ pub struct CredentialSession {
 impl Session for CredentialSession {
     type Permit = Slot;
 
-    /// Accepts a credential equal to one of the configured ones. Each configured one is compared, and one of the same
-    /// length over all its bytes, so the time taken shows neither how much of a credential matched nor which one did.
+    /// Accepts a credential equal to one of the configured ones. Each configured one is compared with
+    /// [`same_credential`], none skipped, so the time taken shows neither how much of a credential matched nor which
+    /// of the ones of its length did.
     fn authenticate(&self, credential: &[u8]) -> Result<(), Refusal> {
         let matched =
-            self.accepted.iter().fold(Choice::from(0), |matched, accepted| matched | accepted.ct_eq(credential));
-        if bool::from(matched) {
+            self.accepted.iter().fold(false, |matched, accepted| matched | same_credential(accepted, credential));
+        if matched {
             Ok(())
         } else {
             Err(Refusal::new(ErrorCode::AUTH_FAILED, "the credential was not accepted"))
@@ -107,9 +107,7 @@ mod tests {
 
     #[test]
     fn the_rest_is_basic_s() {
-        let mut basic = Basic::default();
-        basic.max_sessions = 1;
-        basic.max_sockets = 1;
+        let basic = Basic { max_sessions: 1, max_sockets: 1, ..Basic::default() };
         let policy = Credentials::new(basic, ["credential".to_owned()]);
         let session = policy.admit(CLIENT).unwrap();
         assert_eq!(policy.admit(CLIENT).err().unwrap().code, ErrorCode::CAPACITY);

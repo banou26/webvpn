@@ -68,11 +68,14 @@ impl Settings {
             own_addresses: vars.list("WEBVPN_OWN_ADDRESSES")?,
             ..defaults
         };
-        let mut policy = Basic::default();
-        policy.max_sessions = vars.or("WEBVPN_MAX_SESSIONS", policy.max_sessions)?;
-        policy.max_sockets = vars.or("WEBVPN_MAX_SOCKETS", policy.max_sockets)?;
-        policy.allow_private_targets = vars.or("WEBVPN_ALLOW_PRIVATE_TARGETS", policy.allow_private_targets)?;
-        policy.min_bind_port = vars.or("WEBVPN_MIN_BIND_PORT", policy.min_bind_port)?;
+        let basic = Basic::default();
+        let policy = Basic {
+            max_sessions: vars.or("WEBVPN_MAX_SESSIONS", basic.max_sessions)?,
+            max_sockets: vars.or("WEBVPN_MAX_SOCKETS", basic.max_sockets)?,
+            allow_private_targets: vars.or("WEBVPN_ALLOW_PRIVATE_TARGETS", basic.allow_private_targets)?,
+            min_bind_port: vars.or("WEBVPN_MIN_BIND_PORT", basic.min_bind_port)?,
+            ..basic
+        };
         Ok(Self {
             address: vars.or("WEBVPN_ADDRESS", Ipv4Addr::UNSPECIFIED.into())?,
             webtransport_port: vars.or("WEBVPN_WEBTRANSPORT_PORT", 4433)?,
