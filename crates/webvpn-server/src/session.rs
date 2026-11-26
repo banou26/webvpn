@@ -82,7 +82,7 @@ pub(crate) struct Setup {
 
 /// The session never waits for room in these queues, it only `try_send`s, so one stuck socket cannot hold up the
 /// routing of the whole session.
-const PER_SOCKET_CHANNEL_BUFFER: usize = 100;
+pub(crate) const PER_SOCKET_CHANNEL_BUFFER: usize = 100;
 
 /// One queue for the packets of every upload stream of a session, as deep as the WebSocket mux's datagram queue.
 const UPLOAD_CHANNEL_BUFFER: usize = 512;
@@ -461,6 +461,7 @@ struct Registry<P> {
 }
 
 struct Entry<P> {
+    kind: SocketKind,
     requests: mpsc::Sender<ClientPacket>,
     datagrams: mpsc::Sender<QueuedDatagram>,
     /// Stops the task only. Reaping it then removes the entry and gives the permit back.
@@ -496,7 +497,7 @@ impl<P> Registry<P> {
         };
         let abort = self.tasks.spawn(run(socket));
         self.task_sockets.insert(abort.id(), socket);
-        self.sockets.insert(socket, Entry { requests, datagrams, abort, _permit: permit });
+        self.sockets.insert(socket, Entry { kind, requests, datagrams, abort, _permit: permit });
         Ok(socket)
     }
 
@@ -521,10 +522,16 @@ impl<P> Registry<P> {
         }
     }
 
+    /// The socket `request` names, when it is of the kind the request is for. A socket of another kind is not the
+    /// one the client means, so its task is never handed the request.
+    fn of_kind(&self, socket: u32, request: &ClientPacket) -> Option<&Entry<P>> {
+        self.sockets.get(&socket).filter(|entry| Some(entry.kind) == kind_of(request))
+    }
+
     /// Hands a request the client awaits to its socket's task, which answers it. When the task cannot take it, the
     /// session's own answer: `BUSY` when its queue is full, and `UNKNOWN_SOCKET` when the socket is gone or ending.
     fn forward(&self, id: u32, socket: u32, request: ClientPacket, metrics: &Metrics) -> Option<RelayPacket> {
-        let refusal = match self.sockets.get(&socket).map(|entry| entry.requests.try_send(request)) {
+        let refusal = match self.of_kind(socket, &request).map(|entry| entry.requests.try_send(request)) {
             Some(Ok(())) => return None,
             Some(Err(TrySendError::Full(_))) => {
                 metrics.count(Counter::ControlDroppedFull);
@@ -541,6 +548,9 @@ impl<P> Registry<P> {
     /// answers `Ok` itself: a full queue is a task stuck, which is aborted, and a socket gone or ending is answered
     /// so that a repeated or late close never waits.
     fn end(&self, id: u32, socket: u32, request: ClientPacket) -> Option<RelayPacket> {
+        if self.sockets.get(&socket).is_some_and(|entry| Some(entry.kind) != kind_of(&request)) {
+            return Some(error(id, Refusal::new(ErrorCode::UNKNOWN_SOCKET, "no open socket of this kind has this id")));
+        }
         if let Some(entry) = self.sockets.get(&socket) {
             match entry.requests.try_send(request) {
                 Ok(()) => return None,
@@ -559,6 +569,21 @@ impl<P> Registry<P> {
                 metrics.count(Counter::UdpDroppedChannel);
             }
         }
+    }
+}
+
+/// The kind of socket a request on an open socket is for.
+fn kind_of(request: &ClientPacket) -> Option<SocketKind> {
+    match request {
+        ClientPacket::TcpClose { .. } | ClientPacket::TcpReset { .. } | ClientPacket::TcpSetOption { .. } => {
+            Some(SocketKind::Tcp)
+        }
+        ClientPacket::TcpUnlisten { .. } => Some(SocketKind::TcpListener),
+        ClientPacket::UdpClose { .. }
+        | ClientPacket::UdpConnect { .. }
+        | ClientPacket::UdpDisconnect { .. }
+        | ClientPacket::UdpSetOption { .. } => Some(SocketKind::Udp),
+        _ => None,
     }
 }
 

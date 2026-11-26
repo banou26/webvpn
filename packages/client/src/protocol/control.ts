@@ -81,6 +81,8 @@ export type RelayPacket =
   | { type: 'accepted', listener: number, socket: number, local: Address, remote: Address }
   /** A listener had a connection the relay turned away. */
   | { type: 'acceptRefused', listener: number, code: number, remote: Address }
+  /** The relay ended a listener or a UDP socket on its own, and `code` says why. The socket is gone. */
+  | { type: 'closed', socket: number, code: number }
   /** The relay is about to stop: this session keeps its sockets, and new ones belong on a new session. */
   | { type: 'draining' }
   /** A type this package does not name, which a client skips. */
@@ -113,6 +115,7 @@ const RELAY = {
   dnsAnswer: 0x04,
   accepted: 0x10,
   acceptRefused: 0x11,
+  closed: 0x12,
   draining: 0x20,
 } as const
 
@@ -260,6 +263,9 @@ export const encodeRelayPacket = (packet: RelayPacket) => {
     case 'acceptRefused':
       w.u32(packet.listener).u16(packet.code).address(packet.remote)
       break
+    case 'closed':
+      w.u32(packet.socket).u16(packet.code)
+      break
   }
   return seal(w)
 }
@@ -276,6 +282,7 @@ const readRelayPacket = (kind: number, r: Reader): RelayPacket => {
       return { type: 'accepted', listener: r.u32(), socket: r.u32(), local: r.address(), remote: r.address() }
     case RELAY.acceptRefused:
       return { type: 'acceptRefused', listener: r.u32(), code: r.u16(), remote: r.address() }
+    case RELAY.closed: return { type: 'closed', socket: r.u32(), code: r.u16() }
     case RELAY.draining: return { type: 'draining' }
     default: return { type: 'unknown', kind }
   }

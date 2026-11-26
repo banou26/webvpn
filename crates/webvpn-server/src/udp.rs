@@ -16,11 +16,8 @@ use crate::hairpin::{Hairpin, Lease};
 use crate::metrics::Counter;
 use crate::policy::{Direction, Proto, Refusal, Session};
 use crate::session::{error, read_upload_stream, QueuedDatagram, SessionHandle, UdpCarrier};
+use crate::tcp::MAX_CLIENT_SOCKET_BUFFER_BYTES;
 use crate::transport::{open_udp_bi_with_prefix, open_uni_with_prefix, SendHalf, Transport};
-
-/// The most a client may set a socket's send or receive buffer to, so that the ceiling on sockets also bounds the
-/// kernel memory they hold.
-const MAX_CLIENT_SOCKET_BUFFER_BYTES: usize = 256 * 1024;
 
 /// Tries at locking the port of a port-0 bind: another socket on the host can take the port between the disconnect
 /// that frees it and the bind that locks it.
@@ -187,6 +184,8 @@ pub(crate) async fn bind<T: Transport, S: Session>(
     // socket's requests and never its pumps.
     let mut staged: Option<RelayPacket> = None;
     let mut closing = None;
+    // set when the socket ends without the client asking, which the client is then told
+    let mut ended_alone = None;
     let ended = loop {
         tokio::select! {
             request = requests.recv(), if staged.is_none() => match request {
@@ -202,6 +201,7 @@ pub(crate) async fn bind<T: Transport, S: Session>(
                     if lost_port {
                         // answered here, since the branch that sends staged replies ends with the loop
                         session.reply(answer(id, disconnected)).await;
+                        ended_alone = Some(ErrorCode::ADDRESS_NOT_AVAILABLE);
                         break Ok(());
                     }
                     if disconnected.is_ok() {
@@ -212,16 +212,7 @@ pub(crate) async fn bind<T: Transport, S: Session>(
                 Some(ClientPacket::UdpSetOption { id, option, .. }) => {
                     staged = Some(answer(id, set_option(&udp, &*session.policy, option)));
                 }
-                Some(
-                    ClientPacket::TcpSetOption { id, .. }
-                    | ClientPacket::TcpClose { id, .. }
-                    | ClientPacket::TcpReset { id, .. }
-                    | ClientPacket::TcpUnlisten { id, .. },
-                ) => {
-                    let refusal = Refusal::new(ErrorCode::UNSUPPORTED, "a UDP socket does not take this request");
-                    staged = Some(error(id, refusal));
-                }
-                // the session hands a socket no other request
+                // the session hands a socket only the requests of its kind
                 Some(_) => {}
                 None => break Ok(()),
             },
@@ -229,8 +220,14 @@ pub(crate) async fn bind<T: Transport, S: Session>(
                 Ok(permit) => permit.send(staged.take().expect("a reply is staged")),
                 Err(_) => break Err(anyhow!("the session's control stream closed")),
             },
-            () = &mut download => break Ok(()),
-            () = &mut upload_pump => break Ok(()),
+            () = &mut download => {
+                ended_alone = Some(ErrorCode::OTHER);
+                break Ok(());
+            }
+            () = &mut upload_pump => {
+                ended_alone = Some(ErrorCode::OTHER);
+                break Ok(());
+            }
             () = &mut upload_reader => unreachable!("the upload reader waits forever once its stream ends"),
         }
     };
@@ -247,6 +244,9 @@ pub(crate) async fn bind<T: Transport, S: Session>(
     drop(udp);
     if let Some(id) = closing {
         session.reply(RelayPacket::Ok { id }).await;
+    }
+    if let Some(code) = ended_alone {
+        session.reply(RelayPacket::Closed { socket, code }).await;
     }
     ended
 }

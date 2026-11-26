@@ -101,6 +101,7 @@ mod relay {
     pub const DNS_ANSWER: u8 = 0x04;
     pub const ACCEPTED: u8 = 0x10;
     pub const ACCEPT_REFUSED: u8 = 0x11;
+    pub const CLOSED: u8 = 0x12;
     pub const DRAINING: u8 = 0x20;
 }
 
@@ -262,6 +263,8 @@ pub enum RelayPacket {
     Accepted { listener: u32, socket: u32, local: SocketAddr, remote: SocketAddr },
     /// A listener had a connection the relay turned away.
     AcceptRefused { listener: u32, code: ErrorCode, remote: SocketAddr },
+    /// The relay ended a listener or a UDP socket on its own, and `code` says why. The socket is gone.
+    Closed { socket: u32, code: ErrorCode },
     /// The relay is about to stop: this session keeps its sockets, and new ones belong on a new session.
     Draining,
     /// A type this crate does not name, which a client skips.
@@ -312,6 +315,11 @@ impl RelayPacket {
                 put_address(out, Some(*remote));
                 relay::ACCEPT_REFUSED
             }
+            Self::Closed { socket, code } => {
+                put_u32(out, *socket);
+                put_u16(out, code.0);
+                relay::CLOSED
+            }
             Self::Draining => relay::DRAINING,
             Self::Unknown { kind } => *kind,
         };
@@ -349,6 +357,7 @@ impl RelayPacket {
             relay::ACCEPT_REFUSED => {
                 Self::AcceptRefused { listener: r.u32()?, code: ErrorCode(r.u16()?), remote: r.address()? }
             }
+            relay::CLOSED => Self::Closed { socket: r.u32()?, code: ErrorCode(r.u16()?) },
             relay::DRAINING => Self::Draining,
             kind => Self::Unknown { kind },
         };

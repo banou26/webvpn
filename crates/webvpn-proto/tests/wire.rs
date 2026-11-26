@@ -95,6 +95,7 @@ fn relay_packet(name: &str) -> RelayPacket {
             code: ErrorCode::CAPACITY,
             remote: address(RELAY_PORT),
         },
+        "closed" => RelayPacket::Closed { socket: 9, code: ErrorCode::CAPACITY },
         "draining" => RelayPacket::Draining,
         other => panic!("no relay packet is named {other}"),
     }
@@ -116,7 +117,7 @@ fn client_frames_match_the_vectors_both_ways() {
 #[test]
 fn relay_frames_match_the_vectors_both_ways() {
     let vectors = vectors("relay");
-    assert_eq!(vectors.len(), 9);
+    assert_eq!(vectors.len(), 10);
     for (name, bytes) in vectors {
         let packet = relay_packet(name);
         let mut written = Vec::new();

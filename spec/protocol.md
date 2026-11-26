@@ -93,6 +93,7 @@ Any request may be answered by `Error` instead.
 | `0x04` | `DnsAnswer` | `id u32`, `answer`, the rest: the resolver's whole DNS message |
 | `0x10` | `Accepted` | `listener u32`, `socket u32`, `local Address`, `remote Address` |
 | `0x11` | `AcceptRefused` | `listener u32`, `code u16`, `remote Address` |
+| `0x12` | `Closed` | `socket u32`, `code u16` |
 | `0x20` | `Draining` | nothing |
 
 ### Error codes
@@ -159,12 +160,13 @@ yet.
 
 `TcpListen` binds as a BSD socket does: port 0 takes a free port, any other port is bound exactly or refused. `Socket`
 carries the bound address and no remote address. For each connection the listener accepts, the relay sends `Accepted`
-and opens that socket's stream. A connection the relay had to turn away is told with `AcceptRefused`.
+and opens that socket's stream. A connection the relay had to turn away is told with `AcceptRefused`. A listener the
+relay has to end on its own is told with `Closed`, and is gone from then on.
 
 ### UDP
 
 `UdpBind` binds as `TcpListen` does. `UdpConnect` fixes the peer, `UdpDisconnect` clears it, and both are answered
-`Ok`. `UdpClose` ends the socket.
+`Ok`. `UdpClose` ends the socket. A socket the relay has to end on its own is told with `Closed`.
 
 A datagram travels as a `UdpPacket`:
 

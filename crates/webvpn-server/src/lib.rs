@@ -2,6 +2,8 @@
 //! a session, what a credential means, which sockets and destinations are allowed, and how fast bytes move.
 
 mod dns;
+#[cfg(test)]
+mod e2e;
 pub mod egress;
 mod hairpin;
 mod listener;

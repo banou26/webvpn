@@ -83,6 +83,7 @@ const relayPackets: Record<string, RelayPacket> = {
   'dns-answer': { type: 'dnsAnswer', id: 8, answer: Uint8Array.of(9, 8) },
   'accepted': { type: 'accepted', listener: 6, socket: 7, local: LISTENER, remote: RELAY_PORT },
   'accept-refused': { type: 'acceptRefused', listener: 6, code: ErrorCode.CAPACITY, remote: RELAY_PORT },
+  'closed': { type: 'closed', socket: 9, code: ErrorCode.CAPACITY },
   'draining': { type: 'draining' },
 }
 
@@ -99,7 +100,7 @@ it('client frames match the vectors both ways', () => {
 
 it('relay frames match the vectors both ways', () => {
   const group = vectors('relay')
-  expect(group).toHaveLength(9)
+  expect(group).toHaveLength(10)
   for (const { name, bytes } of group) {
     const packet = relayPackets[name]
     expect(packet, name).toBeDefined()

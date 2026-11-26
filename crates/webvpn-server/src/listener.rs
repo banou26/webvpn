@@ -11,8 +11,7 @@ use webvpn_proto::{ClientPacket, RelayPacket};
 
 use crate::metrics::Counter;
 use crate::policy::{Proto, Refusal, Session, SocketKind};
-use crate::session::{error, RegisterSocket, SessionHandle};
-use crate::tcp::not_this_kind;
+use crate::session::{PER_SOCKET_CHANNEL_BUFFER, RegisterSocket, SessionHandle, error};
 use crate::transport::Transport;
 
 /// Runs a listener a client asked for. `requests` yields its `TcpListen` first. Each connection it accepts is handed
@@ -56,11 +55,8 @@ pub(crate) async fn listen<T: Transport, S: Session>(
                     unlisten = Some(id);
                     break;
                 }
-                Some(other) => {
-                    if let Some(answer) = not_this_kind(other) {
-                        session.reply(answer).await;
-                    }
-                }
+                // the session hands a listener no other request
+                Some(_) => {}
                 None => break,
             },
             accepted = listener.accept(), if pending.is_none() => match accepted {
@@ -70,6 +66,7 @@ pub(crate) async fn listen<T: Transport, S: Session>(
                 }
                 Err(failure) => {
                     warn!(socket, "a listener stopped accepting: {failure}");
+                    session.reply(RelayPacket::Closed { socket, code: Refusal::from_io(&failure).code }).await;
                     break;
                 }
             },
@@ -93,7 +90,7 @@ fn registration<T: Transport, S: Session>(
     connection: TcpStream,
     peer: SocketAddr,
 ) -> RegisterSocket {
-    let (requests, queue) = mpsc::channel(100);
+    let (requests, queue) = mpsc::channel(PER_SOCKET_CHANNEL_BUFFER);
     let remote = session.relay.hairpin.public_spelling(peer);
     let replies = session.replies.clone();
     let session = session.clone();

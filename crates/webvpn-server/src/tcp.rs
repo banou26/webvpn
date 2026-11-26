@@ -109,24 +109,6 @@ pub(crate) async fn accepted<T: Transport, S: Session>(
     run(&session, socket, Origin::Listener(listener), requests, connection, streams).await
 }
 
-/// The answer to a request that reached a socket of another kind: the one the session gives for a socket that is not
-/// there. `None` for a request that names no socket.
-pub(crate) fn not_this_kind(request: ClientPacket) -> Option<RelayPacket> {
-    match request {
-        ClientPacket::TcpClose { id, .. }
-        | ClientPacket::TcpReset { id, .. }
-        | ClientPacket::TcpUnlisten { id, .. }
-        | ClientPacket::UdpClose { id, .. } => Some(RelayPacket::Ok { id }),
-        ClientPacket::TcpSetOption { id, .. }
-        | ClientPacket::UdpSetOption { id, .. }
-        | ClientPacket::UdpConnect { id, .. }
-        | ClientPacket::UdpDisconnect { id, .. } => {
-            Some(error(id, Refusal::new(ErrorCode::UNKNOWN_SOCKET, "no open socket of this kind has this id")))
-        }
-        _ => None,
-    }
-}
-
 /// The address the first A record of the answer to `query` names, at `port`. Neither refusal names the query.
 async fn resolve<T: Transport, S: Session>(
     session: &SessionHandle<T, S>,
@@ -285,7 +267,8 @@ where
                         Err(refusal) => error(id, refusal),
                     });
                 }
-                Some(other) => pending = not_this_kind(other),
+                // the session hands a socket only the requests of its kind
+                Some(_) => {}
                 None => requests_closed = true,
             },
             permit = session.replies.reserve(), if pending.is_some() => match permit {
@@ -905,17 +888,6 @@ pub(crate) mod tests {
         // the system refuses a TTL of 0
         assert_eq!(code(&relayed.control.ask(set(TcpOption::Ttl(0))).await), (2, ErrorCode::OTHER));
         assert_eq!(code(&relayed.control.ask(set(TcpOption::Unknown(9))).await), (2, ErrorCode::UNSUPPORTED));
-    }
-
-    #[tokio::test]
-    async fn a_request_for_another_kind_of_socket_is_answered_as_for_no_socket() {
-        let mut relayed = relayed(Probe::open(), pair(false).await, NO_RTT).await;
-        let unknown = relayed.control.ask(ClientPacket::UdpDisconnect { id: 3, socket: 7 }).await;
-        assert_eq!(code(&unknown), (3, ErrorCode::UNKNOWN_SOCKET));
-        let ended = relayed.control.ask(ClientPacket::TcpUnlisten { id: 4, socket: 7 }).await;
-        assert_eq!(ended, RelayPacket::Ok { id: 4 });
-        relayed.upload.write_all(b"still").await.unwrap();
-        within(relayed.peer.read_exact(&mut [0; 5])).await.unwrap();
     }
 
     #[tokio::test]
