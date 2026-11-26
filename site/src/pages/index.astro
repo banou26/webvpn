@@ -1,20 +1,13 @@
 ---
 import { Code } from 'astro-expressive-code/components'
+import example from '../../../packages/examples/src/node-net.ts?raw'
 import { description, title } from '../site.mjs'
 
-const example = `import * as net from '@fkn/lib/net'
-
-const socket = net.connect({ host: 'example.org', port: 80 }, () => {
-  socket.write('GET / HTTP/1.0\\r\\nHost: example.org\\r\\n\\r\\n')
-})
-socket.on('data', (chunk) => console.log(chunk.toString()))
-socket.on('error', (error) => console.error(error.message))`
-
 const capabilities = [
-  { title: 'TCP connections', text: 'Dial a public address and port, then read and write the connection like a Node socket.', call: 'net.connect()' },
-  { title: 'UDP sockets', text: 'Bind a port, send and receive datagrams, and connect the socket to a peer.', call: 'dgram.createSocket()' },
-  { title: 'Listening ports', text: 'Take a port on the relay’s address. Each connection other computers make to it arrives in the app.', call: 'net.createServer()' },
-  { title: 'Name lookups', text: 'Resolve names through the relay, so the resolver sees the relay’s address and not the person’s.', call: 'dns.lookup()' },
+  { title: 'TCP connections', text: 'Dial a public address and port, or a name, then read and write the connection as Web Streams.', call: 'session.tcpConnect()' },
+  { title: 'UDP sockets', text: 'Bind a port, send and receive datagrams, and connect the socket to a peer.', call: 'session.udpBind()' },
+  { title: 'Listening ports', text: 'Take a port on the relay’s address. Each connection other computers make to it arrives in the app.', call: 'session.tcpListen()' },
+  { title: 'Name lookups', text: 'Resolve names through the relay, so the resolver sees the relay’s address and not the person’s.', call: 'session.lookup()' },
 ]
 
 const steps = [
@@ -25,9 +18,9 @@ const steps = [
 
 const docs = [
   { href: '/docs/', title: 'What WebVPN is', text: 'The protocol, the relay and the client library.' },
-  { href: '/docs/how-it-works/', title: 'How it works', text: 'The session, the streams, how a relay is chosen and who sees what.' },
+  { href: '/docs/how-it-works/', title: 'How it works', text: 'The session, the streams, the real sockets and who sees what.' },
   { href: '/docs/protocol/', title: 'The protocol', text: 'Every frame, code and carrier, version 0.1.' },
-  { href: '/docs/using/', title: 'Using it from an app', text: 'TCP, listening ports, UDP and lookups with @fkn/lib.' },
+  { href: '/docs/using/', title: 'Using it from an app', text: 'TCP, listening ports, UDP and lookups with @webvpn/client, and Node’s net and dgram.' },
   { href: '/docs/running-a-relay/', title: 'Running a relay', text: 'Host your own relay with webvpnd: ports, certificate and settings.' },
   { href: '/docs/embedding/', title: 'Embedding the relay', text: 'The relay inside a Rust program, under a policy of your own.' },
   { href: '/docs/relays/', title: 'Relays', text: 'The public relays, their addresses and the fair use limits.' },
@@ -89,8 +82,8 @@ const docs = [
         <div class="example">
           <Code lang="ts" code={example} />
           <p class="note">
-            The client library, <code>@fkn/lib</code>, follows Node’s <code>net</code> and <code>dgram</code>, so code written for
-            Node can run in a page. <a href="/docs/using/">More examples</a>
+            <code>@webvpn/client</code> opens a session with a relay. <code>@webvpn/net</code> and <code>@webvpn/dgram</code> put
+            Node’s <code>net</code> and <code>dgram</code> on it, so code written for Node can run in a page. <a href="/docs/using/">More examples</a>
           </p>
         </div>
       </section>

@@ -1,0 +1,159 @@
+---
+title: Using it from an app
+description: Open a session with a relay, then TCP connections, listening ports, UDP and name lookups with @webvpn/client, and Node's net and dgram with @webvpn/net and @webvpn/dgram.
+---
+
+import { Code } from '@astrojs/starlight/components'
+import connectExample from '../../../../../packages/examples/src/connect.ts?raw'
+import certHashExample from '../../../../../packages/examples/src/cert-hash.ts?raw'
+import tcpExample from '../../../../../packages/examples/src/tcp.ts?raw'
+import listenExample from '../../../../../packages/examples/src/listen.ts?raw'
+import udpExample from '../../../../../packages/examples/src/udp.ts?raw'
+import lookupExample from '../../../../../packages/examples/src/lookup.ts?raw'
+import sessionEndExample from '../../../../../packages/examples/src/session-end.ts?raw'
+import nodeNetExample from '../../../../../packages/examples/src/node-net.ts?raw'
+import providerExample from '../../../../../packages/examples/src/provider.ts?raw'
+import aliasExample from '../../../../../packages/examples/src/vite.config.ts?raw'
+
+`@webvpn/client` opens a session with a relay, and gives a page TCP connections, listening ports, UDP sockets and name lookups as Web Streams. `@webvpn/net` and `@webvpn/dgram` put Node's `net` and `dgram` modules on a session, so code written for Node runs in a page.
+
+## Get the packages
+
+The packages are not published. They build from a checkout of the source. At the root of the checkout:
+
+```sh
+npm install
+npm run build
+```
+
+Each package's `build` directory then holds its JavaScript and its types. An app depends on each package by its path. For a checkout in `../webvpn`:
+
+```sh
+npm install ../webvpn/packages/client \
+  ../webvpn/packages/net ../webvpn/packages/dgram
+```
+
+## Connect to a relay
+
+`connect(options)` opens a session with a relay. It resolves with the session once the relay and the client have exchanged their hellos.
+
+<Code code={connectExample} lang="ts" />
+
+- `url` is the relay's WebTransport URL, and `webSocketUrl` its WebSocket URL. A [`webvpnd`](/docs/running-a-relay/#ports) relay on its default ports takes `https://<host>:4433` and `wss://<host>:8443`.
+- `transport` picks the carrier. `auto`, the default, takes WebTransport when the browser has it and `url` is given. It takes the WebSocket when either is missing, or when the WebTransport session does not open. `webtransport` and `websocket` take that carrier only. `session.carrier` names the carrier the session uses.
+- `webTransportTimeoutMs` is how long WebTransport may take to be ready, 4000 by default.
+- `agent` is the client's name in its hello, `@webvpn/client` by default.
+
+`connect` rejects with a `TypeError` when the options give no URL for the carrier it takes. Otherwise it rejects with the browser's own error, or with a `WebVpnError`. The `code` of a `WebVpnError` is one of the protocol's [error codes](/docs/protocol/#error-codes). When the relay closed the session in its setup, its `closeCode` says why, such as `SESSION_LIMIT` for a relay that holds as many sessions as it allows. `ErrorCode` and `CloseCode` name every code.
+
+### A relay with a self-signed certificate
+
+A browser takes a self-signed certificate over WebTransport only by its SHA-256 hash, which `serverCertificateHashes` gives. `webvpnd` answers that hash on [`/cert-hash`](/docs/running-a-relay/#the-certificate), on its HTTP listener at `127.0.0.1:8080`:
+
+<Code code={certHashExample} lang="ts" />
+
+The hash applies to WebTransport only, so the example asks for WebTransport alone. A browser opens a WebSocket only to a relay whose certificate it trusts.
+
+### A credential
+
+A relay may require a credential. Until the client presents one, the relay answers its socket requests and its lookups with `AUTH_REQUIRED`. The `credential` option presents one right after the hello, as bytes. For `webvpnd`, a credential is one entry of [`WEBVPN_CREDENTIALS`](/docs/running-a-relay/#credentials), and the page presents its UTF-8 bytes, `new TextEncoder().encode(text)`. When the relay refuses the credential, `connect` closes the session and rejects with `AUTH_FAILED`.
+
+`session.authenticate(credential)` presents a credential later, for example a renewed one, and `session.clearAuth()` gives it up. A refused credential leaves the session as it was.
+
+`session.features` holds the bits of the relay's hello: `Feature.LISTEN`, `Feature.DNS`, `Feature.AUTH` and `Feature.AUTH_REQUIRED`. A call that needs a feature the relay does not offer rejects with `UNSUPPORTED`, and the client sends nothing.
+
+## Open a TCP connection
+
+`session.tcpConnect(target)` opens a TCP connection, and resolves once the relay has opened it. The target is an address, `{ ip, port }`, or a name, `{ name, port }`. The relay looks a name up and connects to its first IPv4 address, in the same round trip.
+
+<Code code={tcpExample} lang="ts" />
+
+- `readable` carries the peer's bytes, and ends when the peer finished its side.
+- `writable` carries bytes to the peer. Closing it is a half close: the peer reads the end, and `readable` stays open.
+- `close()` ends the connection in order, and `reset()` ends it with a reset toward the peer. After either, `readable` ends.
+- `setOption(option)` sets an option, such as `{ type: 'noDelay', value: true }`: `noDelay`, `ttl`, `keepAlive`, `sendBufferSize` or `recvBufferSize`.
+- `local` is the relay's end of the connection, and `remote` the peer's.
+
+A connection that does not open rejects with a `WebVpnError`, such as `CONNECTION_REFUSED`, `TIMED_OUT`, or `REFUSED` for a target the relay's policy refuses. A peer that resets the connection errors `readable` with `CONNECTION_RESET`.
+
+An address's `ip` holds 4 bytes for IPv4 or 16 for IPv6. `parseIp(text)` reads an address's text into those bytes, and returns `undefined` for anything else, such as a name. `formatIp(ip)` writes the text back. A name needs the relay's `DNS` feature, which `webvpnd` has when `WEBVPN_DNS_UPSTREAM` is set.
+
+## Listen on a port
+
+`session.tcpListen(local)` takes a port on the relay. Port `0` takes a free port, and `listener.local.port` is the port the relay took. Other computers connect to the relay's address on that port, and each connection arrives on `listener.connections` as a TCP socket. The example sends back what each connection sends.
+
+<Code code={listenExample} lang="ts" />
+
+`{ ip: new Uint8Array(4), port: 0 }` is `0.0.0.0` with a free port: every IPv4 address of the relay. A listener needs the relay's `LISTEN` feature. `webvpnd` binds ports from 1024 up, and refuses a lower one with `REFUSED`. `listener.close()` stops listening, and `connections` ends.
+
+## Use UDP
+
+`session.udpBind(local)` binds a UDP socket on the relay. Port `0` takes a free port. Other computers send to the relay's address on `socket.local.port`.
+
+<Code code={udpExample} lang="ts" />
+
+- `writable` sends each `{ remote, data }` written to it as one datagram. It never waits: it drops a datagram the carrier cannot take at once, or one over 65536 bytes, as a network would.
+- `readable` gives each datagram the socket received, as `{ remote, data }`. Datagrams wait for the reader up to 4 MiB for the socket and 32 MiB for the session. Past that, they are dropped.
+- `connect(remote)` fixes the peer: a datagram written with no `remote` goes to it, and only its datagrams arrive. `disconnect()` clears it.
+- `setOption(option)` sets the broadcast flag, the TTLs, the multicast loopback and memberships, and the buffer sizes.
+- `close()` closes the socket, and `readable` ends. Cancelling `readable` closes the socket too.
+
+Over WebTransport, a socket's datagrams travel as WebTransport datagrams until the socket's stream is in place, and a browser may drop those.
+
+## Look names up
+
+`session.lookup(query)` sends a whole DNS message to the relay. The relay asks its resolver, and returns the resolver's whole answer. `dnsQuery(name, type)` builds the query, for `A` records, the default, or `AAAA` records. `dnsAddresses(answer)` reads the addresses in the answer.
+
+<Code code={lookupExample} lang="ts" />
+
+A name with no records is an answer with no address, not an error. A name outside ASCII goes in its `xn--` form. Lookups need the relay's `DNS` feature, and a query holds at most 512 bytes. The resolver sees the relay's address, not the person's.
+
+## When the session ends
+
+`session.draining` resolves when the relay says it is about to stop. The session's sockets keep working, and new sockets belong on a new session. `session.closed` resolves once the session ended, with a close code and a reason for a person. Every socket on the session has ended then, and every request on it rejects.
+
+<Code code={sessionEndExample} lang="ts" />
+
+The codes a page reads in `closed`:
+
+| Code | Name | When |
+| --- | --- | --- |
+| 0 | `NORMAL` | The page closed the session with `session.close()`. |
+| 1 | `PROTOCOL_ERROR` | A side could not read a frame, or the relay answered nothing. |
+| 4 | `RESTARTING` | The relay stopped. A new session may open at once. |
+| 5 | `LOST` | The connection ended with no code, as a lost network does. |
+
+A session that ends in its setup makes `connect` reject instead, with the code in `closeCode`: `SESSION_LIMIT` for a relay that holds as many sessions as it allows, `VERSION_MISMATCH` for a relay whose version does not suit, and `RESTARTING` for a relay that is stopping. [Closing a session](/docs/protocol/#closing-a-session) lists every code.
+
+## Node's net and dgram
+
+`@webvpn/net` and `@webvpn/dgram` are Node's `net` and `dgram` modules for a page, typed with Node's own types. `createNet(session)` builds `net` on one session, and `createDgram(session)` builds `dgram`:
+
+<Code code={nodeNetExample} lang="ts" />
+
+A refusal from the relay comes as Node's own error, such as `ECONNREFUSED`, or `EACCES` for a target the relay's policy refuses. The relay looks host names up: A records for `net` and for a `udp4` socket, AAAA records for a `udp6` socket. Neither module has IPC paths or file descriptors.
+
+### One session for the module
+
+The module-level exports, such as `connect` and `createServer` of `@webvpn/net` and `createSocket` of `@webvpn/dgram`, use the session given to `setProvider(session)`. Each module has its own `setProvider`. Until it is called, a connect, a listen, a bind or a send throws.
+
+<Code code={providerExample} lang="ts" />
+
+`setProvider` also takes a function that returns a promise of a session, such as `() => connect(options)`. The module calls it at the first socket, and again only after its promise rejected. Each module calls its own function, so a page that wants one session for both modules opens it first, as above. A module keeps its session after that session ended: to go on, the page calls `setProvider` again with a new session.
+
+### Alias `net` and `dgram`
+
+With a bundler alias, code that imports `net` or `dgram` gets these packages instead, on the session `setProvider` gave. With Vite:
+
+<Code code={aliasExample} lang="ts" title="vite.config.ts" />
+
+webpack and esbuild have the same setting, `resolve.alias` and `alias`. The packages bring the browser builds of `events`, `readable-stream` and `buffer` they need, so a page needs no Node polyfills for them.
+
+## What the client does not do
+
+- **It picks no relay.** `connect` opens a session with the relay its URLs name.
+- **It opens no session on its own.** A session that ended stays closed, and the page calls `connect` again.
+- **It keeps nothing between sessions.** A new session holds no socket and no credential of an earlier one.
+- **It shares no session.** Each page or worker that calls `connect` holds a session of its own.
+- **It retries no request.** A request the relay does not answer in 10 seconds, or 12 for a connection, rejects with `TIMED_OUT`.
+- **It caches no lookup.** Each lookup, and each connection to a name, asks the relay.
