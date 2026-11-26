@@ -1,0 +1,820 @@
+---
+import { Code } from 'astro-expressive-code/components'
+import { description, title } from '../site.mjs'
+
+const example = `import * as net from '@fkn/lib/net'
+
+const socket = net.connect({ host: 'example.org', port: 80 }, () => {
+  socket.write('GET / HTTP/1.0\\r\\nHost: example.org\\r\\n\\r\\n')
+})
+socket.on('data', (chunk) => console.log(chunk.toString()))
+socket.on('error', (error) => console.error(error.message))`
+
+const capabilities = [
+  { title: 'TCP connections', text: 'Dial a public address and port, then read and write the connection like a Node socket.', call: 'net.connect()' },
+  { title: 'UDP sockets', text: 'Bind a port, send and receive datagrams, and connect the socket to a peer.', call: 'dgram.createSocket()' },
+  { title: 'Listening ports', text: 'Take a port on the relay’s address. Each connection other computers make to it arrives in the app.', call: 'net.createServer()' },
+  { title: 'Name lookups', text: 'Resolve names through the relay, so the resolver sees the relay’s address and not the person’s.', call: 'dns.lookup()' },
+]
+
+const steps = [
+  { title: 'One session', text: 'The client opens a WebTransport session to a relay, HTTP/3 over QUIC on UDP port 443. Where WebTransport is missing or does not open, it uses a WebSocket over TLS on TCP port 8443, with the same protocol.' },
+  { title: 'A stream per socket', text: 'The first stream carries small binary control frames: connect, listen, bind, set an option, look a name up. Each TCP connection and each UDP socket then gets a stream of its own.' },
+  { title: 'Real sockets on the relay', text: 'The relay opens an operating system socket for each one, from its own address, and moves the bytes between it and its stream. The other end sees the relay’s address, not the person’s.' },
+]
+
+const docs = [
+  { href: '/docs/', title: 'What WebVPN is', text: 'The protocol, the relay and the client library.' },
+  { href: '/docs/how-it-works/', title: 'How it works', text: 'The session, the streams, how a relay is chosen and who sees what.' },
+  { href: '/docs/protocol/', title: 'The protocol', text: 'Every frame, code and carrier, version 0.1.' },
+  { href: '/docs/using/', title: 'Using it from an app', text: 'TCP, listening ports, UDP and lookups with @fkn/lib.' },
+  { href: '/docs/relays/', title: 'Relays', text: 'The public relays, their addresses and the fair use limits.' },
+  { href: '/docs/what-the-relay-keeps/', title: 'What the relay keeps', text: 'What a public relay keeps, and for how long.' },
+  { href: '/docs/network-operators/', title: 'Network operators', text: 'What traffic from the relay addresses is, and where to write.' },
+]
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={new URL('/', Astro.site)} />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    {/* Starlight's own theme choice, inlined as Starlight does it, so the page follows the theme picked in the docs without a flash. */}
+    <script is:inline>
+      {
+        let stored
+        try { stored = localStorage.getItem('starlight-theme') } catch {}
+        const theme = stored || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+        document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark'
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="site-header">
+      <div class="bar">
+        <a class="brand" href="/" aria-current="page">
+          <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+            <rect width="32" height="32" rx="7" />
+            <path d="M6 9l3.5 14L13 13l3 10 3-10 3.5 10L26 9" />
+          </svg>
+          WebVPN
+        </a>
+        <nav aria-label="Site">
+          <a href="/docs/">Docs</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero wrap" aria-labelledby="title">
+        <div class="intro">
+          <h1 id="title">Real TCP and UDP sockets for browser apps</h1>
+          <p class="lead">
+            WebVPN is a protocol and a relay that let an app in a web page open TCP connections, use UDP sockets,
+            listen on ports and look names up. The page talks to a relay over one WebTransport session, or a
+            WebSocket where WebTransport is not available, and the relay makes the real connections from its own
+            address.
+          </p>
+          <div class="actions">
+            <a class="button primary" href="/docs/">Read the docs</a>
+            <a class="button secondary" href="/docs/how-it-works/">How it works</a>
+          </div>
+        </div>
+        <div class="example">
+          <Code lang="ts" code={example} />
+          <p class="note">
+            The client library, <code>@fkn/lib</code>, follows Node’s <code>net</code> and <code>dgram</code>, so code written for
+            Node can run in a page. <a href="/docs/using/">More examples</a>
+          </p>
+        </div>
+      </section>
+
+      <section class="band wrap" aria-labelledby="can-do">
+        <h2 id="can-do">What an app can do</h2>
+        <ul class="cards">
+          {capabilities.map(({ title, text, call }) => (
+            <li>
+              <h3>{title}</h3>
+              <p>{text}</p>
+              <code>{call}</code>
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <section class="band wrap" aria-labelledby="how">
+        <h2 id="how">How it works</h2>
+        <figure class="diagram">
+          <figcaption class="visually-hidden">
+            A socket’s path: from the app in the browser, over one session to the relay, then from the relay’s address
+            to the internet.
+          </figcaption>
+          <div class="flow">
+            <div class="node">
+              <p class="node-title">Browser</p>
+              <p class="node-text">The app and the client library</p>
+            </div>
+            <div class="link">
+              <p class="link-label">One session</p>
+              <div class="cable">
+                <span class="lane"><span class="wire"></span><span class="tag">control</span></span>
+                <span class="lane"><span class="wire"></span><span class="tag">TCP</span></span>
+                <span class="lane"><span class="wire"></span><span class="tag">UDP</span></span>
+              </div>
+              <p class="link-note">WebTransport or a WebSocket</p>
+            </div>
+            <div class="node relay">
+              <p class="node-title">Relay</p>
+              <p class="node-text">An operating system socket for each app socket</p>
+            </div>
+            <div class="link">
+              <p class="link-label">Real sockets</p>
+              <div class="cable open">
+                <span class="lane"><span class="wire"></span><span class="tag">TCP</span></span>
+                <span class="lane"><span class="wire"></span><span class="tag">UDP</span></span>
+                <span class="lane"><span class="wire"></span><span class="tag">DNS</span></span>
+              </div>
+              <p class="link-note">From the relay’s address</p>
+            </div>
+            <div class="node">
+              <p class="node-title">Internet</p>
+              <p class="node-text">Servers, peers and a DNS resolver</p>
+            </div>
+          </div>
+        </figure>
+        <ol class="steps">
+          {steps.map(({ title, text }) => (
+            <li>
+              <h3>{title}</h3>
+              <p>{text}</p>
+            </li>
+          ))}
+        </ol>
+        <p class="more"><a href="/docs/protocol/">The protocol in full</a></p>
+      </section>
+
+      <div class="band wrap split">
+        <section aria-labelledby="relays">
+          <h2 id="relays">The public relays</h2>
+          <p>
+            Horion Corporation runs public relays in Prague and Hong Kong, as part of <a href="https://fkn.app">FKN</a>.
+            The client measures one round trip to each and picks by distance and load, and an app can ask for a relay
+            or a region for each socket.
+          </p>
+          <ul class="relay-list">
+            <li><span class="place">Prague, Czech Republic</span> <span><code>cz-prg-001</code>, region <code>eu</code></span></li>
+            <li><span class="place">Hong Kong</span> <span><code>hk-hkg-001</code>, region <code>asia</code></span></li>
+          </ul>
+          <p>Each person’s traffic is paced and counted per day, under fair use limits.</p>
+          <p class="more"><a href="/docs/relays/">Relays, addresses and limits</a></p>
+        </section>
+
+        <section aria-labelledby="keeps">
+          <h2 id="keeps">What the public relays keep</h2>
+          <ul class="keeps">
+            <li>No log of the sites reached through them.</li>
+            <li>
+              Your IP address is not stored, and it never leaves the relay. Usage is counted under a keyed hash that
+              changes every day, and the counts are deleted after about 25 hours.
+            </li>
+            <li>
+              What an app encrypts, such as HTTPS, the relay cannot read. It sees where each socket goes and how much
+              data passes.
+            </li>
+          </ul>
+          <p class="more"><a href="/docs/what-the-relay-keeps/">What the relay keeps</a></p>
+        </section>
+      </div>
+
+      <section class="band wrap" aria-labelledby="in-docs">
+        <h2 id="in-docs">In the docs</h2>
+        <ul class="doc-links">
+          {docs.map(({ href, title, text }) => (
+            <li>
+              <a href={href}>{title}</a>
+              <p>{text}</p>
+            </li>
+          ))}
+        </ul>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="bar">
+        <a href="/docs/">Docs</a>
+        <p>The public relays are run by Horion Corporation as part of <a href="https://fkn.app">FKN</a>.</p>
+      </div>
+    </footer>
+  </body>
+</html>
+
+<style is:global>
+  /* Starlight 0.41's own token names and values, so the page matches the docs and Expressive Code, which reads them, styles the example as it does there. */
+  :root {
+    color-scheme: dark;
+    --sl-color-white: hsl(0, 0%, 100%);
+    --sl-color-gray-1: hsl(224, 20%, 94%);
+    --sl-color-gray-2: hsl(224, 6%, 77%);
+    --sl-color-gray-3: hsl(224, 6%, 56%);
+    --sl-color-gray-4: hsl(224, 7%, 36%);
+    --sl-color-gray-5: hsl(224, 10%, 23%);
+    --sl-color-gray-6: hsl(224, 14%, 16%);
+    --sl-color-black: hsl(224, 10%, 10%);
+    --sl-color-accent-low: hsl(224, 54%, 20%);
+    --sl-color-accent: hsl(224, 100%, 60%);
+    --sl-color-accent-high: hsl(224, 100%, 85%);
+    --sl-color-text: var(--sl-color-gray-2);
+    --sl-color-text-accent: var(--sl-color-accent-high);
+    --sl-color-bg: var(--sl-color-black);
+    --sl-color-bg-nav: var(--sl-color-gray-6);
+    --sl-color-bg-inline-code: var(--sl-color-gray-5);
+    --sl-color-hairline: var(--sl-color-gray-6);
+    --sl-color-hairline-shade: var(--sl-color-black);
+    --sl-text-code: 0.875rem;
+    --sl-line-height: 1.75;
+    --__sl-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', 'Noto Sans', Arial,
+      sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
+    --__sl-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
+      monospace;
+  }
+
+  :root[data-theme='light'] {
+    color-scheme: light;
+    --sl-color-white: hsl(224, 10%, 10%);
+    --sl-color-gray-1: hsl(224, 14%, 16%);
+    --sl-color-gray-2: hsl(224, 10%, 23%);
+    --sl-color-gray-3: hsl(224, 7%, 36%);
+    --sl-color-gray-4: hsl(224, 6%, 56%);
+    --sl-color-gray-5: hsl(224, 6%, 77%);
+    --sl-color-gray-6: hsl(224, 20%, 94%);
+    --sl-color-gray-7: hsl(224, 19%, 97%);
+    --sl-color-black: hsl(0, 0%, 100%);
+    --sl-color-accent-high: hsl(234, 80%, 30%);
+    --sl-color-accent: hsl(234, 90%, 60%);
+    --sl-color-accent-low: hsl(234, 88%, 90%);
+    --sl-color-text-accent: var(--sl-color-accent);
+    --sl-color-bg-nav: var(--sl-color-gray-7);
+    --sl-color-bg-inline-code: var(--sl-color-gray-6);
+    --sl-color-hairline-shade: var(--sl-color-gray-6);
+  }
+
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  * {
+    margin: 0;
+  }
+
+  html {
+    accent-color: var(--sl-color-accent);
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  body {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    font-family: var(--__sl-font);
+    line-height: var(--sl-line-height);
+    -webkit-font-smoothing: antialiased;
+    color: var(--sl-color-text);
+    background-color: var(--sl-color-bg);
+  }
+
+  main {
+    flex: 1;
+  }
+
+  a {
+    color: var(--sl-color-text-accent);
+    text-underline-offset: 0.2em;
+  }
+
+  a:focus-visible {
+    outline: 2px solid var(--sl-color-text-accent);
+    outline-offset: 0.25rem;
+    border-radius: 0.125rem;
+  }
+
+  h1,
+  h2,
+  h3 {
+    color: var(--sl-color-white);
+    font-weight: 600;
+    line-height: 1.2;
+  }
+
+  :not(pre) > code {
+    font-family: var(--__sl-font-mono);
+    font-size: 0.875em;
+    color: var(--sl-color-text);
+    background-color: var(--sl-color-bg-inline-code);
+    padding: 0.125em 0.375em;
+    border-radius: 0.25rem;
+    overflow-wrap: anywhere;
+  }
+
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .skip {
+    position: absolute;
+    inset-inline-start: 1rem;
+    top: 0.75rem;
+    z-index: 1;
+    padding: 0.5rem 1rem;
+    background-color: var(--sl-color-text-accent);
+    color: var(--sl-color-black);
+    transform: translateY(-200%);
+  }
+
+  .skip:focus {
+    transform: none;
+  }
+
+  .bar,
+  .wrap {
+    width: 100%;
+    max-width: 80rem;
+    margin-inline: auto;
+    padding-inline: 1rem;
+  }
+
+  .site-header {
+    background-color: var(--sl-color-bg-nav);
+    border-bottom: 1px solid var(--sl-color-hairline-shade);
+  }
+
+  .site-header .bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    height: 3.5rem;
+  }
+
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.625rem;
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--sl-color-white);
+    text-decoration: none;
+  }
+
+  .mark {
+    width: 1.75rem;
+    height: 1.75rem;
+  }
+
+  .mark rect {
+    fill: var(--sl-color-text-accent);
+  }
+
+  .mark path {
+    fill: none;
+    stroke: var(--sl-color-black);
+    stroke-width: 2.4;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .site-header nav a {
+    color: var(--sl-color-white);
+    font-weight: 500;
+    text-decoration: none;
+  }
+
+  .site-header nav a:hover {
+    color: var(--sl-color-text-accent);
+  }
+
+  .band {
+    padding-block: 2.5rem;
+    border-top: 1px solid var(--sl-color-hairline);
+  }
+
+  h2 {
+    font-size: 1.5rem;
+    margin-bottom: 1.25rem;
+  }
+
+  h3 {
+    font-size: 1.0625rem;
+  }
+
+  .more {
+    margin-top: 1.25rem;
+  }
+
+  /* Hero */
+
+  .hero {
+    display: grid;
+    gap: 2.5rem;
+    padding-block: 3rem;
+  }
+
+  .intro,
+  .example {
+    min-width: 0;
+  }
+
+  h1 {
+    font-size: clamp(2rem, 1.25rem + 3vw, 3.25rem);
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+  }
+
+  .lead {
+    margin-top: 1.25rem;
+    max-width: 38rem;
+    font-size: 1.125rem;
+  }
+
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-top: 2rem;
+  }
+
+  .button {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.625rem 1.25rem;
+    border: 1px solid transparent;
+    border-radius: 999rem;
+    line-height: 1.2;
+    text-decoration: none;
+  }
+
+  .button.primary {
+    background-color: var(--sl-color-text-accent);
+    border-color: var(--sl-color-text-accent);
+    color: var(--sl-color-black);
+  }
+
+  .button.secondary {
+    border-color: var(--sl-color-gray-4);
+    color: var(--sl-color-white);
+  }
+
+  .button.secondary:hover {
+    border-color: var(--sl-color-white);
+  }
+
+  .note {
+    margin-top: 0.75rem;
+    font-size: 0.9375rem;
+    color: var(--sl-color-gray-3);
+  }
+
+  /* What an app can do */
+
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+    gap: 1rem;
+    padding: 0;
+    list-style: none;
+  }
+
+  .cards li {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 1.25rem;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 0.75rem;
+  }
+
+  .cards p {
+    flex: 1;
+    line-height: 1.6;
+  }
+
+  .cards code {
+    align-self: flex-start;
+  }
+
+  /* How it works: a cable of streams from the browser to the relay, and plain wires from the relay out. Stacked
+     by default, with the wires running down; side by side from 60em, with the wires running across. */
+
+  .diagram {
+    margin-bottom: 2.5rem;
+  }
+
+  .flow {
+    display: grid;
+  }
+
+  .node {
+    display: grid;
+    align-content: center;
+    gap: 0.25rem;
+    padding: 1rem 1.25rem;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 0.75rem;
+    background-color: var(--sl-color-bg-nav);
+    line-height: 1.45;
+  }
+
+  .node.relay {
+    border-color: var(--sl-color-text-accent);
+  }
+
+  .node-title {
+    color: var(--sl-color-white);
+    font-weight: 600;
+  }
+
+  .node-text {
+    font-size: 0.9375rem;
+  }
+
+  .link {
+    display: grid;
+    justify-items: center;
+    gap: 0.5rem;
+    padding-block: 0.75rem;
+    font-size: 0.875rem;
+    line-height: 1.4;
+    text-align: center;
+    color: var(--sl-color-gray-3);
+  }
+
+  .cable {
+    display: flex;
+    justify-content: center;
+    gap: 1.25rem;
+    padding-inline: 1rem;
+    border-inline: 1px solid var(--sl-color-gray-4);
+  }
+
+  .cable.open {
+    border-color: transparent;
+  }
+
+  .lane {
+    position: relative;
+    display: grid;
+    place-items: center;
+    min-height: 4.5rem;
+  }
+
+  .wire {
+    position: absolute;
+    inset-block: 0;
+    inset-inline-start: calc(50% - 1px);
+    width: 2px;
+    background-color: var(--sl-color-gray-4);
+  }
+
+  .relay ~ .link .wire {
+    background-color: var(--sl-color-text-accent);
+  }
+
+  .tag {
+    position: relative;
+    padding: 0.125rem 0.5rem;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 0.375rem;
+    background-color: var(--sl-color-bg);
+    font-family: var(--__sl-font-mono);
+    font-size: 0.8125rem;
+    color: var(--sl-color-text);
+  }
+
+  .steps {
+    display: grid;
+    gap: 1.5rem;
+    padding: 0;
+    list-style: none;
+    counter-reset: step;
+  }
+
+  .steps li {
+    counter-increment: step;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-content: start;
+    column-gap: 1rem;
+    row-gap: 0.375rem;
+  }
+
+  .steps li::before {
+    content: counter(step);
+    display: grid;
+    place-items: center;
+    width: 2rem;
+    height: 2rem;
+    border: 1px solid var(--sl-color-gray-4);
+    border-radius: 50%;
+    font-size: 0.875rem;
+    font-weight: 600;
+    line-height: 1;
+    color: var(--sl-color-white);
+  }
+
+  .steps h3 {
+    align-self: center;
+  }
+
+  .steps p {
+    grid-column: 2;
+    line-height: 1.65;
+  }
+
+  /* The public relays, and what they keep */
+
+  .split {
+    display: grid;
+    gap: 2.5rem 4rem;
+  }
+
+  .split section {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    max-width: 40rem;
+  }
+
+  .split h2 {
+    margin-bottom: 0.25rem;
+  }
+
+  .split .more {
+    margin-top: 0.25rem;
+  }
+
+  .relay-list,
+  .keeps {
+    display: grid;
+    gap: 0.75rem;
+    padding: 0;
+    list-style: none;
+    line-height: 1.55;
+  }
+
+  .relay-list li {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 0.25rem 1rem;
+    padding: 0.75rem 1rem;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 0.75rem;
+  }
+
+  .place {
+    color: var(--sl-color-white);
+    font-weight: 600;
+  }
+
+  .keeps li {
+    padding-inline-start: 1rem;
+    border-inline-start: 2px solid var(--sl-color-text-accent);
+  }
+
+  /* In the docs */
+
+  .doc-links {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+    gap: 1.25rem 2rem;
+    padding: 0;
+    list-style: none;
+  }
+
+  .doc-links a {
+    font-weight: 600;
+  }
+
+  .doc-links p {
+    margin-top: 0.125rem;
+    font-size: 0.9375rem;
+    line-height: 1.55;
+  }
+
+  .site-footer {
+    border-top: 1px solid var(--sl-color-hairline-shade);
+    background-color: var(--sl-color-bg-nav);
+    font-size: 0.9375rem;
+  }
+
+  .site-footer .bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem 2rem;
+    padding-block: 1.5rem;
+  }
+
+  @media (min-width: 50em) {
+    .bar,
+    .wrap {
+      padding-inline: 1.5rem;
+    }
+
+    .site-header .bar {
+      height: 4rem;
+    }
+
+    .band {
+      padding-block: 3.5rem;
+    }
+
+    h2 {
+      font-size: 1.8125rem;
+    }
+
+    .lead {
+      font-size: 1.25rem;
+    }
+  }
+
+  @media (min-width: 60em) {
+    .flow {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1.1fr) minmax(0, 1fr);
+      align-items: center;
+    }
+
+    .node {
+      min-height: 8rem;
+    }
+
+    /* Equal rows above and below keep the cable level with the middle of the boxes it joins. */
+    .link {
+      align-self: stretch;
+      grid-template-rows: 1fr auto 1fr;
+      justify-items: stretch;
+      gap: 0.625rem;
+      padding-block: 0;
+    }
+
+    .link-label {
+      align-self: end;
+    }
+
+    .link-note {
+      align-self: start;
+    }
+
+    .cable {
+      flex-direction: column;
+      gap: 0.5rem;
+      padding-block: 0.625rem;
+      padding-inline: 0;
+      border-inline: 0;
+      border-block: 1px solid var(--sl-color-gray-4);
+    }
+
+    .lane {
+      min-height: 0;
+    }
+
+    .wire {
+      inset-inline: 0;
+      inset-block: calc(50% - 1px) auto;
+      width: auto;
+      height: 2px;
+    }
+
+    .steps {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 2.5rem;
+    }
+
+    .split {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  /* Side by side only where the example's longest line (70 characters) fits without scrolling. */
+  @media (min-width: 80em) {
+    .hero {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
+      align-items: center;
+      gap: 4rem;
+      padding-block: 5rem;
+    }
+  }
+</style>
