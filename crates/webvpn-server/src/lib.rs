@@ -17,6 +17,11 @@ mod tcp;
 mod testing;
 mod transport;
 mod udp;
+#[cfg(feature = "websocket")]
+pub mod websocket;
+#[cfg(feature = "webtransport")]
+pub mod webtransport;
+#[cfg(feature = "websocket")]
 mod ws;
 
 pub use metrics::{Counter, Metrics};

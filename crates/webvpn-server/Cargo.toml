@@ -7,17 +7,30 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+default = ["webtransport", "websocket"]
+# The WebTransport carrier.
+webtransport = ["dep:wtransport"]
+# The WebSocket carrier, for clients without WebTransport.
+websocket = ["dep:futures", "dep:tokio-rustls", "dep:tokio-tungstenite"]
+# Closes a WebTransport session with a CLOSE_WEBTRANSPORT_SESSION capsule, the only close whose code a browser
+# shows a page. Needs a wtransport that has `Connection::close_session` (its pull request 337), so it is off by
+# default.
+close-capsule = ["webtransport"]
+
 [dependencies]
 webvpn-proto = { path = "../webvpn-proto", version = "0.1.0" }
 anyhow = "1"
 bytes = "1"
-futures = "0.3"
+futures = { version = "0.3", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 socket2 = "0.5.7"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
-tokio-tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"], optional = true }
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["handshake"], optional = true }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
+wtransport = { version = "=0.7.2", features = ["quinn"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time", "test-util"] }

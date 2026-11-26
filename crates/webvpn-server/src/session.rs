@@ -14,6 +14,7 @@ use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{self, AbortHandle, JoinError, JoinSet};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, warn};
 use webvpn_proto::{close, ClientPacket, DecodeError, ErrorCode, Hello, RelayPacket, UdpPacket};
 
@@ -132,13 +133,13 @@ pub(crate) async fn run<T: Transport, S: Session>(
     }
 
     let (replies, mut reply_queue) = mpsc::channel(100);
-    let mut writer = tokio::spawn(async move {
+    let mut writer = AbortOnDropHandle::new(tokio::spawn(async move {
         let mut send = send;
         while let Some(packet) = reply_queue.recv().await {
             write(&mut send, &packet).await?;
         }
         Ok::<_, std::io::Error>(())
-    });
+    }));
 
     let peer = transport.remote_ip();
     let lookup_slots = relay.dns.as_ref().map(|dns| dns.visitor_slots(peer));
@@ -161,7 +162,7 @@ pub(crate) async fn run<T: Transport, S: Session>(
         lookups: JoinSet::new(),
     };
     let (upload_sender, mut upload_queue) = mpsc::channel(UPLOAD_CHANNEL_BUFFER);
-    let accepting = tokio::spawn(accept_upload_streams(state.handle.clone(), upload_sender));
+    let accepting = AbortOnDropHandle::new(tokio::spawn(accept_upload_streams(state.handle.clone(), upload_sender)));
 
     let mut writer_done = false;
     let mut drain_announced = false;
