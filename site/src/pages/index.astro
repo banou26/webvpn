@@ -11,7 +11,7 @@ const capabilities = [
 ]
 
 const steps = [
-  { title: 'One session', text: 'The client opens a WebTransport session to a relay, HTTP/3 over QUIC on UDP port 443. Where WebTransport is missing or does not open, it uses a WebSocket over TLS on TCP port 8443, with the same protocol.' },
+  { title: 'One session', text: 'The client opens a WebTransport session to a relay, HTTP/3 over QUIC. Where WebTransport is missing or does not open, it uses a WebSocket over TLS, with the same protocol.' },
   { title: 'A stream per socket', text: 'The first stream carries small binary control frames: connect, listen, bind, set an option, look a name up. Each TCP connection and each UDP socket then gets a stream of its own.' },
   { title: 'Real sockets on the relay', text: 'The relay opens an operating system socket for each one, from its own address, and moves the bytes between it and its stream. The other end sees the relay’s address, not the person’s.' },
 ]
@@ -157,8 +157,8 @@ const docs = [
           <h2 id="relays">The public relays</h2>
           <p>
             Horion Corporation runs public relays in Prague and Hong Kong, as part of <a href="https://fkn.app">FKN</a>.
-            The client measures one round trip to each and picks by distance and load, and an app can ask for a relay
-            or a region for each socket.
+            FKN’s library measures one round trip to each and picks by distance and load, and an app can ask for a
+            relay or a region for each socket.
           </p>
           <ul class="relay-list">
             <li><span class="place">Prague, Czech Republic</span> <span><code>cz-prg-001</code>, region <code>eu</code></span></li>
