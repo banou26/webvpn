@@ -1,0 +1,31 @@
+# One vector per line: its group, its name, its bytes in hex. `client` and `relay` are control frames by sender,
+# `data` is a packet outside the control stream. Each implementation builds the named packet in its own tests and
+# checks it against these bytes in both directions.
+client hello             00000000115756504e0001000000006578616d706c65
+client auth              010000000800000006deadbeef
+client auth-clear        020000000400000006
+client tcp-connect       100000000b0000000100c000020701bb
+client tcp-connect-name  11000000080000000901bb0102
+client tcp-close         12000000080000000b00000005
+client tcp-reset         13000000080000000c00000005
+client tcp-set-option    140000000e000000050000000502010000001e
+client tcp-listen        200000000b0000000400cb0071091f90
+client tcp-unlisten      21000000080000000d00000006
+client udp-bind          30000000170000000301000000000000000000000000000000000000
+client udp-close         31000000080000000e00000009
+client udp-connect       320000000f0000000f0000000900c00002070035
+client udp-disconnect    33000000080000001000000009
+client udp-set-option    34000000110000000a0000000905ef01020300000000
+client dns-query         400000000700000008010203
+relay  hello             00000000115756504e00010000000377656276706e64
+relay  ok                010000000400000007
+relay  error             0200000018000000020010636f6e6e656374696f6e2072656675736564
+relay  socket-connected  0300000016000000010000000500c6336404c35000c000020701bb
+relay  socket-bound      0300000010000000040000000600cb0071091f9002
+relay  dns-answer        0400000006000000080908
+relay  accepted          1000000016000000060000000700cb0071091f9000c6336404c350
+relay  accept-refused    110000000d00000006000300c6336404c350
+relay  draining          2000000000
+data   udp-packet        0000000900c00002070035000000026869
+data   udp-packet-bare   0000000902000000026869
+data   mux-open-tcp      000000000300
