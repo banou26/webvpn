@@ -1,0 +1,11 @@
+[package]
+name = "webvpn-server"
+description = "The WebVPN relay as a library: sessions, sockets and the policy a relay's operator plugs in"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+webvpn-proto = { path = "../webvpn-proto", version = "0.1.0" }
