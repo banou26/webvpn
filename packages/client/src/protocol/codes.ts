@@ -24,6 +24,8 @@ export const ErrorCode = {
   /** The credential was not accepted; the session is as it was. */
   AUTH_FAILED: 6,
   UNKNOWN_SOCKET: 7,
+  /** The relay could not open the socket's stream in time: the session has no room for more streams, and a new session has. */
+  NO_STREAM: 8,
   CONNECTION_REFUSED: 16,
   TIMED_OUT: 17,
   HOST_UNREACHABLE: 18,

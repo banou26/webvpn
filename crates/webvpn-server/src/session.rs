@@ -287,7 +287,7 @@ impl<R: AsyncRead + Unpin> ControlReader<R> {
 impl<T: Transport, S: Session> SessionHandle<T, S> {
     /// Queues a frame for the control stream. The writer task drains the queue, so this waits only on the client
     /// reading its control stream.
-    async fn reply(&self, packet: RelayPacket) {
+    pub(crate) async fn reply(&self, packet: RelayPacket) {
         let _ = self.replies.send(packet).await;
     }
 }
@@ -443,7 +443,7 @@ impl<T: Transport, S: Session> State<T, S> {
     }
 }
 
-fn error(id: u32, refusal: Refusal) -> RelayPacket {
+pub(crate) fn error(id: u32, refusal: Refusal) -> RelayPacket {
     RelayPacket::Error { id, code: refusal.code, message: refusal.message.into_owned() }
 }
 

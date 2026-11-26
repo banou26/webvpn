@@ -106,6 +106,7 @@ Any request may be answered by `Error` instead.
 | 5 | `AUTH_REQUIRED` | the relay takes this only after an `Auth` |
 | 6 | `AUTH_FAILED` | the credential was not accepted; the session is as it was |
 | 7 | `UNKNOWN_SOCKET` | no open socket has this id |
+| 8 | `NO_STREAM` | the relay could not open the socket's stream in time; the session has no room for more streams, and a new session has |
 | 16 | `CONNECTION_REFUSED` | the peer refused the connection |
 | 17 | `TIMED_OUT` | the peer did not answer in time |
 | 18 | `HOST_UNREACHABLE` | no route to the host |
@@ -143,8 +144,8 @@ yet.
   relay's side.
 - A peer that resets the connection makes the relay reset its side of the stream with code 1.
 - `TcpClose` ends the socket in order. `TcpReset` ends it with a reset toward the peer and drops what was not sent.
-  Both are answered `Ok`, also for a socket that is already gone, and the relay then resets its side of the stream
-  with code 0.
+  Both are answered `Ok`, also for a socket that is already gone, and the relay then ends its side of the stream:
+  over WebTransport with a reset of code 0, over the mux with `FIN`.
 
 | `TcpOption` tag | Name | Value |
 | --- | --- | --- |

@@ -42,6 +42,9 @@ impl ErrorCode {
     /// The credential was not accepted; the session is as it was.
     pub const AUTH_FAILED: Self = Self(6);
     pub const UNKNOWN_SOCKET: Self = Self(7);
+    /// The relay could not open the socket's stream in time: the session has no room for more streams, and a new
+    /// session has.
+    pub const NO_STREAM: Self = Self(8);
     pub const CONNECTION_REFUSED: Self = Self(16);
     pub const TIMED_OUT: Self = Self(17);
     pub const HOST_UNREACHABLE: Self = Self(18);

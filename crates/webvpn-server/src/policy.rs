@@ -19,6 +19,25 @@ impl Refusal {
     pub fn new(code: ErrorCode, message: impl Into<Cow<'static, str>>) -> Self {
         Self { code, message: message.into() }
     }
+
+    /// What a failed system call becomes for the client: the code its kind maps to and the system's own text, which
+    /// names no address.
+    pub(crate) fn from_io(error: &std::io::Error) -> Self {
+        use std::io::ErrorKind;
+        let code = match error.kind() {
+            ErrorKind::ConnectionRefused => ErrorCode::CONNECTION_REFUSED,
+            ErrorKind::TimedOut => ErrorCode::TIMED_OUT,
+            ErrorKind::HostUnreachable => ErrorCode::HOST_UNREACHABLE,
+            ErrorKind::NetworkUnreachable => ErrorCode::NETWORK_UNREACHABLE,
+            ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted => ErrorCode::CONNECTION_RESET,
+            ErrorKind::AddrInUse => ErrorCode::ADDRESS_IN_USE,
+            ErrorKind::AddrNotAvailable => ErrorCode::ADDRESS_NOT_AVAILABLE,
+            _ => ErrorCode::OTHER,
+        };
+        // an error made in this crate may hold any text, the system's own holds its message and number only
+        let message = if error.raw_os_error().is_some() { error.to_string() } else { error.kind().to_string() };
+        Self::new(code, message)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

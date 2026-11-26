@@ -19,10 +19,10 @@ pub trait SendHalf: AsyncWrite + Unpin + Send + 'static {
     /// peer reset its connection. Finishing the stream instead would tell the client the peer closed in order.
     fn fail(&mut self) {}
 
-    /// Ends the stream at once with `webvpn_proto::reset::CLOSED`, dropping what is unsent, for a socket the client
-    /// closed.
+    /// Ends the stream for a socket the client closed, dropping what is unsent. The default does nothing, which
+    /// leaves the stream to finish when it is dropped.
     ///
-    /// Over WebTransport this must be a stream reset and not the finish a dropped stream sends. Firefox (151 and 158
+    /// Over WebTransport this must be a reset with `webvpn_proto::reset::CLOSED` and not that finish. Firefox (151 and 158
     /// measured, bug 1986138) forgets a stream on the STOP_SENDING that dropping its receive side sends, and quinn
     /// writes that frame ahead of the finish, so the finish is never read, the stream is kept, and its credit never
     /// returns: a session stopped opening streams after about 100 such closes. A reset ends the client's receive
