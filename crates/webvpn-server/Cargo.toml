@@ -34,4 +34,8 @@ wtransport = { version = "=0.7.2", features = ["quinn"], optional = true }
 
 [dev-dependencies]
 rcgen = { version = "0.14", default-features = false, features = ["ring"] }
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time", "test-util"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time", "test-util"] }
+
+[[example]]
+name = "embed"
+required-features = ["websocket"]
