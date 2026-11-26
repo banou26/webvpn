@@ -10,6 +10,8 @@ mod policy;
 mod relay;
 mod session;
 mod tcp;
+#[cfg(test)]
+mod testing;
 mod transport;
 mod udp;
 mod ws;
