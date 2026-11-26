@@ -239,9 +239,12 @@ For a client without WebTransport, one WebSocket carries the same streams. Every
 | 2 | `FIN` | both | nothing; this side of the stream is finished |
 | 3 | `RESET` | both | nothing, or a `u32` code as a stream reset carries it |
 | 4 | `DATAGRAM` | client | one `UdpPacket` |
-| 5 | `CREDIT` | client | `u32`: more bytes the relay may send on this stream |
+| 5 | `CREDIT` | client | `u32`: more `DATA` bytes the relay may send on this stream |
 
 - Stream 0 is the control stream. It is never opened, never credited, and its frames go ahead of other streams'.
+- Every other stream starts with a window of 1048576 bytes. The relay sends no `DATA` byte past the window, and each
+  `CREDIT` adds to it. A client credits the bytes it has taken off a stream, so a slow reader on one stream holds
+  back that stream only.
 - Every other stream starts as its WebTransport twin does, with the socket id.
 - A UDP socket has one stream toward the client, and its datagrams toward the relay travel as `DATAGRAM` frames.
 - A receiver ignores a message shorter than five bytes and a kind it does not know.
