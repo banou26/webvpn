@@ -250,7 +250,7 @@ mod tests {
     use webvpn_proto::{close, features, ip, ClientPacket, Hello, RelayPacket};
 
     use super::*;
-    use crate::packet::tests::{ports, v4, CLIENT_V4, CLIENT_V6};
+    use crate::packet::tests::{ports, ports_back, v4, CLIENT_V4, CLIENT_V6};
     use crate::relay::STOPPING;
     use crate::testing::{TestForwarder, WAIT};
     use crate::{Basic, Config, Counter};
@@ -748,7 +748,7 @@ mod tests {
         client.frame(kind::DATA, stream, &frame).await;
         assert_eq!(forwarder.sent(1).await, [up]);
 
-        let down = v4([192, 0, 2, 7].into(), CLIENT_V4, 17, 0, &[], &ports(40000));
+        let down = v4([192, 0, 2, 7].into(), CLIENT_V4, 17, 0, &[], &ports_back(53));
         assert!(forwarder.deliver(0, down.clone()));
         let mut frame = Vec::new();
         ip::encode(&down, &mut frame);

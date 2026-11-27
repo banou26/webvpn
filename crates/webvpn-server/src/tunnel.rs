@@ -1,7 +1,7 @@
 //! An IP tunnel: the end a forwarder gave a client, and the pumps between it and the tunnel's stream.
 
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -9,6 +9,7 @@ use tokio::sync::{mpsc, Semaphore};
 use tokio::time::Instant;
 use webvpn_proto::{ip, ClientPacket, ErrorCode, RelayPacket};
 
+use crate::flow::{Flows, MAX_FLOWS};
 use crate::metrics::Counter;
 use crate::packet;
 use crate::policy::{Direction, Refusal, Session};
@@ -108,11 +109,16 @@ async fn run<T: Transport, S: Session>(
     let (ipv4, ipv6) = (end.ipv4, end.ipv6);
     let budget = Arc::new(Semaphore::new(QUEUE_BYTES));
     let (queue, mut queued) = mpsc::unbounded_channel();
+    let flows = Mutex::new(Flows::new(MAX_FLOWS));
 
     let mut from_forwarder = Box::pin(async {
         while let Some(packet) = end.packets.recv().await {
             if packet.len() > mtu {
                 metrics.count(Counter::IpDroppedTooLong);
+                continue;
+            }
+            if let Err(dropped) = flows.lock().unwrap().admit(&packet, ipv4, ipv6, Instant::now()) {
+                metrics.count(dropped);
                 continue;
             }
             metrics.add(Counter::BytesDown, packet.len() as u64);
@@ -161,7 +167,7 @@ async fn run<T: Transport, S: Session>(
                 metrics.count(Counter::IpDroppedRate);
                 continue;
             }
-            let ((proto, target), _) = match packet::check(packet, ipv4, ipv6) {
+            let ((proto, target), header) = match packet::check(packet, ipv4, ipv6) {
                 Ok(checked) => checked,
                 Err(dropped) => {
                     metrics.count(dropped);
@@ -177,6 +183,7 @@ async fn run<T: Transport, S: Session>(
             }
             metrics.add(Counter::BytesUp, length as u64);
             session.policy.relayed(Direction::Up, length).await;
+            flows.lock().unwrap().sent(&header, Instant::now());
             forwarder.send(packet);
             metrics.count(Counter::IpPacketsUp);
         }
@@ -257,7 +264,7 @@ mod tests {
     use webvpn_proto::{features, Hello};
 
     use super::*;
-    use crate::packet::tests::{ports, v4, v6, CLIENT_V4, CLIENT_V6};
+    use crate::packet::tests::{ports, ports_back, v4, v6, CLIENT_V4, CLIENT_V6};
     use crate::policy::{Auth, Proto, Slot, SocketKind};
     use crate::relay::{Config, Shared};
     use crate::session::{run, Setup, UdpCarrier};
@@ -268,7 +275,9 @@ mod tests {
     const REFUSED: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 66);
     const OWN: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 7);
     const UDP: u8 = 17;
+    const TCP: u8 = 6;
     const ICMP: u8 = 1;
+    const ROUTER: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 254);
 
     /// A policy that refuses one destination, notes what it is asked and the bytes it meters each way, accepts the
     /// credential `ok`, and holds a permit for each open socket.
@@ -457,12 +466,27 @@ mod tests {
         v4(CLIENT_V4, target, UDP, 0, &[], &ports(53))
     }
 
-    /// A packet toward the client, `bytes` long, holding `index` past its header.
-    fn toward_client(index: u16, bytes: usize) -> Vec<u8> {
-        let mut payload = ports(40000);
+    /// A UDP packet from the forwarder's tunnel `tunnel` to `SITE` at port 53.
+    fn udp_from(tunnel: usize) -> Vec<u8> {
+        v4(TestForwarder::addresses(tunnel).0, SITE, UDP, 0, &[], &ports(53))
+    }
+
+    /// The answer to [`udp_from`] toward the forwarder's tunnel `tunnel`, `bytes` long, holding `index` past its
+    /// header.
+    fn toward_client(tunnel: usize, index: u16, bytes: usize) -> Vec<u8> {
+        let mut payload = ports_back(53);
         payload.extend_from_slice(&index.to_be_bytes());
         payload.resize(bytes - 20, 0);
-        v4(SITE, CLIENT_V4, UDP, 0, &[], &payload)
+        v4(SITE, TestForwarder::addresses(tunnel).0, UDP, 0, &[], &payload)
+    }
+
+    /// An ICMP message of `kind` whose second word holds `identifier`, followed by `rest`.
+    fn icmp(kind: u8, identifier: u16, rest: &[u8]) -> Vec<u8> {
+        let mut message = vec![kind, 0, 0, 0];
+        message.extend(identifier.to_be_bytes());
+        message.extend([0, 1]);
+        message.extend(rest);
+        message
     }
 
     #[tokio::test]
@@ -490,8 +514,8 @@ mod tests {
         assert_eq!(*harness.policy.asked.lock().unwrap(), [(Proto::Udp, SocketAddr::from((SITE, 53)))]);
 
         // one longer than the tunnel's mtu is dropped
-        assert!(harness.forwarder.deliver(0, toward_client(6, usize::from(MTU) + 1)));
-        let down = toward_client(7, 600);
+        assert!(harness.forwarder.deliver(0, toward_client(0, 6, usize::from(MTU) + 1)));
+        let down = toward_client(0, 7, 600);
         assert!(harness.forwarder.deliver(0, down.clone()));
         assert_eq!(tunnel.next().await, down);
         eventually(|| harness.count(Counter::IpPacketsDown) == 1).await;
@@ -569,16 +593,19 @@ mod tests {
         let mut harness = tunnelling(2).await;
         let mut stuck = harness.open(1, 0).await;
         let mut other = harness.open(2, 1).await;
+        stuck.send(&udp_from(0)).await;
+        other.send(&udp_from(1)).await;
+        harness.forwarder.sent(2).await;
         const SENT: u16 = 200;
         for index in 0..SENT {
-            assert!(harness.forwarder.deliver(0, toward_client(index, 1400)), "the forwarder waits on no tunnel");
+            assert!(harness.forwarder.deliver(0, toward_client(0, index, 1400)), "the forwarder waits on no tunnel");
         }
         eventually(|| harness.policy.metered()[1] == usize::from(SENT) * 1400).await;
         let dropped = harness.count(Counter::IpDroppedQueueFull);
         assert!(dropped > 0);
 
         assert_eq!(harness.ask(ClientPacket::AuthClear { id: 3 }).await, RelayPacket::Ok { id: 3 });
-        let unstuck = toward_client(0, 100);
+        let unstuck = toward_client(1, 0, 100);
         assert!(harness.forwarder.deliver(1, unstuck.clone()));
         assert_eq!(other.next().await, unstuck);
 
@@ -692,5 +719,94 @@ mod tests {
         }
         tunnel.send(&udp_to(SITE)).await;
         assert_eq!(harness.forwarder.sent(1).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn only_an_answer_to_a_flow_the_tunnel_sent_reaches_its_client_and_is_metered() {
+        let mut harness = tunnelling(1).await;
+        let mut tunnel = harness.open(1, 0).await;
+        tunnel.send(&udp_to(SITE)).await;
+        harness.forwarder.sent(1).await;
+
+        let answer = toward_client(0, 1, 100);
+        let mut other_port = answer.clone();
+        other_port[21] += 1;
+        let other_source = v4(Ipv4Addr::new(203, 0, 113, 10), CLIENT_V4, UDP, 0, &[], &answer[20..]);
+        let other_protocol = v4(SITE, CLIENT_V4, TCP, 0, &[], &answer[20..]);
+        for unasked in [other_port, other_source, other_protocol, answer.clone()] {
+            assert!(harness.forwarder.deliver(0, unasked));
+        }
+        assert_eq!(tunnel.next().await, answer);
+        eventually(|| harness.count(Counter::IpPacketsDown) == 1).await;
+        assert_eq!(harness.count(Counter::IpDroppedUnasked), 3);
+        assert_eq!(harness.policy.metered()[1], answer.len());
+    }
+
+    #[tokio::test]
+    async fn nothing_reaches_a_tunnel_that_sent_nothing() {
+        let mut harness = tunnelling(1).await;
+        let mut tunnel = harness.open(1, 0).await;
+        assert!(harness.forwarder.deliver(0, toward_client(0, 1, 100)));
+        eventually(|| harness.count(Counter::IpDroppedUnasked) == 1).await;
+
+        tunnel.send(&udp_to(SITE)).await;
+        harness.forwarder.sent(1).await;
+        let answer = toward_client(0, 2, 100);
+        assert!(harness.forwarder.deliver(0, answer.clone()));
+        assert_eq!(tunnel.next().await, answer);
+        assert_eq!(harness.policy.metered()[1], answer.len());
+    }
+
+    #[tokio::test]
+    async fn an_echo_reply_reaches_the_client_only_with_its_request_s_identifier() {
+        let mut harness = tunnelling(1).await;
+        let mut tunnel = harness.open(1, 0).await;
+        tunnel.send(&v4(CLIENT_V4, SITE, ICMP, 0, &[], &icmp(8, 7, &[]))).await;
+        harness.forwarder.sent(1).await;
+
+        let reply = v4(SITE, CLIENT_V4, ICMP, 0, &[], &icmp(0, 7, &[]));
+        assert!(harness.forwarder.deliver(0, v4(SITE, CLIENT_V4, ICMP, 0, &[], &icmp(0, 8, &[]))));
+        assert!(harness.forwarder.deliver(0, reply.clone()));
+        assert_eq!(tunnel.next().await, reply);
+        assert_eq!(harness.count(Counter::IpDroppedUnasked), 1);
+    }
+
+    #[tokio::test]
+    async fn a_time_exceeded_about_a_packet_the_tunnel_sent_reaches_its_client() {
+        let mut harness = tunnelling(1).await;
+        let mut tunnel = harness.open(1, 0).await;
+        let sent = udp_to(SITE);
+        tunnel.send(&sent).await;
+        harness.forwarder.sent(1).await;
+
+        let about_another = v4(CLIENT_V4, SITE, UDP, 0, &[], &ports(54));
+        assert!(harness.forwarder.deliver(0, v4(ROUTER, CLIENT_V4, ICMP, 0, &[], &icmp(11, 0, &about_another))));
+        let exceeded = v4(ROUTER, CLIENT_V4, ICMP, 0, &[], &icmp(11, 0, &sent[..28]));
+        assert!(harness.forwarder.deliver(0, exceeded.clone()));
+        assert_eq!(tunnel.next().await, exceeded);
+        assert_eq!(harness.count(Counter::IpDroppedUnasked), 1);
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_answered_a_tunnel_reaches_no_later_tunnel_given_its_address() {
+        let mut harness = tunnelling(1).await;
+        let mut first = harness.open(1, 0).await;
+        first.send(&udp_to(SITE)).await;
+        harness.forwarder.sent(1).await;
+        assert!(harness.forwarder.deliver(0, toward_client(0, 1, 100)));
+        assert_eq!(first.next().await, toward_client(0, 1, 100));
+        let close = ClientPacket::IpClose { id: 2, socket: first.socket };
+        assert_eq!(harness.ask(close).await, RelayPacket::Ok { id: 2 });
+
+        let mut second = harness.open(3, 0).await;
+        assert!(harness.forwarder.deliver(0, toward_client(0, 2, 100)));
+        eventually(|| harness.count(Counter::IpDroppedUnasked) == 1).await;
+        // the second tunnel's own flow, to another port of the same peer, still gets its answers
+        second.send(&v4(CLIENT_V4, SITE, UDP, 0, &[], &ports(54))).await;
+        harness.forwarder.sent(2).await;
+        let own = v4(SITE, CLIENT_V4, UDP, 0, &[], &ports_back(54));
+        assert!(harness.forwarder.deliver(0, own.clone()));
+        assert_eq!(second.next().await, own);
+        assert_eq!(harness.count(Counter::IpDroppedUnasked), 1);
     }
 }

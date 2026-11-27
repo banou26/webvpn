@@ -7,6 +7,7 @@ mod dns;
 #[cfg(test)]
 mod e2e;
 pub mod egress;
+mod flow;
 mod hairpin;
 mod listener;
 mod metrics;

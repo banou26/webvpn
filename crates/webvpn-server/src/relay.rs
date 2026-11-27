@@ -651,6 +651,7 @@ mod tests {
             r#"webvpn_udp_dropped_total{reason="channel_full"} 0"#,
             r#"webvpn_ip_packets_total{direction="up"} 0"#,
             r#"webvpn_ip_dropped_total{reason="queue_full"} 0"#,
+            r#"webvpn_ip_dropped_total{reason="unasked"} 0"#,
         ] {
             assert!(rendered.lines().any(|line| line == expected), "{expected:?} is not in\n{rendered}");
         }

@@ -211,6 +211,14 @@ pub(crate) mod tests {
         ports
     }
 
+    /// The first bytes of a UDP or TCP header that answers [`ports`]: from `port` to port 40000.
+    pub(crate) fn ports_back(port: u16) -> Vec<u8> {
+        let mut ports = port.to_be_bytes().to_vec();
+        ports.extend_from_slice(&40000u16.to_be_bytes());
+        ports.extend_from_slice(&[0; 4]);
+        ports
+    }
+
     /// An IPv6 extension header of 8 bytes naming `next`, with `third` as its third byte (a routing header's type).
     fn extension(next: u8, third: u8) -> [u8; 8] {
         [next, 0, third, 0, 0, 0, 0, 0]

@@ -85,9 +85,15 @@ pub enum Counter {
     IpDroppedRate,
     /// IP tunnel packets toward a client dropped because the tunnel's queue was full.
     IpDroppedQueueFull,
+    /// IP tunnel packets from the forwarder that were not a whole IPv4 or IPv6 packet.
+    IpDroppedDownInvalid,
+    /// IP tunnel packets from the forwarder to an address that is not their tunnel's.
+    IpDroppedDownDestination,
+    /// IP tunnel packets from the forwarder that answer no flow their tunnel sent.
+    IpDroppedUnasked,
 }
 
-const COUNTERS: usize = Counter::IpDroppedQueueFull as usize + 1;
+const COUNTERS: usize = Counter::IpDroppedUnasked as usize + 1;
 
 /// A relay's counters, read one by one with [`get`](Self::get) or all at once with [`render`](Self::render). Each
 /// relay has its own.
@@ -252,6 +258,9 @@ impl Metrics {
                 (r#"{reason="refused"}"#, get(IpDroppedRefused)),
                 (r#"{reason="rate"}"#, get(IpDroppedRate)),
                 (r#"{reason="queue_full"}"#, get(IpDroppedQueueFull)),
+                (r#"{reason="down_invalid"}"#, get(IpDroppedDownInvalid)),
+                (r#"{reason="down_destination"}"#, get(IpDroppedDownDestination)),
+                (r#"{reason="unasked"}"#, get(IpDroppedUnasked)),
             ],
         );
         family(
