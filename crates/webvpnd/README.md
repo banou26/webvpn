@@ -22,7 +22,7 @@ level (`info` by default).
 | `WEBVPN_HTTP_PORT` | `8080` | The port of the plain HTTP listener: `/health`, `/ready` (503 once the relay is stopping), `/metrics` in the Prometheus format, and `/cert-hash`, the SHA-256 of the certificate for `serverCertificateHashes`. |
 | `WEBVPN_CERT`, `WEBVPN_KEY` | none | The paths of a PEM certificate chain and of its private key. Set both or neither. Both carriers use them, and the files are read again every 60 seconds, so a renewed certificate is served without closing a session. With neither, the relay makes a self-signed certificate at start, which a browser takes only by its hash and for 14 days at most. |
 | `WEBVPN_OWN_ADDRESSES` | none | The relay's own public addresses. A client that connects to one of them reaches a socket another client bound on the relay, or is refused. |
-| `WEBVPN_WATCH_OWN_IPV6` | `false` | Reads the relay's own global IPv6 addresses from the system every second, Linux only, and treats them as own addresses. |
+| `WEBVPN_WATCH_OWN_IPV6` | `false` | Reads the relay's own global IPv6 addresses from the system every second, and treats them as own addresses. Linux only: on another system the setting does nothing. |
 | `WEBVPN_LISTEN` | `true` | Lets clients listen for inbound TCP connections. |
 | `WEBVPN_DNS_UPSTREAM` | none | The DNS over HTTPS endpoint (RFC 8484) that answers the clients' name lookups. Unset, the relay looks up no names. |
 | `WEBVPN_MAX_SOCKETS_PER_SESSION` | `4096` | Sockets one session may hold at once. |

@@ -146,9 +146,9 @@ impl<P: Policy> Relay<P> {
 
     /// Reads the relay's own global IPv6 addresses from the system now, then again every second, and treats each as
     /// one of [`Config::own_addresses`]: a connection to one of them is routed to the socket a session bound on that
-    /// port, or refused, and so is a connection to another address on the same link. Linux only: elsewhere the
-    /// system lists none and nothing is added. Call it once, before the relay takes sessions. The reading ends
-    /// within a second of the relay, its clones and its sessions being dropped.
+    /// port, or refused, and so is a connection to another address on the same link. Linux only: on another system
+    /// nothing is read and nothing is added, and this returns `Ok`. Call it once, before the relay takes sessions.
+    /// The reading ends within a second of the relay, its clones and its sessions being dropped.
     ///
     /// An error means the system's list exists but could not be read or parsed, and nothing was started; it names no
     /// address. A later read that fails keeps the addresses read before.

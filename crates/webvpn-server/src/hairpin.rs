@@ -76,9 +76,12 @@ impl Hairpin {
     /// second. Call it once, before the relay takes sessions. The thread ends within a second of `self` being dropped.
     ///
     /// An error means the kernel's list exists but could not be read or parsed; it names no address. A kernel with
-    /// IPv6 off has no list, which reads as no IPv6. A failed later read keeps the addresses read before.
+    /// IPv6 off has no list, which reads as no IPv6. A failed later read keeps the addresses read before. Linux only:
+    /// on another system it reads nothing, starts no thread and adds no address.
     pub fn watch_kernel_ipv6(&self) -> std::io::Result<()> {
-        self.watch(KERNEL_IPV6.into())?;
+        if cfg!(target_os = "linux") {
+            self.watch(KERNEL_IPV6.into())?;
+        }
         Ok(())
     }
 
