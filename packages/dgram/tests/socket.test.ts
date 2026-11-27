@@ -58,6 +58,19 @@ describe('bind', () => {
     expect(six.address()).toEqual({ address: '::', family: 'IPv6', port: 41234 })
   })
 
+  // Node 26.12.1 on Linux (measured 2026-11-28): a bind and a connect take their port as a string of digits too, as
+  // one read from a setting is
+  it('binds and connects to a port given as a string', async () => {
+    const { relay, dgram } = setup()
+    const socket = dgram.createSocket('udp4')
+    socket.bind('6881' as unknown as number, '127.0.0.1')
+    await Promise.race([new Promise((resolve) => socket.once('listening', resolve)), wait(100)])
+    expect(relay.binds.at(-1)).toBe('127.0.0.1:6881')
+    socket.connect('7000' as unknown as number, '192.0.2.9')
+    await Promise.race([new Promise((resolve) => socket.once('connect', resolve)), wait(100)])
+    expect(socket.remoteAddress()).toEqual({ address: '192.0.2.9', family: 'IPv4', port: 7000 })
+  })
+
   it('looks a name up, an A record for udp4', async () => {
     const { relay, dgram } = setup()
     relay.names.set('home.example', ['192.0.2.4', '2001:db8::4'])

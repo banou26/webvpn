@@ -69,8 +69,8 @@ const received = (value: unknown) => {
   return `type ${typeof value} (${typeof value === 'string' ? `'${value}'` : String(value)})`
 }
 
-/** Node's check of a send's port: a number or a string of digits, from 1 to 65535. */
-const sendPort = (port: unknown) => {
+/** Node's check of the port a send or a connect goes to: a number or a string of digits, from 1 to 65535. */
+const peerPort = (port: unknown) => {
   const value = typeof port === 'string' && port.trim() ? Number(port) : port
   if (typeof value === 'number' && Number.isInteger(value) && value > 0 && value < 65536) return value
   throw Object.assign(new RangeError(`Port should be > 0 and < 65536. Received ${received(port)}.`), { code: 'ERR_SOCKET_BAD_PORT' })
@@ -139,7 +139,7 @@ class Socket extends EventEmitter {
     if (this._bound) throw coded('Socket is already bound', 'ERR_SOCKET_ALREADY_BOUND')
     const callback = typeof args.at(-1) === 'function' ? args.at(-1) as () => void : undefined
     const options = args[0] !== null && typeof args[0] === 'object' ? args[0] as { port?: number, address?: string } : undefined
-    const port = Number((options ? options.port : typeof args[0] === 'number' ? args[0] : 0) ?? 0)
+    const port = Number((options ? options.port : typeof args[0] === 'function' ? 0 : args[0]) ?? 0)
     const address = options ? options.address : typeof args[1] === 'string' ? args[1] : undefined
     const provider = this._provider()
     if (callback) this.once('listening', callback)
@@ -167,7 +167,7 @@ class Socket extends EventEmitter {
     if (this._closed) throw notRunning()
     const { data, port: given, address, callback } = sendArgs(args)
     const target = address === undefined && this._remote ? undefined : address ?? (this._type === 'udp6' ? '::1' : '127.0.0.1')
-    const port = target === undefined ? 0 : sendPort(given)
+    const port = target === undefined ? 0 : peerPort(given)
     const bound = this._bound ?? this.bind()._bound!
     const ip = target === undefined ? undefined : parseIp(target)
     // waits for the bind in the order of the calls; one a failed bind or close() cut off ends silently, as in Node.
@@ -198,8 +198,9 @@ class Socket extends EventEmitter {
     })
   }
 
-  connect(port: number, address?: string | ((error?: Error) => void), callback?: (error?: Error) => void): void {
+  connect(given: number, address?: string | ((error?: Error) => void), callback?: (error?: Error) => void): void {
     if (typeof address === 'function') [callback, address] = [address, undefined]
+    const port = peerPort(given)
     if (this._closed) throw notRunning()
     // as Node, a connect on its way counts as connected until it fails
     if (this._remote || this._connecting) throw coded('Already connected', 'ERR_SOCKET_DGRAM_IS_CONNECTED')
