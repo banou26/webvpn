@@ -58,13 +58,13 @@ For each socket the relay opens a real operating system socket, from its own add
 - **A listening port** is a port on the relay's address. Each connection to it is announced on the control stream and carried on a new stream.
 - **A name** is looked up by the relay. The client sends a whole DNS query, the relay sends it over HTTPS to the resolver its operator set, and passes the whole answer back. A relay with no resolver set looks no name up.
 
-The relay's policy decides which addresses a session may reach and which ports it may bind, and may pace and count its bytes. The default rules of `webvpnd` reach public addresses only, bind ports from 1024 up, and neither pace nor count: see [what the default rules allow](/docs/running-a-relay/#what-the-default-rules-allow). The public relays pace each person to their [fair use limits](/docs/relays/#fair-use-limits).
+The relay's policy decides which addresses a session may reach and which ports it may bind, and may pace and count its bytes. The default rules of `webvpnd` reach public addresses only, bind ports from 1024 up, and neither pace nor count: see [what the default rules allow](/docs/running-a-relay/#what-the-default-rules-allow).
 
 ## Who sees what
 
 | Who | What they see |
 | --- | --- |
 | The person's network | An encrypted connection to the relay: its name, its address and how much data passes. Not where the sockets go or what they carry. |
-| The relay | The person's IP address, each socket's destination address and port, and how much data passes. It carries the bytes as the app sent them: what the app's protocol encrypts, such as HTTPS, it cannot read. [What the relay keeps](/docs/what-the-relay-keeps/) says what the public relays keep. |
+| The relay | The person's IP address, each socket's destination address and port, and how much data passes. It carries the bytes as the app sent them: what the app's protocol encrypts, such as HTTPS, it cannot read. |
 | The DNS resolver | The names looked up, asked by the relay's address. |
 | The other end | A connection from the relay's address, never the person's. |

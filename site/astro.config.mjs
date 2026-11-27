@@ -21,14 +21,6 @@ export default defineConfig({
             { label: 'Embedding the relay', slug: 'docs/embedding' },
           ],
         },
-        {
-          label: 'The public relays',
-          items: [
-            { label: 'Relays', slug: 'docs/relays' },
-            { label: 'What the relay keeps', slug: 'docs/what-the-relay-keeps' },
-            { label: 'Network operators and rights holders', slug: 'docs/network-operators' },
-          ],
-        },
       ],
     }),
   ],

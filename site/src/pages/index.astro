@@ -23,9 +23,6 @@ const docs = [
   { href: '/docs/using/', title: 'Using it from an app', text: 'TCP, listening ports, UDP and lookups with @webvpn/client, and Node’s net and dgram.' },
   { href: '/docs/running-a-relay/', title: 'Running a relay', text: 'Host your own relay with webvpnd: ports, certificate and settings.' },
   { href: '/docs/embedding/', title: 'Embedding the relay', text: 'The relay inside a Rust program, under a policy of your own.' },
-  { href: '/docs/relays/', title: 'Relays', text: 'The public relays, their addresses and the fair use limits.' },
-  { href: '/docs/what-the-relay-keeps/', title: 'What the relay keeps', text: 'What a public relay keeps, and for how long.' },
-  { href: '/docs/network-operators/', title: 'Network operators', text: 'What traffic from the relay addresses is, and where to write.' },
 ]
 ---
 
@@ -152,39 +149,6 @@ const docs = [
         <p class="more"><a href="/docs/protocol/">The protocol in full</a></p>
       </section>
 
-      <div class="band wrap split">
-        <section aria-labelledby="relays">
-          <h2 id="relays">The public relays</h2>
-          <p>
-            Horion Corporation runs public relays in Prague and Hong Kong, as part of <a href="https://fkn.app">FKN</a>.
-            FKN’s library measures one round trip to each and picks by distance and load, and an app can ask for a
-            relay or a region for each socket.
-          </p>
-          <ul class="relay-list">
-            <li><span class="place">Prague, Czech Republic</span> <span><code>cz-prg-001</code>, region <code>eu</code></span></li>
-            <li><span class="place">Hong Kong</span> <span><code>hk-hkg-001</code>, region <code>asia</code></span></li>
-          </ul>
-          <p>Each person’s traffic is paced and counted per day, under fair use limits.</p>
-          <p class="more"><a href="/docs/relays/">Relays, addresses and limits</a></p>
-        </section>
-
-        <section aria-labelledby="keeps">
-          <h2 id="keeps">What the public relays keep</h2>
-          <ul class="keeps">
-            <li>No log of the sites reached through them.</li>
-            <li>
-              Your IP address is not stored, and it never leaves the relay. Usage is counted under a keyed hash that
-              changes every day, and the counts are deleted after about 25 hours.
-            </li>
-            <li>
-              What an app encrypts, such as HTTPS, the relay cannot read. It sees where each socket goes and how much
-              data passes.
-            </li>
-          </ul>
-          <p class="more"><a href="/docs/what-the-relay-keeps/">What the relay keeps</a></p>
-        </section>
-      </div>
-
       <section class="band wrap" aria-labelledby="in-docs">
         <h2 id="in-docs">In the docs</h2>
         <ul class="doc-links">
@@ -201,7 +165,7 @@ const docs = [
     <footer class="site-footer">
       <div class="bar">
         <a href="/docs/">Docs</a>
-        <p>The public relays are run by Horion Corporation as part of <a href="https://fkn.app">FKN</a>.</p>
+        <p>WebVPN is made by Horion for <a href="https://fkn.app">FKN</a>, which runs public relays.</p>
       </div>
     </footer>
   </body>
@@ -637,57 +601,6 @@ const docs = [
     line-height: 1.65;
   }
 
-  /* The public relays, and what they keep */
-
-  .split {
-    display: grid;
-    gap: 2.5rem 4rem;
-  }
-
-  .split section {
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-    max-width: 40rem;
-  }
-
-  .split h2 {
-    margin-bottom: 0.25rem;
-  }
-
-  .split .more {
-    margin-top: 0.25rem;
-  }
-
-  .relay-list,
-  .keeps {
-    display: grid;
-    gap: 0.75rem;
-    padding: 0;
-    list-style: none;
-    line-height: 1.55;
-  }
-
-  .relay-list li {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: space-between;
-    gap: 0.25rem 1rem;
-    padding: 0.75rem 1rem;
-    border: 1px solid var(--sl-color-gray-5);
-    border-radius: 0.75rem;
-  }
-
-  .place {
-    color: var(--sl-color-white);
-    font-weight: 600;
-  }
-
-  .keeps li {
-    padding-inline-start: 1rem;
-    border-inline-start: 2px solid var(--sl-color-text-accent);
-  }
-
   /* In the docs */
 
   .doc-links {
@@ -796,10 +709,6 @@ const docs = [
     .steps {
       grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 2.5rem;
-    }
-
-    .split {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
 
