@@ -31,7 +31,13 @@ export default defineConfig({
     projects: [
       {
         extends: true,
-        test: { name: 'unit', include: ['tests/**/*.test.ts'], exclude: ['tests/**/*.browser.test.ts'] },
+        test: {
+          name: 'unit',
+          include: ['tests/**/*.test.ts'],
+          exclude: ['tests/**/*.browser.test.ts'],
+          // the client's stack, which `tests/stack.test.ts` runs on, is built from its crate first
+          globalSetup: ['../client/tests/stack/wasm.ts'],
+        },
       },
       {
         extends: true,
