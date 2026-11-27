@@ -152,9 +152,11 @@ jobs:
           done
           echo "packages=${moved# }" >> "$GITHUB_OUTPUT"
 
+      # @webvpn/client's build compiles its TCP/IP stack, a Rust crate, to WebAssembly
       - name: Install and build
         if: steps.decide.outputs.packages != ''
         run: |
+          rustup target add wasm32-unknown-unknown
           npm ci
           npm run build
 
