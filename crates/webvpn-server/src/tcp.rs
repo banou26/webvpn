@@ -19,7 +19,7 @@ use crate::dns::{check_query, first_a_record};
 use crate::hairpin;
 use crate::metrics::Counter;
 use crate::policy::{Direction, Proto, Refusal, Session};
-use crate::session::{error, SessionHandle};
+use crate::session::{answer_as_gone, error, SessionHandle};
 use crate::transport::{open_bi_with_prefix, SendHalf, Transport};
 
 /// The largest send or receive buffer a client may set on one socket, so that the relay's ceiling on sockets also
@@ -298,8 +298,14 @@ where
     if download_failed && close.is_none() && !requests_closed {
         let client_close = async {
             while let Some(request) = requests.recv().await {
-                if let ClientPacket::TcpClose { id, .. } | ClientPacket::TcpReset { id, .. } = request {
-                    return Some(id);
+                match request {
+                    ClientPacket::TcpClose { id, .. } | ClientPacket::TcpReset { id, .. } => return Some(id),
+                    // the socket moves no more bytes, so it is answered as one that is gone
+                    other => {
+                        if let Some(answer) = answer_as_gone(other) {
+                            session.reply(answer).await;
+                        }
+                    }
                 }
             }
             None
@@ -1126,6 +1132,24 @@ pub(crate) mod tests {
         control.end(false).await;
         ends(task, WAIT).await;
         assert_eq!(events.lock().unwrap().last(), Some(&"upload dropped"));
+        within(writer).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_peer_reset_answers_a_request_that_comes_while_it_waits_for_the_close() {
+        let Relayed { mut control, upload, download, peer, task, events, .. } =
+            relayed(Probe::open(), pair(false).await, NO_RTT).await;
+        let writer = reset_under_writes(peer, upload, download).await;
+        assert_eq!(first_event(&events).await, "download failed");
+        sleep(Duration::from_millis(300)).await;
+        assert_eq!(*events.lock().unwrap(), ["download failed"], "the socket waits for the client's close");
+
+        let set = ClientPacket::TcpSetOption { id: 4, socket: 7, option: TcpOption::NoDelay(true) };
+        control.requests.send(set).await.unwrap();
+        let answer = timeout(Duration::from_secs(2), control.replies.recv()).await.expect("an answer in time");
+        assert_eq!(code(&answer.expect("an answer")), (4, ErrorCode::UNKNOWN_SOCKET));
+        control.end(false).await;
+        ends(task, WAIT).await;
         within(writer).await.unwrap();
     }
 

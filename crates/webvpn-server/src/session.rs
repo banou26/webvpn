@@ -374,22 +374,29 @@ impl<T: Transport, S: Session> SessionHandle<T, S> {
     pub(crate) async fn answer_left(&self, requests: &mut mpsc::Receiver<ClientPacket>) {
         requests.close();
         while let Ok(request) = requests.try_recv() {
-            let answer = match request {
-                ClientPacket::TcpClose { id, .. }
-                | ClientPacket::TcpReset { id, .. }
-                | ClientPacket::TcpUnlisten { id, .. }
-                | ClientPacket::UdpClose { id, .. } => RelayPacket::Ok { id },
-                ClientPacket::TcpSetOption { id, .. }
-                | ClientPacket::UdpSetOption { id, .. }
-                | ClientPacket::UdpConnect { id, .. }
-                | ClientPacket::UdpDisconnect { id, .. } => {
-                    error(id, Refusal::new(ErrorCode::UNKNOWN_SOCKET, "no open socket has this id"))
-                }
-                _ => continue,
-            };
-            self.reply(answer).await;
+            if let Some(answer) = answer_as_gone(request) {
+                self.reply(answer).await;
+            }
         }
     }
+}
+
+/// The answer to a request on an open socket, as for a socket that is gone: `Ok` for one that ends a socket,
+/// `UNKNOWN_SOCKET` for any other. None for a request that is not on an open socket.
+pub(crate) fn answer_as_gone(request: ClientPacket) -> Option<RelayPacket> {
+    Some(match request {
+        ClientPacket::TcpClose { id, .. }
+        | ClientPacket::TcpReset { id, .. }
+        | ClientPacket::TcpUnlisten { id, .. }
+        | ClientPacket::UdpClose { id, .. } => RelayPacket::Ok { id },
+        ClientPacket::TcpSetOption { id, .. }
+        | ClientPacket::UdpSetOption { id, .. }
+        | ClientPacket::UdpConnect { id, .. }
+        | ClientPacket::UdpDisconnect { id, .. } => {
+            error(id, Refusal::new(ErrorCode::UNKNOWN_SOCKET, "no open socket has this id"))
+        }
+        _ => return None,
+    })
 }
 
 /// What the session's control loop holds between requests.
