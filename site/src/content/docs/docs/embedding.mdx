@@ -143,8 +143,29 @@ The forwarder sends into a tunnel's channel with `try_send` and drops the packet
 - A tunnel is one of the session's sockets. The credential, `max_sockets_per_session` and `open_socket(SocketKind::IpTunnel)` apply as to any socket, and the tunnel holds its permit while it is open.
 - The relay drops, and counts, a packet from the client that is longer than the `mtu`, is not IPv4 or IPv6, has a header cut short, has an own length that is not the length it came with, comes from a source that is not the tunnel's address of its family, carries an IPv4 source route or an IPv6 type 0 routing header, or comes past the tunnel's packets a second.
 - Then `check_egress` decides on the destination, as for a socket. A TCP or UDP packet that holds its ports is asked about as `Proto::Tcp` or `Proto::Udp` with its destination port. A packet of another protocol, and a fragment after the first, is asked about as `Proto::Other` with the IP protocol number and port `0`. A policy that refuses a port refuses the first fragment, and the destination cannot put the datagram together without it. The relay never asks about its own addresses: it drops a packet to one.
-- A packet that passed is metered with `relayed(Direction::Up, length)`, then handed to `send`. A packet toward the client is metered with `relayed(Direction::Down, length)`, then queued for the tunnel's stream. When the queue is full the newest packet is dropped, so a slow client loses packets, as on a full link, and holds neither the forwarder nor another tunnel.
+- A packet that passed is metered with `relayed(Direction::Up, length)`, then handed to `send`. A packet toward the client that [answers the tunnel](#what-reaches-the-client) is metered with `relayed(Direction::Down, length)`, then queued for the tunnel's stream. When the queue is full the newest packet is dropped, so a slow client loses packets, as on a full link, and holds neither the forwarder nor another tunnel.
 - The relay's counters hold the tunnels' packets each way and their drops by reason, and a tunnel's bytes count with the sockets' bytes. Nothing the relay logs names an address or holds a packet.
+
+### What reaches the client
+
+The relay keeps, for each tunnel, the flows its client sent, and lets in only what answers one of them.
+
+- A flow is what a packet from the client that passed every check names: for TCP and UDP the protocol, the peer's address and both ports, for an ICMP echo request the peer's address and the echo identifier, and for any other protocol the protocol and the peer's address. A fragment after the first holds no ports and makes no flow.
+- A packet from the forwarder reaches the client only when it is a whole IPv4 or IPv6 packet, to the tunnel's address of its family, that answers a flow: the same protocol from the same peer between the same ports, an echo reply with the request's identifier, or a packet of another protocol from the peer. A fragment after the first passes from a peer the tunnel holds a flow of its protocol with. An ICMP error (destination unreachable, time exceeded, parameter problem, and for ICMPv6 packet too big) passes when it quotes the start of a packet of a flow the tunnel holds, from the tunnel's address, whichever router sent it.
+- Everything else is dropped and counted: `down_invalid` for what is not a whole packet, `down_destination` for a packet to another address, and `unasked` for one that answers no flow.
+
+The reason is that a forwarder hands a tunnel whatever arrives for its addresses. Where the forwarder translates addresses, as the kernel does, a translation outlives the tunnel that made it for as long as a peer keeps sending. Once the addresses go to another tunnel, that tunnel would receive the packets meant for the one before, and no wait before giving them out again prevents it. Only the relay knows when a tunnel ends, so the relay keeps the flows, and a new tunnel starts with none.
+
+A flow is forgotten once it stays silent both ways for its life. An answer refreshes its flow; an ICMP error does not.
+
+| Flow | Life after its last packet |
+| --- | --- |
+| A TCP connection the peer answered, with no FIN or RST yet | 2 hours 4 minutes, as RFC 5382 asks of a NAT |
+| A TCP connection not answered yet, or past a FIN or a RST | 2 minutes |
+| UDP | 5 minutes, as RFC 4787 recommends |
+| Any other | 2 minutes |
+
+A new SYN from the client on a TCP flow starts it over. A tunnel holds at most 3584 flows, about 360 KiB when full. A new flow that finds them all held first forgets the flows past their life, then, if none were, the ones silent longest, an eighth of the flows at once, so that a client that opens a new flow with every packet costs the relay a few steps a packet.
 
 ### Limits
 
@@ -153,6 +174,7 @@ The forwarder sends into a tunnel's channel with `try_send` and drops the packet
 | A packet | the forwarder's `mtu`, at least 1280 bytes |
 | Packets a second from one tunnel's client | `max_tunnel_packets_per_second`, 20000 by default |
 | Packets queued toward one client | 64 KiB, beyond what the tunnel's stream holds |
+| Flows one tunnel holds | 3584 |
 
 ## An example
 
