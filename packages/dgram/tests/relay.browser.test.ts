@@ -47,4 +47,16 @@ describe('dgram over a real relay', () => {
     expect(await reply).toBe('connected')
     await limited(new Promise<void>((resolve) => socket.close(resolve)))
   })
+
+  it('sends to an address again after a disconnect, from the port it had', async () => {
+    const socket = dgram.createSocket('udp4')
+    await limited(new Promise<void>((resolve) => socket.connect(echo.udp, '127.0.0.1', resolve)))
+    const { port } = socket.address()
+    socket.disconnect()
+    const reply = limited(new Promise<string>((resolve) => socket.once('message', (message: Uint8Array) => resolve(new TextDecoder().decode(message)))))
+    socket.send('after', echo.udp, '127.0.0.1')
+    expect(await reply).toBe('after')
+    expect(socket.address().port).toBe(port)
+    await limited(new Promise<void>((resolve) => socket.close(resolve)))
+  })
 })
