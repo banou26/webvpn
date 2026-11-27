@@ -29,27 +29,55 @@ pub(crate) type Destination = (Proto, SocketAddr);
 /// Why a packet was dropped, as the counter it is counted under.
 pub(crate) type Dropped = Counter;
 
-/// The destination of `packet`, one whole IPv4 or IPv6 packet from a client, or why it is dropped: not IP, a header
-/// cut short or that cannot be read, an own length that is not the packet's, a source that is not the tunnel's
-/// address of its family, or an IPv4 source route or IPv6 type 0 routing header.
-pub(crate) fn check(packet: &[u8], ipv4: Option<Ipv4Addr>, ipv6: Option<Ipv6Addr>) -> Result<Destination, Dropped> {
+/// An IP packet's header, as far as the relay reads it.
+#[derive(Debug)]
+pub(crate) struct Header<'a> {
+    pub source: IpAddr,
+    pub target: IpAddr,
+    /// The IP protocol number of the upper-layer header.
+    pub protocol: u8,
+    /// Whether the packet is a fragment after the first, which holds no upper-layer header.
+    pub later_fragment: bool,
+    /// The upper-layer header and what follows it.
+    pub upper: &'a [u8],
+}
+
+/// The destination of `packet`, one whole IPv4 or IPv6 packet from a client, and its header, or why it is dropped:
+/// not IP, a header cut short or that cannot be read, an own length that is not the packet's, an IPv4 source route or
+/// IPv6 type 0 routing header, or a source that is not the tunnel's address of its family.
+pub(crate) fn check(
+    packet: &[u8],
+    ipv4: Option<Ipv4Addr>,
+    ipv6: Option<Ipv6Addr>,
+) -> Result<(Destination, Header<'_>), Dropped> {
+    let header = read(packet, true)?;
+    let own = match header.source {
+        IpAddr::V4(source) => Some(source) == ipv4,
+        IpAddr::V6(source) => Some(source) == ipv6,
+    };
+    if !own {
+        return Err(Counter::IpDroppedSource);
+    }
+    Ok((destination(&header)?, header))
+}
+
+/// The header of `packet`, a whole IPv4 or IPv6 packet whose own length is its length, or with `whole` false the start
+/// of one that an ICMP error quotes, cut anywhere past its IP header. Or why it cannot be read, as [`check`] gives it.
+pub(crate) fn read(packet: &[u8], whole: bool) -> Result<Header<'_>, Dropped> {
     match packet.first().map(|byte| byte >> 4) {
-        Some(4) => check_v4(packet, ipv4),
-        Some(6) => check_v6(packet, ipv6),
+        Some(4) => read_v4(packet, whole),
+        Some(6) => read_v6(packet, whole),
         _ => Err(Counter::IpDroppedNotIp),
     }
 }
 
-fn check_v4(packet: &[u8], own: Option<Ipv4Addr>) -> Result<Destination, Dropped> {
+fn read_v4(packet: &[u8], whole: bool) -> Result<Header<'_>, Dropped> {
     let header = usize::from(packet[0] & 0x0f) * 4;
     if header < IPV4_HEADER_BYTES || header > packet.len() {
         return Err(Counter::IpDroppedHeader);
     }
-    if usize::from(u16_at(packet, 2)) != packet.len() {
+    if whole && usize::from(u16_at(packet, 2)) != packet.len() {
         return Err(Counter::IpDroppedLength);
-    }
-    if Some(Ipv4Addr::from(array_at(packet, 12))) != own {
-        return Err(Counter::IpDroppedSource);
     }
     let mut options = &packet[IPV4_HEADER_BYTES..header];
     while let Some(&option) = options.first() {
@@ -66,22 +94,26 @@ fn check_v4(packet: &[u8], own: Option<Ipv4Addr>) -> Result<Destination, Dropped
         }
         options = &options[length..];
     }
-    let target = Ipv4Addr::from(array_at(packet, 16));
-    let later_fragment = u16_at(packet, 6) & 0x1fff != 0;
-    destination(packet, header, packet[9], later_fragment, target.into())
+    Ok(Header {
+        source: Ipv4Addr::from(array_at(packet, 12)).into(),
+        target: Ipv4Addr::from(array_at(packet, 16)).into(),
+        protocol: packet[9],
+        later_fragment: u16_at(packet, 6) & 0x1fff != 0,
+        upper: &packet[header..],
+    })
 }
 
-fn check_v6(packet: &[u8], own: Option<Ipv6Addr>) -> Result<Destination, Dropped> {
+fn read_v6(packet: &[u8], whole: bool) -> Result<Header<'_>, Dropped> {
     if packet.len() < IPV6_HEADER_BYTES {
         return Err(Counter::IpDroppedHeader);
     }
-    if usize::from(u16_at(packet, 4)) != packet.len() - IPV6_HEADER_BYTES {
+    if whole && usize::from(u16_at(packet, 4)) != packet.len() - IPV6_HEADER_BYTES {
         return Err(Counter::IpDroppedLength);
     }
-    if Some(Ipv6Addr::from(array_at(packet, 8))) != own {
-        return Err(Counter::IpDroppedSource);
-    }
-    let target = Ipv6Addr::from(array_at(packet, 24));
+    let source = Ipv6Addr::from(array_at(packet, 8)).into();
+    let target = Ipv6Addr::from(array_at(packet, 24)).into();
+    let header =
+        |protocol, later_fragment, at| Header { source, target, protocol, later_fragment, upper: &packet[at..] };
     let (mut next, mut at) = (packet[6], IPV6_HEADER_BYTES);
     for _ in 0..=MAX_IPV6_EXTENSION_HEADERS {
         let length = match next {
@@ -90,7 +122,7 @@ fn check_v6(packet: &[u8], own: Option<Ipv6Addr>) -> Result<Destination, Dropped
             }
             IPV6_AUTHENTICATION => packet.get(at + 1).map(|&units| (usize::from(units) + 2) * 4),
             IPV6_FRAGMENT => Some(8),
-            _ => return destination(packet, at, next, false, target.into()),
+            _ => return Ok(header(next, false, at)),
         };
         let Some(extension) = length.and_then(|length| packet.get(at..at + length)) else {
             return Err(Counter::IpDroppedHeader);
@@ -99,7 +131,7 @@ fn check_v6(packet: &[u8], own: Option<Ipv6Addr>) -> Result<Destination, Dropped
             return Err(Counter::IpDroppedSourceRoute);
         }
         if next == IPV6_FRAGMENT && u16_at(extension, 2) >> 3 != 0 {
-            return destination(packet, at, extension[0], true, target.into());
+            return Ok(header(extension[0], true, at + extension.len()));
         }
         next = extension[0];
         at += extension.len();
@@ -107,22 +139,16 @@ fn check_v6(packet: &[u8], own: Option<Ipv6Addr>) -> Result<Destination, Dropped
     Err(Counter::IpDroppedHeader)
 }
 
-/// The destination of a packet whose upper-layer header of `protocol` starts at `at`. A TCP or UDP packet that holds
-/// its ports is asked about with its destination port; a first fragment too short to hold them is dropped.
-fn destination(
-    packet: &[u8],
-    at: usize,
-    protocol: u8,
-    later_fragment: bool,
-    target: IpAddr,
-) -> Result<Destination, Dropped> {
-    let proto = match protocol {
-        TCP if !later_fragment => Proto::Tcp,
-        UDP if !later_fragment => Proto::Udp,
-        other => return Ok((Proto::Other(other), SocketAddr::new(target, 0))),
+/// The destination of a packet. A TCP or UDP packet that holds its ports is asked about with its destination port; a
+/// first fragment too short to hold them is dropped.
+fn destination(header: &Header) -> Result<Destination, Dropped> {
+    let proto = match header.protocol {
+        TCP if !header.later_fragment => Proto::Tcp,
+        UDP if !header.later_fragment => Proto::Udp,
+        other => return Ok((Proto::Other(other), SocketAddr::new(header.target, 0))),
     };
-    let port = packet.get(at + 2..at + 4).ok_or(Counter::IpDroppedHeader)?;
-    Ok((proto, SocketAddr::new(target, u16::from_be_bytes([port[0], port[1]]))))
+    let port = header.upper.get(2..4).ok_or(Counter::IpDroppedHeader)?;
+    Ok((proto, SocketAddr::new(header.target, u16::from_be_bytes([port[0], port[1]]))))
 }
 
 fn u16_at(bytes: &[u8], at: usize) -> u16 {
@@ -191,7 +217,7 @@ pub(crate) mod tests {
     }
 
     fn checked(packet: &[u8]) -> Result<Destination, Dropped> {
-        check(packet, Some(CLIENT_V4), Some(CLIENT_V6))
+        check(packet, Some(CLIENT_V4), Some(CLIENT_V6)).map(|(destination, _)| destination)
     }
 
     fn to(proto: Proto, target: impl Into<IpAddr>, port: u16) -> Result<Destination, Dropped> {
@@ -249,10 +275,10 @@ pub(crate) mod tests {
         let other_v6 = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 3);
         assert_eq!(checked(&v6(other_v6, SITE_V6, UDP, &ports(53))), Err(Counter::IpDroppedSource));
 
-        let v6_only = check(&v4(CLIENT_V4, SITE_V4, UDP, 0, &[], &ports(53)), None, Some(CLIENT_V6));
-        assert_eq!(v6_only, Err(Counter::IpDroppedSource));
-        let v4_only = check(&v6(CLIENT_V6, SITE_V6, UDP, &ports(53)), Some(CLIENT_V4), None);
-        assert_eq!(v4_only, Err(Counter::IpDroppedSource));
+        let v6_only = check(&v4(CLIENT_V4, SITE_V4, UDP, 0, &[], &ports(53)), None, Some(CLIENT_V6)).err();
+        assert_eq!(v6_only, Some(Counter::IpDroppedSource));
+        let v4_only = check(&v6(CLIENT_V6, SITE_V6, UDP, &ports(53)), Some(CLIENT_V4), None).err();
+        assert_eq!(v4_only, Some(Counter::IpDroppedSource));
     }
 
     #[test]

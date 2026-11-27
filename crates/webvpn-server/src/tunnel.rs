@@ -161,8 +161,8 @@ async fn run<T: Transport, S: Session>(
                 metrics.count(Counter::IpDroppedRate);
                 continue;
             }
-            let (proto, target) = match packet::check(packet, ipv4, ipv6) {
-                Ok(destination) => destination,
+            let ((proto, target), _) = match packet::check(packet, ipv4, ipv6) {
+                Ok(checked) => checked,
                 Err(dropped) => {
                     metrics.count(dropped);
                     continue;
