@@ -218,7 +218,7 @@ impl<P: Policy> Relay<P> {
         if self.stopping() {
             return session::refuse(&transport, close::RESTARTING, STOPPING).await;
         }
-        let policy = match relay.policy.admit(transport.remote_ip()) {
+        let policy = match relay.policy.admit(transport.remote_ip().to_canonical()) {
             Ok(policy) => policy,
             Err(refusal) => return session::refuse(&transport, close::SESSION_LIMIT, &refusal.message).await,
         };
@@ -266,7 +266,7 @@ mod tests {
 
     use super::*;
     use crate::metrics::Counter;
-    use crate::policy::Basic;
+    use crate::policy::{Basic, BasicSession, Refusal};
     use crate::session::BYE_WAIT;
     use crate::testing::{self, Client, Control, Opened, WAIT};
 
@@ -324,9 +324,42 @@ mod tests {
         Open { client, control, serving }
     }
 
+    /// `Basic`, noting the address each client was admitted under.
+    #[derive(Default)]
+    struct Noting {
+        rules: Basic,
+        admitted: std::sync::Mutex<Vec<IpAddr>>,
+    }
+
+    impl Policy for Noting {
+        type Session = BasicSession;
+
+        fn admit(&self, peer: IpAddr) -> Result<BasicSession, Refusal> {
+            self.admitted.lock().unwrap().push(peer);
+            self.rules.admit(peer)
+        }
+    }
+
     fn stop(relay: &Relay<Basic>, grace: Duration) -> JoinHandle<()> {
         let relay = relay.clone();
         tokio::spawn(async move { relay.stop(grace).await })
+    }
+
+    // A listener on every address reports an IPv4 client as an IPv4-mapped IPv6 address, and a policy that counts by
+    // address must find that client under the key any other carrier gives it.
+    #[tokio::test]
+    async fn a_policy_is_given_an_ipv4_client_as_ipv4_however_its_carrier_spells_the_address() {
+        let relay = Relay::new(Noting::default(), Config::default());
+        let IpAddr::V4(client) = CLIENT else { unreachable!() };
+        let (transport, mut arrived) = testing::session(IpAddr::V6(client.to_ipv6_mapped()));
+        let serving = tokio::spawn({
+            let relay = relay.clone();
+            async move { relay.serve(transport, UdpCarrier::Bidi).await }
+        });
+        let mut control = within(arrived.control()).await;
+        assert!(matches!(within(control.next()).await, Some(RelayPacket::Hello(_))));
+        assert_eq!(*relay.policy().admitted.lock().unwrap(), [CLIENT]);
+        serving.abort();
     }
 
     #[tokio::test]

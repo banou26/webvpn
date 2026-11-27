@@ -87,6 +87,9 @@ pub trait Policy: Send + Sync + 'static {
     /// A client at `peer` opened a transport session; nothing was read from it yet. `Err` closes it with
     /// `SESSION_LIMIT` and the refusal's message.
     ///
+    /// An IPv4 client is given as IPv4 on every carrier, also where a listener on every address reported it as an
+    /// IPv4-mapped IPv6 address, so a policy that counts by address finds one client under one key.
+    ///
     /// The returned value lives exactly as long as the session and is dropped when it ends, which is where a policy
     /// gives back what it counted here.
     fn admit(&self, peer: IpAddr) -> Result<Self::Session, Refusal>;
