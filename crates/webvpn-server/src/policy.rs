@@ -40,10 +40,18 @@ impl Refusal {
     }
 }
 
+/// The protocol bytes go out with, as [`Session::check_egress`] and [`Session::check_bind`] are asked about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Proto {
     Tcp,
     Udp,
+    /// A packet of an IP tunnel that carries no port the relay reads: one of another protocol, by its IP protocol
+    /// number (1 for ICMP, 58 for ICMPv6), or a fragment after the first, of any protocol. The target's port is 0.
+    ///
+    /// A later fragment holds no port, so it is asked about without one. That keeps a port's refusal whole: a policy
+    /// that refuses a port refuses the first fragment, which holds the ports, and the destination cannot put the
+    /// datagram together without it.
+    Other(u8),
 }
 
 /// What a socket permit is asked for.
@@ -53,6 +61,8 @@ pub enum SocketKind {
     Tcp,
     TcpListener,
     Udp,
+    /// An IP tunnel, which carries whole packets.
+    IpTunnel,
 }
 
 /// Which way relayed bytes move.
@@ -117,7 +127,9 @@ pub trait Session: Send + Sync + 'static {
     fn open_socket(&self, kind: SocketKind) -> Result<Self::Permit, Refusal>;
 
     /// Whether the session may send to `target`. Called with the literal address the bytes will go to: for a TCP
-    /// connect (after its name was resolved), for the destination of every UDP datagram and for a multicast group.
+    /// connect (after its name was resolved), for the destination of every UDP datagram, for a multicast group, and
+    /// for the destination of every packet of an IP tunnel, as [`Proto::Tcp`] or [`Proto::Udp`] with its port when the
+    /// packet holds one, and as [`Proto::Other`] otherwise.
     ///
     /// Never called for the relay's own addresses: the server routes those to sockets other sessions bound on it,
     /// or refuses them itself.
@@ -128,8 +140,8 @@ pub trait Session: Send + Sync + 'static {
     fn check_bind(&self, proto: Proto, local: SocketAddr) -> Result<(), Refusal>;
 
     /// `bytes` are about to be relayed. The future resolves when they may move, so a policy that paces waits here
-    /// and a policy that meters counts here. Called for both directions of every socket, and for a DNS answer as
-    /// `Down`.
+    /// and a policy that meters counts here. Called for both directions of every socket, for each packet of an IP
+    /// tunnel with its whole length, and for a DNS answer as `Down`.
     fn relayed(&self, direction: Direction, bytes: usize) -> impl Future<Output = ()> + Send {
         let _ = (direction, bytes);
         std::future::ready(())

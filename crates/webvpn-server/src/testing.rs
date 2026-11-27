@@ -1,16 +1,18 @@
 //! An in-memory carrier for tests. [`MemoryTransport`] is the relay's side of a session, a [`Transport`] over
 //! `tokio::io::duplex` streams, and [`Client`] holds the client's side of the same streams.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::timeout;
-use webvpn_proto::{ClientPacket, RelayPacket};
+use webvpn_proto::{ClientPacket, ErrorCode, RelayPacket};
 
+use crate::policy::Refusal;
 use crate::transport::{SendHalf, Transport};
+use crate::tunnel::{Forwarder, TunnelEnd};
 
 /// How long a client waits on the relay before the test fails.
 pub(crate) const WAIT: Duration = Duration::from_secs(5);
@@ -27,6 +29,7 @@ pub(crate) enum Opened {
     Bi,
     UdpBi,
     Uni,
+    IpBi,
 }
 
 /// A stream the relay opened, from the client's side.
@@ -48,7 +51,7 @@ pub(crate) struct MemoryTransport {
     streams: Mutex<mpsc::UnboundedReceiver<DuplexStream>>,
     to_client: mpsc::UnboundedSender<Vec<u8>>,
     closed: watch::Sender<Closed>,
-    /// Makes every stream the relay opens fail, as on a session with no room for more streams.
+    /// Makes every stream the relay opens for a socket fail, as on a session with no room for more streams.
     pub refuse_streams: bool,
 }
 
@@ -89,7 +92,7 @@ pub(crate) fn session(peer: IpAddr) -> (MemoryTransport, Client) {
 
 impl MemoryTransport {
     fn open(&self, opened: Opened) -> Result<(DuplexStream, DuplexStream)> {
-        if self.refuse_streams {
+        if self.refuse_streams && opened != Opened::Control {
             bail!("the session has no room for more streams");
         }
         let (relay_send, client_recv) = duplex(STREAM_BUFFER);
@@ -137,6 +140,10 @@ impl Transport for MemoryTransport {
 
     async fn open_udp_bi(&self) -> Result<(DuplexStream, DuplexStream)> {
         self.open(Opened::UdpBi)
+    }
+
+    async fn open_ip_bi(&self) -> Result<(DuplexStream, DuplexStream)> {
+        self.open(Opened::IpBi)
     }
 
     async fn recv_datagram(&self) -> Result<Vec<u8>> {
@@ -238,5 +245,93 @@ impl Control {
             }
         };
         timeout(WAIT, read).await.expect("the relay writes in time")
+    }
+}
+
+/// The packets each tunnel's channel holds before the forwarder drops one.
+const FORWARDER_CHANNEL: usize = 1024;
+
+/// A forwarder for tests. Tunnel `n`, counted among the ones attached now, is given 198.18.0.(2 + n) and
+/// fd00::(2 + n), so a tunnel opened after another ended is given its addresses again. It notes what tunnels send,
+/// and lets a test deliver packets to a tunnel or end it.
+pub(crate) struct TestForwarder {
+    pub mtu: u16,
+    max_tunnels: usize,
+    ends: std::sync::Mutex<Vec<mpsc::Sender<Vec<u8>>>>,
+    sent: std::sync::Mutex<Vec<Vec<u8>>>,
+}
+
+impl TestForwarder {
+    pub(crate) fn new(mtu: u16, max_tunnels: usize) -> Self {
+        Self { mtu, max_tunnels, ends: Default::default(), sent: Default::default() }
+    }
+
+    pub(crate) fn addresses(index: usize) -> (Ipv4Addr, Ipv6Addr) {
+        let host = 2 + index as u8;
+        (Ipv4Addr::new(198, 18, 0, host), Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, host.into()))
+    }
+
+    /// The tunnels whose end the relay still holds.
+    pub(crate) fn held(&self) -> usize {
+        self.ends.lock().unwrap().iter().filter(|end| !end.is_closed()).count()
+    }
+
+    /// Resolves once the relay holds `ends` ends, and fails the test if it does not in time.
+    pub(crate) async fn holds(&self, ends: usize) {
+        let held = async {
+            while self.held() != ends {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        };
+        timeout(WAIT, held).await.expect("the relay holds as many tunnel ends as expected in time");
+    }
+
+    /// Hands `packet` to tunnel `index` as a forwarder does, without waiting: false when its channel is full or gone.
+    pub(crate) fn deliver(&self, index: usize, packet: Vec<u8>) -> bool {
+        self.ends.lock().unwrap().get(index).is_some_and(|end| end.try_send(packet).is_ok())
+    }
+
+    /// Ends tunnel `index` from the forwarder's side.
+    pub(crate) fn end(&self, index: usize) {
+        let (sender, _) = mpsc::channel(1);
+        self.ends.lock().unwrap()[index] = sender;
+    }
+
+    /// What tunnels sent, in order, once there are `count` packets.
+    pub(crate) async fn sent(&self, count: usize) -> Vec<Vec<u8>> {
+        let sent = async {
+            loop {
+                if self.sent.lock().unwrap().len() >= count {
+                    return self.sent.lock().unwrap().clone();
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        };
+        timeout(WAIT, sent).await.expect("the tunnels send in time")
+    }
+}
+
+impl Forwarder for TestForwarder {
+    fn mtu(&self) -> u16 {
+        self.mtu
+    }
+
+    fn attach(&self) -> Result<TunnelEnd, Refusal> {
+        let mut ends = self.ends.lock().unwrap();
+        let free = ends.iter().position(mpsc::Sender::is_closed).unwrap_or(ends.len());
+        if free >= self.max_tunnels {
+            return Err(Refusal::new(ErrorCode::CAPACITY, "the test forwarder has no address left"));
+        }
+        let (sender, packets) = mpsc::channel(FORWARDER_CHANNEL);
+        match ends.get_mut(free) {
+            Some(end) => *end = sender,
+            None => ends.push(sender),
+        }
+        let (ipv4, ipv6) = Self::addresses(free);
+        Ok(TunnelEnd { ipv4: Some(ipv4), ipv6: Some(ipv6), packets })
+    }
+
+    fn send(&self, packet: &[u8]) {
+        self.sent.lock().unwrap().push(packet.to_vec());
     }
 }

@@ -599,6 +599,13 @@ impl Transport for WsTransport {
         anyhow::bail!("the WebSocket mux has no UDP stream both ways")
     }
 
+    async fn open_ip_bi(&self) -> Result<(Self::Send, Self::Recv)> {
+        let id = self.alloc_id()?;
+        let streams = self.register_bidi(id, false);
+        self.open(id, stream_type::IP).await?;
+        Ok(streams)
+    }
+
     async fn recv_datagram(&self) -> Result<Vec<u8>> {
         let mut rx = self.inner.datagram_in.lock().await;
         match rx.recv().await {

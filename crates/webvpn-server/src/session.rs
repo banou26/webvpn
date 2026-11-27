@@ -392,7 +392,8 @@ pub(crate) fn answer_as_gone(request: ClientPacket) -> Option<RelayPacket> {
         ClientPacket::TcpClose { id, .. }
         | ClientPacket::TcpReset { id, .. }
         | ClientPacket::TcpUnlisten { id, .. }
-        | ClientPacket::UdpClose { id, .. } => RelayPacket::Ok { id },
+        | ClientPacket::UdpClose { id, .. }
+        | ClientPacket::IpClose { id, .. } => RelayPacket::Ok { id },
         ClientPacket::TcpSetOption { id, .. }
         | ClientPacket::UdpSetOption { id, .. }
         | ClientPacket::UdpConnect { id, .. }
@@ -434,10 +435,14 @@ impl<T: Transport, S: Session> State<T, S> {
                 self.open(id, SocketKind::TcpListener, self.handle.relay.config.listen, packet)
             }
             ClientPacket::UdpBind { id, .. } => self.open(id, SocketKind::Udp, true, packet),
+            ClientPacket::IpOpen { id } => {
+                self.open(id, SocketKind::IpTunnel, self.handle.relay.config.forwarder.is_some(), packet)
+            }
             ClientPacket::TcpClose { id, socket }
             | ClientPacket::TcpReset { id, socket }
             | ClientPacket::TcpUnlisten { id, socket }
-            | ClientPacket::UdpClose { id, socket } => self.sockets.end(id, socket, packet),
+            | ClientPacket::UdpClose { id, socket }
+            | ClientPacket::IpClose { id, socket } => self.sockets.end(id, socket, packet),
             ClientPacket::TcpSetOption { id, socket, .. }
             | ClientPacket::UdpSetOption { id, socket, .. }
             | ClientPacket::UdpConnect { id, socket, .. }
@@ -445,9 +450,7 @@ impl<T: Transport, S: Session> State<T, S> {
                 self.sockets.forward(id, socket, packet, &self.handle.relay.metrics)
             }
             ClientPacket::DnsQuery { id, query } => self.lookup(id, query),
-            ClientPacket::Unknown { id: Some(id), .. }
-            | ClientPacket::IpOpen { id }
-            | ClientPacket::IpClose { id, .. } => {
+            ClientPacket::Unknown { id: Some(id), .. } => {
                 Some(error(id, Refusal::new(ErrorCode::UNSUPPORTED, NOT_TAKEN)))
             }
             ClientPacket::Unknown { id: None, .. } => None,
@@ -506,6 +509,9 @@ impl<T: Transport, S: Session> State<T, S> {
             SocketKind::Udp => {
                 let queue = datagrams.clone();
                 Box::new(move |socket| Box::pin(crate::udp::bind(handle, socket, request_queue, datagram_queue, queue)))
+            }
+            SocketKind::IpTunnel => {
+                Box::new(move |socket| Box::pin(crate::tunnel::open(handle, socket, request_queue)))
             }
         };
         // The session answers a refused request itself, under the request's id.
@@ -710,6 +716,7 @@ fn kind_of(request: &ClientPacket) -> Option<SocketKind> {
         | ClientPacket::UdpConnect { .. }
         | ClientPacket::UdpDisconnect { .. }
         | ClientPacket::UdpSetOption { .. } => Some(SocketKind::Udp),
+        ClientPacket::IpClose { .. } => Some(SocketKind::IpTunnel),
         _ => None,
     }
 }

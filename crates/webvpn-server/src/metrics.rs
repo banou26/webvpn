@@ -57,20 +57,49 @@ pub enum Counter {
     DnsFailed,
     /// Name lookups refused because the session had too many waiting or the query was over 512 bytes.
     DnsRefused,
-    /// Sockets sessions took in: connections, listeners and UDP sockets.
+    /// Sockets sessions took in: connections, listeners, UDP sockets and IP tunnels.
     SocketsOpened,
     /// Of those, the ones that ended.
     SocketsClosed,
     /// Sessions closed because a stopping relay's wait for them ran out.
     DrainCapCloses,
+    /// IP tunnel packets handed to the forwarder.
+    IpPacketsUp,
+    /// IP tunnel packets written toward their client.
+    IpPacketsDown,
+    /// IP tunnel packets from a client that were not IPv4 or IPv6.
+    IpDroppedNotIp,
+    /// IP tunnel packets from a client whose header was cut short or could not be read.
+    IpDroppedHeader,
+    /// IP tunnel packets from a client whose own length was not the length of their frame.
+    IpDroppedLength,
+    /// IP tunnel packets longer than the tunnel's MTU, either way.
+    IpDroppedTooLong,
+    /// IP tunnel packets from a client from a source the relay did not give its tunnel.
+    IpDroppedSource,
+    /// IP tunnel packets from a client with an IPv4 source route or an IPv6 type 0 routing header.
+    IpDroppedSourceRoute,
+    /// IP tunnel packets from a client to a destination the relay or its policy refuses.
+    IpDroppedRefused,
+    /// IP tunnel packets from a client over the tunnel's packets a second.
+    IpDroppedRate,
+    /// IP tunnel packets toward a client dropped because the tunnel's queue was full.
+    IpDroppedQueueFull,
 }
 
-const COUNTERS: usize = Counter::DrainCapCloses as usize + 1;
+const COUNTERS: usize = Counter::IpDroppedQueueFull as usize + 1;
 
 /// A relay's counters, read one by one with [`get`](Self::get) or all at once with [`render`](Self::render). Each
 /// relay has its own.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Metrics([AtomicU64; COUNTERS]);
+
+// `Default` is derived for arrays of at most 32.
+impl Default for Metrics {
+    fn default() -> Self {
+        Self(std::array::from_fn(|_| AtomicU64::new(0)))
+    }
+}
 
 impl Metrics {
     /// Adds `amount` to `counter`.
@@ -106,7 +135,7 @@ impl Metrics {
         family(
             "webvpn_active_sockets",
             "gauge",
-            "Currently open tunnelled sockets (TCP + UDP + listeners).",
+            "Currently open tunnelled sockets (TCP + UDP + listeners + IP tunnels).",
             // read one after the other, so a socket that opens and closes in between shows as closed only
             &[("", get(SocketsOpened).saturating_sub(get(SocketsClosed)))],
         );
@@ -202,6 +231,28 @@ impl Metrics {
             "counter",
             "Bytes the peers of accepted connections sent toward the client since start.",
             &[("", get(InboundBytes))],
+        );
+        family(
+            "webvpn_ip_packets_total",
+            "counter",
+            "IP tunnel packets carried since start, by direction.",
+            &[(r#"{direction="down"}"#, get(IpPacketsDown)), (r#"{direction="up"}"#, get(IpPacketsUp))],
+        );
+        family(
+            "webvpn_ip_dropped_total",
+            "counter",
+            "IP tunnel packets dropped by the relay since start, by reason.",
+            &[
+                (r#"{reason="not_ip"}"#, get(IpDroppedNotIp)),
+                (r#"{reason="header"}"#, get(IpDroppedHeader)),
+                (r#"{reason="length"}"#, get(IpDroppedLength)),
+                (r#"{reason="too_long"}"#, get(IpDroppedTooLong)),
+                (r#"{reason="source"}"#, get(IpDroppedSource)),
+                (r#"{reason="source_route"}"#, get(IpDroppedSourceRoute)),
+                (r#"{reason="refused"}"#, get(IpDroppedRefused)),
+                (r#"{reason="rate"}"#, get(IpDroppedRate)),
+                (r#"{reason="queue_full"}"#, get(IpDroppedQueueFull)),
+            ],
         );
         family(
             "webvpn_drain_cap_closed_sessions_total",

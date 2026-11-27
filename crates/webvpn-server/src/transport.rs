@@ -79,6 +79,12 @@ pub trait Transport: Send + Sync + 'static {
     /// A stream that carries a UDP socket's packets both ways. WebTransport only.
     fn open_udp_bi(&self) -> impl Future<Output = Result<(Self::Send, Self::Recv)>> + Send;
 
+    /// A stream for one IP tunnel. The default opens it as a TCP socket's stream, which suits a carrier whose streams
+    /// carry no type, as WebTransport's do.
+    fn open_ip_bi(&self) -> impl Future<Output = Result<(Self::Send, Self::Recv)>> + Send {
+        self.open_bi()
+    }
+
     fn recv_datagram(&self) -> impl Future<Output = Result<Vec<u8>>> + Send;
 
     /// The stream a client opens for a UDP socket whose own stream did not reach it. Never resolves on a carrier
@@ -113,6 +119,16 @@ pub(crate) async fn open_udp_bi_with_prefix<T: Transport>(transport: &T, socket:
     })
     .await
     .context("the UDP socket's stream was not open in time")?
+}
+
+pub(crate) async fn open_ip_bi_with_prefix<T: Transport>(transport: &T, socket: u32) -> Result<(T::Send, T::Recv)> {
+    tokio::time::timeout_at(stream_setup_deadline(None), async {
+        let (mut send, recv) = transport.open_ip_bi().await?;
+        send.write_all(&socket.to_be_bytes()).await?;
+        Ok((send, recv))
+    })
+    .await
+    .context("the tunnel's stream was not open in time")?
 }
 
 pub(crate) async fn open_uni_with_prefix<T: Transport>(transport: &T, socket: u32) -> Result<T::Send> {

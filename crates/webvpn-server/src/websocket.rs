@@ -247,11 +247,12 @@ mod tests {
     use tokio_tungstenite::tungstenite::protocol::CloseFrame;
     use tokio_tungstenite::tungstenite::Message;
     use webvpn_proto::mux::{self, kind, stream_type, CONTROL_STREAM};
-    use webvpn_proto::{close, ClientPacket, Hello, RelayPacket};
+    use webvpn_proto::{close, features, ip, ClientPacket, Hello, RelayPacket};
 
     use super::*;
+    use crate::packet::tests::{ports, v4, CLIENT_V4, CLIENT_V6};
     use crate::relay::STOPPING;
-    use crate::testing::WAIT;
+    use crate::testing::{TestForwarder, WAIT};
     use crate::{Basic, Config, Counter};
 
     async fn within<F: Future>(future: F) -> F::Output {
@@ -710,5 +711,59 @@ mod tests {
         let (mut far, mut near) = tokio::io::duplex(64);
         far.write_all(b"GET / HTTP/1.1\r\n\r\nextra").await.unwrap();
         assert_eq!(within(read_head(&mut near)).await.unwrap(), b"GET / HTTP/1.1\r\n\r\nextra");
+    }
+
+    #[tokio::test]
+    async fn an_ip_tunnel_opens_its_stream_as_type_2_and_carries_a_packet_each_way() {
+        let forwarder = Arc::new(TestForwarder::new(1500, 1));
+        let relay = relay(Config { forwarder: Some(forwarder.clone()), ..Config::default() });
+        let (address, _serving) = start(&relay, Options::default()).await;
+        let mut client = connect(address).await;
+        let Received::Control(RelayPacket::Hello(hello)) = client.next().await else { panic!("the relay's hello") };
+        assert_ne!(hello.features & features::IP, 0);
+        client.send(ClientPacket::Hello(Hello::new(0, "client under test"))).await;
+
+        client.send(ClientPacket::IpOpen { id: 1 }).await;
+        let (mut tunnel, mut stream, mut id) = (None, None, Vec::new());
+        while tunnel.is_none() || id.len() < 4 {
+            match client.next().await {
+                Received::Control(RelayPacket::IpTunnel { id: 1, socket, mtu: 1500, ipv4, ipv6 }) => {
+                    assert_eq!((ipv4, ipv6), (Some(CLIENT_V4), Some(CLIENT_V6)));
+                    tunnel = Some(socket);
+                }
+                Received::Frame(kind::OPEN, opened, payload) => {
+                    assert_eq!(payload, [stream_type::IP]);
+                    stream = Some(opened);
+                }
+                Received::Frame(kind::DATA, on, payload) if Some(on) == stream => id.extend(payload),
+                other => panic!("expected the tunnel and its stream, got {other:?}"),
+            }
+        }
+        let (tunnel, stream) = (tunnel.unwrap(), stream.unwrap());
+        assert_eq!(id, tunnel.to_be_bytes());
+
+        let up = v4(CLIENT_V4, [192, 0, 2, 7].into(), 17, 0, &[], &ports(53));
+        let mut frame = Vec::new();
+        ip::encode(&up, &mut frame);
+        client.frame(kind::DATA, stream, &frame).await;
+        assert_eq!(forwarder.sent(1).await, [up]);
+
+        let down = v4([192, 0, 2, 7].into(), CLIENT_V4, 17, 0, &[], &ports(40000));
+        assert!(forwarder.deliver(0, down.clone()));
+        let mut frame = Vec::new();
+        ip::encode(&down, &mut frame);
+        assert_eq!(client.data(stream, frame.len()).await, frame);
+
+        client.send(ClientPacket::IpClose { id: 2, socket: tunnel }).await;
+        loop {
+            match client.next().await {
+                Received::Control(packet) => {
+                    assert_eq!(packet, RelayPacket::Ok { id: 2 });
+                    break;
+                }
+                Received::Frame(..) => {}
+            }
+        }
+        assert_eq!(forwarder.held(), 0);
     }
 }

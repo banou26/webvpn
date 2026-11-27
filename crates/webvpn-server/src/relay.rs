@@ -1,3 +1,4 @@
+use std::fmt;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,6 +16,7 @@ use crate::metrics::Metrics;
 use crate::policy::{Auth, Policy};
 use crate::session::{self, Setup, UdpCarrier};
 use crate::transport::Transport;
+use crate::tunnel::Forwarder;
 
 /// The reason a session closed with `RESTARTING` carries, for a person.
 pub(crate) const STOPPING: &str = "the relay is stopping";
@@ -26,7 +28,7 @@ pub(crate) const STOPPING: &str = "the relay is stopping";
 pub(crate) const CLOSE_WAIT: Duration = Duration::from_secs(2);
 
 /// How a relay is set up, apart from its policy.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     /// Named in the relay's hello, for a person reading a client's log.
     pub agent: String,
@@ -47,6 +49,28 @@ pub struct Config {
     /// How long a session's setup may take, from the client's arrival (for a carrier of your own, from its call to
     /// [`Relay::serve`]) to its hello. A session past it is closed with `PROTOCOL_ERROR`.
     pub setup_timeout: Duration,
+    /// Where IP tunnels send their packets. `None` turns tunnels off: the relay's hello does not offer them, and
+    /// `IpOpen` is answered `UNSUPPORTED`.
+    pub forwarder: Option<Arc<dyn Forwarder>>,
+    /// The packets one IP tunnel takes from its client each second, past which they are dropped. A packet costs the
+    /// relay as much to check and send whatever its size, so bytes alone do not bound it. `None` lifts the ceiling.
+    pub max_tunnel_packets_per_second: Option<u32>,
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("agent", &self.agent)
+            .field("listen", &self.listen)
+            .field("dns_upstream", &self.dns_upstream)
+            .field("max_sockets_per_session", &self.max_sockets_per_session)
+            .field("own_addresses", &self.own_addresses)
+            .field("max_pending_sessions", &self.max_pending_sessions)
+            .field("setup_timeout", &self.setup_timeout)
+            .field("forwarder", &self.forwarder.is_some())
+            .field("max_tunnel_packets_per_second", &self.max_tunnel_packets_per_second)
+            .finish()
+    }
 }
 
 impl Default for Config {
@@ -59,6 +83,10 @@ impl Default for Config {
             own_addresses: Vec::new(),
             max_pending_sessions: 256,
             setup_timeout: Duration::from_secs(15),
+            forwarder: None,
+            // 20000 packets of 1500 bytes are 240 Mbit/s, more than one client's network stack sends, while 20000
+            // tiny ones are a few Mbit/s whose checks and sends one core does in a few milliseconds
+            max_tunnel_packets_per_second: Some(20_000),
         }
     }
 }
@@ -95,6 +123,9 @@ impl Shared {
         }
         if self.dns.is_some() {
             bits |= features::DNS;
+        }
+        if self.config.forwarder.is_some() {
+            bits |= features::IP;
         }
         match auth {
             Auth::None => {}
@@ -618,6 +649,8 @@ mod tests {
             "webvpn_handshakes_total 1",
             r#"webvpn_bandwidth_bytes_total{direction="down"} 0"#,
             r#"webvpn_udp_dropped_total{reason="channel_full"} 0"#,
+            r#"webvpn_ip_packets_total{direction="up"} 0"#,
+            r#"webvpn_ip_dropped_total{reason="queue_full"} 0"#,
         ] {
             assert!(rendered.lines().any(|line| line == expected), "{expected:?} is not in\n{rendered}");
         }
