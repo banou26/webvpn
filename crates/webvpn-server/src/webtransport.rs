@@ -173,16 +173,19 @@ impl Transport for WtTransport {
 /// reports at once, while every place is taken and from the moment [`Relay::stop`] is called. Every accepted session
 /// goes to the relay, which admits it or closes it with its code: see [`Relay::serve`].
 ///
-/// Returns once the stop began and every connection it took ended, after giving the endpoint up to 2 seconds to send
-/// the closes still owed (`Endpoint::wait_idle`). It never closes the endpoint, and nothing answers an arrival after it
-/// returned. wtransport's `Endpoint::accept` panics on a closed endpoint, so the endpoint must stay open while this
-/// runs. What it logs names no client.
+/// Returns once the stop began, every connection it took ended and the relay holds no session of any carrier (or
+/// its stop gave up waiting for them), after giving the endpoint up to 2 seconds to send the closes still owed
+/// (`Endpoint::wait_idle`). So a relay that still holds another carrier's sessions through its grace keeps refusing
+/// the clients that dial it. It never closes the endpoint, and nothing answers an arrival after it returned.
+/// wtransport's `Endpoint::accept` panics on a closed endpoint, so the endpoint must stay open while this runs. What
+/// it logs names no client.
 pub async fn serve<P: Policy>(relay: Relay<P>, endpoint: Arc<Endpoint<Server>>) {
     let connections = TaskTracker::new();
     let done = async {
         relay.stopped().await;
         connections.close();
         connections.wait().await;
+        relay.idle().await;
     };
     tokio::pin!(done);
     loop {
@@ -445,6 +448,31 @@ mod tests {
         assert_eq!(control.next().await, RelayPacket::Bye { code: close::RESTARTING, reason: STOPPING.into() });
         assert_eq!(closed(Ok(connection)).await, (u64::from(close::RESTARTING), STOPPING.to_owned()));
         within(stopping).await.unwrap();
+        within(served.serving).await.unwrap();
+    }
+
+    // A relay may hold another carrier's sessions for its whole grace, and a client that dials it then must learn at
+    // once that it takes none.
+    #[tokio::test]
+    async fn an_arrival_is_refused_for_as_long_as_the_stopping_relay_holds_a_session_of_another_carrier() {
+        let served = served(local(), Config::default());
+        let (transport, mut other) = crate::testing::session(Ipv4Addr::LOCALHOST.into());
+        let relay = served.relay.clone();
+        let session = tokio::spawn(async move { relay.serve(transport, UdpCarrier::Bidi).await });
+        let mut control = within(other.control()).await;
+        assert!(matches!(within(control.next()).await, Some(RelayPacket::Hello(_))));
+        control.send(ClientPacket::Hello(Hello::new(0, "client under test"))).await;
+
+        let relay = served.relay.clone();
+        let stopping = tokio::spawn(async move { relay.stop(Duration::from_secs(60)).await });
+        assert_eq!(within(control.next()).await, Some(RelayPacket::Draining));
+        assert!(refused(served.quic().await));
+        assert!(!served.serving.is_finished());
+
+        control.finish().await;
+        assert_eq!(within(crate::testing::bye(&mut control, &mut other)).await.0, close::NORMAL);
+        within(stopping).await.unwrap();
+        within(session).await.unwrap();
         within(served.serving).await.unwrap();
     }
 

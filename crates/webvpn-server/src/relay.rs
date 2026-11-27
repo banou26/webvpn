@@ -257,9 +257,28 @@ impl<P: Policy> Relay<P> {
         let relay = &*self.0;
         relay.shared.stopping.cancel();
         relay.sessions.close();
-        let _ = tokio::time::timeout(grace, relay.sessions.wait()).await;
+        // a later call with a shorter grace reaches the closes first, and they end this wait too
+        tokio::select! {
+            _ = tokio::time::timeout(grace, relay.sessions.wait()) => {}
+            () = relay.shared.closing.cancelled() => {}
+        }
         relay.shared.closing.cancel();
         let _ = tokio::time::timeout(CLOSE_WAIT, relay.sessions.wait()).await;
+    }
+
+    /// Resolves once the stop began and the relay holds no session of any carrier, or its stop gave up waiting for
+    /// the ones it closed.
+    pub(crate) async fn idle(&self) {
+        let relay = &*self.0;
+        relay.shared.stopping.cancelled().await;
+        let gave_up = async {
+            relay.shared.closing.cancelled().await;
+            tokio::time::sleep(CLOSE_WAIT).await;
+        };
+        tokio::select! {
+            () = relay.sessions.wait() => {}
+            () = gave_up => {}
+        }
     }
 }
 
@@ -483,6 +502,20 @@ mod tests {
         // the session was told once that the relay is stopping, by the first call
         within(open.serving).await.unwrap();
         assert_eq!(relay.sessions(), 0);
+    }
+
+    // A session that outlives its close would otherwise hold the first call for its whole grace.
+    #[tokio::test(start_paused = true)]
+    async fn a_second_stop_ends_the_wait_of_the_first_even_when_a_session_never_ends() {
+        let relay = relay();
+        let never_ends = relay.0.sessions.token();
+        let start = Instant::now();
+        let long = stop(&relay, Duration::from_secs(3600));
+        within(relay.stopped()).await;
+        within(relay.stop(GRACE)).await;
+        within(long).await.unwrap();
+        assert_eq!(start.elapsed(), GRACE + CLOSE_WAIT);
+        drop(never_ends);
     }
 
     #[tokio::test]
