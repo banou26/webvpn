@@ -32,6 +32,7 @@ Each carrier re-exports the crate its types come from, at the version `webvpn-se
 - `sessions()` is the number of sessions the policy admitted that have not ended, the ones still in their hello exchange included. A client still in its carrier's handshake is not counted.
 - `metrics()` returns the relay's counters, which `get(counter)` reads one by one. `render_metrics()` renders them all in the Prometheus text format.
 - `watch_own_ipv6()` reads the relay's own global IPv6 addresses from the system now and every second after, and treats each as an own address. It works on Linux only. Call it once, before the relay takes sessions.
+- `own_addresses()` returns the relay's own addresses now: the ones in its settings, then the IPv6 addresses `watch_own_ipv6()` last read.
 - `stop(grace)` [stops the relay](#stop).
 - `stopping()` is true once `stop` was called, and `stopped()` resolves then.
 - `serve(transport, carrier)` runs one session, for a [carrier of your own](#a-carrier-of-your-own).
@@ -65,7 +66,9 @@ A carrier accepts clients and hands each one's session to the relay. Each built-
 
 ### `stop`
 
-`stop(grace)` stops the relay. Every open session is sent `Draining` once and keeps its sockets. Both built-in carriers stop taking clients, and every session handed to `serve` from then on is closed with `RESTARTING`. `stop` then waits until every session ended or `grace` passed, has the sessions still open say `Bye` with `RESTARTING` and close, and waits up to 2 seconds more for those closes to go out. It returns at once when no session is open, and calling it again is harmless.
+`stop(grace)` stops the relay. Every open session is sent `Draining` once and keeps its sockets. Both built-in carriers stop taking clients, and every session handed to `serve` from then on is closed with `RESTARTING`. `stop` then waits until every session ended or `grace` passed, has the sessions still open say `Bye` with `RESTARTING` and close, and waits up to 2 seconds more for those closes to go out. It returns at once when no session is open.
+
+Calling it again is harmless, and a call with a shorter grace ends the wait of an earlier one. A program that must stop taking sessions before it knows how long to wait, such as one that first checks whether another instance took over, calls `stop` with its longest grace in a task, then again with the grace it settled on.
 
 ## The policy
 

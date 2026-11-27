@@ -156,6 +156,12 @@ impl<P: Policy> Relay<P> {
         self.0.shared.hairpin.watch_kernel_ipv6()
     }
 
+    /// The relay's own addresses now: [`Config::own_addresses`], then the public IPv6 addresses
+    /// [`Relay::watch_own_ipv6`] last read. For a program that reports or checks the addresses it serves from.
+    pub fn own_addresses(&self) -> Vec<IpAddr> {
+        self.0.shared.hairpin.own_addresses()
+    }
+
     /// What this relay counted since it was made, and nothing another relay counted.
     pub fn metrics(&self) -> &Metrics {
         &self.0.shared.metrics
@@ -242,8 +248,11 @@ impl<P: Policy> Relay<P> {
     /// Stops the relay. Every open session is sent `Draining` once and keeps its sockets, and every session served
     /// from now on is closed with `RESTARTING`. Then waits until every session ended or `grace` passed, has the ones
     /// still open say `Bye` and close with `RESTARTING` (counted as [`Counter::DrainCapCloses`](crate::Counter)), and
-    /// waits up to 2 seconds more for those closes to go out. Returns at once when no session is open. Calling it again
-    /// is harmless.
+    /// waits up to 2 seconds more for those closes to go out. Returns at once when no session is open.
+    ///
+    /// Calling it again is harmless, and a call with a shorter grace ends the wait of an earlier one. So a program
+    /// that must stop taking sessions before it knows how long to wait calls `stop` with its longest grace in a task,
+    /// then again with the grace it settled on.
     pub async fn stop(&self, grace: Duration) {
         let relay = &*self.0;
         relay.shared.stopping.cancel();
@@ -452,6 +461,35 @@ mod tests {
         }
         assert_eq!(start.elapsed(), Duration::ZERO);
         assert!(relay.stopping());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_second_stop_with_a_shorter_grace_ends_the_wait_of_the_first() {
+        let relay = relay();
+        let mut open = open(&relay).await;
+        let start = Instant::now();
+        let long = stop(&relay, Duration::from_secs(3600));
+        assert_eq!(open.control.next().await, Some(RelayPacket::Draining));
+        tokio::time::advance(Duration::from_secs(10)).await;
+        assert!(!long.is_finished());
+
+        let short = stop(&relay, GRACE);
+        let bye = RelayPacket::Bye { code: close::RESTARTING, reason: STOPPING.into() };
+        assert_eq!(open.control.next().await, Some(bye));
+        within(short).await.unwrap();
+        within(long).await.unwrap();
+        assert_eq!(start.elapsed(), Duration::from_secs(10) + GRACE);
+        assert_eq!(relay.metrics().get(Counter::DrainCapCloses), 1);
+        // the session was told once that the relay is stopping, by the first call
+        within(open.serving).await.unwrap();
+        assert_eq!(relay.sessions(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_own_addresses_are_the_ones_the_relay_was_made_with() {
+        let own = vec!["203.0.113.7".parse().unwrap(), "2001:db8::7".parse().unwrap()];
+        let relay = Relay::new(Basic::default(), Config { own_addresses: own.clone(), ..Config::default() });
+        assert_eq!(relay.own_addresses(), own);
     }
 
     #[tokio::test(start_paused = true)]

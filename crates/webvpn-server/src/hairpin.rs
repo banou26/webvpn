@@ -85,6 +85,11 @@ impl Hairpin {
         Ok(())
     }
 
+    /// The relay's own addresses now: the ones it was made with, then the public IPv6 addresses last read.
+    pub fn own_addresses(&self) -> Vec<IpAddr> {
+        self.own.read().unwrap().addresses.clone()
+    }
+
     fn watch(&self, path: PathBuf) -> std::io::Result<JoinHandle<()>> {
         let kernel = read_if_inet6(&path)?;
         *self.own.write().unwrap() = Own::new(&self.given, &kernel);
@@ -544,6 +549,13 @@ fd000000000000000000000000000001 06 40 00 80    eth0
             let reply = pass(&b, &a, a_as_b_sees_it);
             assert_eq!(reply, sa(&format!("{reply_from}:{b_port}")), "a reply to {dialed}");
         }
+    }
+
+    #[test]
+    fn the_own_addresses_are_the_given_ones_then_the_public_ones_the_kernel_lists() {
+        assert_eq!(Hairpin::new(vec![ip("203.0.113.7")]).own_addresses(), [ip("203.0.113.7")]);
+        let read = relay(&["203.0.113.7", "3000:4::1"], IF_INET6).own_addresses();
+        assert_eq!(read, ["203.0.113.7", "3000:4::1", "3000:1:2::5", "3000:1:3::aa", "3000:5::7"].map(ip));
     }
 
     #[test]
