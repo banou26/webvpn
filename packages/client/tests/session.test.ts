@@ -479,6 +479,8 @@ describe('a TCP socket', () => {
     const cleared = session.clearAuth()
     await answer(relay, (id) => ({ type: 'ok', id }))
     await cleared
+    // what nobody read stays on the relay's side of the stream
+    expect(stream.desiredSize()).toBeLessThan(-14)
   })
 
   it('errors its readable with the session\'s error when the session ends', async () => {
