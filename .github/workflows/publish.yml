@@ -165,14 +165,15 @@ jobs:
           PACKAGES: ${{ steps.decide.outputs.packages }}
         run: |
           for name in $PACKAGES; do
-            npm pack --dry-run --json --workspace "$name" > /tmp/pack.json
-            jq -r '.[0] | "\(.name)@\(.version): \(.entryCount) files"' /tmp/pack.json
-            stray=$(jq -r '.[0].files[].path' /tmp/pack.json | grep -v -E '^(build/|LICENSE$|README\.md$|package\.json$)' || true)
+            # with `--workspace` npm answers an object keyed by the package's name, and an array without it
+            npm pack --dry-run --json --workspace "$name" | jq 'if type == "array" then .[0] else .[] end' > /tmp/pack.json
+            jq -r '"\(.name)@\(.version): \(.entryCount) files"' /tmp/pack.json
+            stray=$(jq -r '.files[].path' /tmp/pack.json | grep -v -E '^(build/|LICENSE$|README\.md$|package\.json$)' || true)
             if [ -n "$stray" ]; then
               echo "::error::$name would publish files that are not its build: $stray"
               exit 1
             fi
-            if ! jq -e '.[0].files[] | select(.path == "build/index.js")' /tmp/pack.json > /dev/null; then
+            if ! jq -e '.files[] | select(.path == "build/index.js")' /tmp/pack.json > /dev/null; then
               echo "::error::$name has no build/index.js: the build did not run"
               exit 1
             fi
