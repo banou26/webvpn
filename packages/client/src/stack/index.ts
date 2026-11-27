@@ -81,12 +81,18 @@ export const openStack = async (tunnel: IpTunnel, options: StackOptions = {}): P
 
   const isPublic = (port: number) => port >= tunnel.firstPort && port < tunnel.firstPort + tunnel.ports
 
-  // the address a bind is reached at: the relay's public one on a public port, the tunnel's own otherwise
+  // the address a bind is reached at: the relay's public one on a public port, the tunnel's own otherwise, of the
+  // family asked for first; the stack's sockets take both families, so an unspecified address is either
   const reachedAt = ({ ip }: Address, port: number) => {
-    const [own, open] = ip.byteLength === 4 ? [tunnel.ipv4, tunnel.publicIpv4] : [tunnel.ipv6, tunnel.publicIpv6]
-    const named = ip.every((byte) => byte === 0) || formatIp(ip) === own || formatIp(ip) === open
-    if (!own || !named) throw stackError(ErrorCode.ADDRESS_NOT_AVAILABLE)
-    return parseIp(isPublic(port) && open ? open : own)!
+    const v4 = ip.byteLength === 4
+    const owns = v4 ? [tunnel.ipv4, tunnel.ipv6] : [tunnel.ipv6, tunnel.ipv4]
+    const opens = v4 ? [tunnel.publicIpv4, tunnel.publicIpv6] : [tunnel.publicIpv6, tunnel.publicIpv4]
+    if (!ip.every((byte) => byte === 0)) {
+      const named = formatIp(ip)
+      if (named !== owns[0] && named !== opens[0]) throw stackError(ErrorCode.ADDRESS_NOT_AVAILABLE)
+      return parseIp(isPublic(port) && opens[0] ? opens[0] : owns[0]!)!
+    }
+    return parseIp((isPublic(port) && (opens[0] ?? opens[1])) || owns[0] || owns[1]!)!
   }
 
   const lookup = (query: Uint8Array) => stackLookup(engine, resolver, query, lookupTimeoutMs, udp)

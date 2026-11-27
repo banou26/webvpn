@@ -191,6 +191,8 @@ describe('listening over a tunnel', () => {
     const listener = await client.tcpListen(ANY)
     expect(named(listener.local)).toBe(`${CLIENT_PUBLIC}:${FIRST_PORT}`)
     expect(named((await client.tcpListen(ANY)).local)).toBe(`${CLIENT_PUBLIC}:${FIRST_PORT + 1}`)
+    // the stack's sockets take both families, and the tunnel has a public address of IPv4 only
+    expect(named((await client.tcpListen(at('::', 0))).local)).toBe(`${CLIENT_PUBLIC}:${FIRST_PORT + 2}`)
     const dialed = await site.tcpConnect(listener.local)
     const accepted = await accept(listener)
     expect(named(accepted.local)).toBe(`${CLIENT_PUBLIC}:${FIRST_PORT}`)
@@ -288,6 +290,7 @@ describe('UDP over a tunnel', () => {
     expect(socket.local.port).toBeGreaterThanOrEqual(49152)
     await socket.writable.getWriter().write({ remote: at(SITE, 7), data: bytes('from a private port') })
     expect(text((await next(socket)).data)).toBe('from a private port')
+    expect(named((await client.udpBind(at('0.0.0.0', FIRST_PORT + 1))).local)).toBe(`${CLIENT}:${FIRST_PORT + 1}`)
   })
 
   it('a connected socket sends to its peer and hears only it, until it disconnects', async () => {
@@ -356,6 +359,7 @@ describe('names over a tunnel', () => {
     const start = performance.now()
     expect(await outcome(client.lookup(QUERY))).toMatchObject({ code: ErrorCode.LOOKUP_FAILED })
     expect(performance.now() - start).toBeGreaterThanOrEqual(490)
+    expect(performance.now() - start).toBeLessThan(800)
     expect(count()).toBe(2)
   })
 })
