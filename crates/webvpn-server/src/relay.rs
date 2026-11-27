@@ -345,6 +345,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_session_dropped_while_it_holds_a_socket_leaves_no_socket_counted_as_open() {
+        let relay = relay();
+        let mut open = open(&relay).await;
+        open.bind().await;
+        let rendered = |relay: &Relay<Basic>| relay.render_metrics().lines().any(|line| line == "webvpn_active_sockets 0");
+        assert!(!rendered(&relay));
+
+        open.serving.abort();
+        assert!(within(open.serving).await.unwrap_err().is_cancelled());
+        assert_eq!(relay.sessions(), 0);
+        assert!(rendered(&relay), "{}", relay.render_metrics());
+    }
+
+    #[tokio::test]
     async fn a_refused_admission_closes_with_session_limit_and_the_policy_s_message() {
         let policy = full();
         let refusal = policy.admit(CLIENT).unwrap_err();

@@ -678,6 +678,14 @@ impl<P> Registry<P> {
     }
 }
 
+/// A session dropped before its teardown reaped its sockets still counts them as closed, which the open sockets gauge
+/// reads.
+impl<P> Drop for Registry<P> {
+    fn drop(&mut self) {
+        self.metrics.add(Counter::SocketsClosed, self.sockets.len() as u64);
+    }
+}
+
 /// The kind of socket a request on an open socket is for.
 fn kind_of(request: &ClientPacket) -> Option<SocketKind> {
     match request {
