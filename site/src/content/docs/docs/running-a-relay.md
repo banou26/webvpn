@@ -1,21 +1,22 @@
 ---
 title: Running a relay
-description: Host a WebVPN relay with webvpnd, from a checkout or with its Dockerfile, with its ports, its certificate, its settings and its endpoints.
+description: Host a WebVPN relay with webvpnd, installed with cargo or built with its Dockerfile, with its ports, its certificate, its settings and its endpoints.
 ---
 
 `webvpnd` is the WebVPN relay as a program. It runs one relay on WebTransport and on a WebSocket, under the default rules, and takes every setting from an environment variable.
 
 ## Start it
 
-From a checkout of the source:
+With cargo:
 
 ```sh
-cargo run --release -p webvpnd
+cargo install webvpnd
+webvpnd
 ```
 
 With no setting, the relay listens on every IPv4 address and serves a self-signed certificate. It writes its logs to stdout, and `RUST_LOG` sets their level, `info` by default.
 
-With the `Dockerfile` at the root of the checkout:
+With the `Dockerfile` at the root of a checkout of [the source](https://github.com/banou26/webvpn):
 
 ```sh
 docker build -t webvpnd .

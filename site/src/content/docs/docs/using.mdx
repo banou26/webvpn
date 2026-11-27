@@ -19,19 +19,17 @@ import aliasExample from '../../../../../packages/examples/src/vite.config.ts?ra
 
 ## Get the packages
 
-The packages are not published. They build from a checkout of the source. At the root of the checkout:
-
 ```sh
-npm install
-npm run build
+npm install @webvpn/client
 ```
 
-Each package's `build` directory then holds its JavaScript and its types. An app depends on each package by its path. For a checkout in `../webvpn`:
+`@webvpn/net` and `@webvpn/dgram` are packages of their own, for code written for Node's `net` and `dgram`:
 
 ```sh
-npm install ../webvpn/packages/client \
-  ../webvpn/packages/net ../webvpn/packages/dgram
+npm install @webvpn/net @webvpn/dgram
 ```
+
+Each package ships its JavaScript as an ES module, with its types.
 
 ## Connect to a relay
 

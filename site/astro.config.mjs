@@ -9,6 +9,7 @@ export default defineConfig({
       title,
       description,
       favicon: '/favicon.svg',
+      social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/banou26/webvpn' }],
       sidebar: [
         { label: 'What WebVPN is', slug: 'docs' },
         { label: 'How it works', slug: 'docs/how-it-works' },

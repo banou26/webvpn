@@ -6,6 +6,10 @@ as it is.
 
 ## Use
 
+```sh
+npm install @webvpn/client @webvpn/net
+```
+
 ```js
 import { connect as openSession } from '@webvpn/client'
 import net, { setProvider } from '@webvpn/net'

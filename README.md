@@ -12,6 +12,19 @@ Real TCP and UDP sockets for a web page, through a relay, over WebTransport with
 - [`packages/net`](packages/net) and [`packages/dgram`](packages/dgram): `@webvpn/net` and `@webvpn/dgram`, Node's `net` and `dgram` modules on a session, for code written for Node.
 - [`site`](site): the [webvpn.dev](https://webvpn.dev) site, whose protocol page is the spec above.
 
+## Use it
+
+```sh
+cargo install webvpnd            # the relay as a program
+cargo add webvpn-server          # the relay as a library
+npm install @webvpn/client       # the client for a page
+npm install @webvpn/net @webvpn/dgram
+```
+
+The documentation is at [webvpn.dev](https://webvpn.dev/docs/).
+
+## Work on it
+
 ```sh
 cargo test
 npm install && npm test

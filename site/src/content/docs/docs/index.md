@@ -28,4 +28,4 @@ A web page can fetch and open WebSockets, but it cannot dial a TCP port, send a 
 
 ## Who makes it
 
-WebVPN is made by Horion for [FKN](https://fkn.app), which runs public relays.
+WebVPN is made by Horion for [FKN](https://fkn.app), which runs public relays. The source is on [GitHub](https://github.com/banou26/webvpn), under the MIT license.

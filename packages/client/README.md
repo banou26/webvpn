@@ -6,6 +6,10 @@ is missing or fails.
 
 ## Use
 
+```sh
+npm install @webvpn/client
+```
+
 ```js
 import { connect } from '@webvpn/client'
 

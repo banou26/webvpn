@@ -8,12 +8,12 @@ import embed from '../../../../../crates/webvpn-server/examples/embed.rs?raw'
 
 The `webvpn-server` crate is the relay as a library. It holds the sessions and the sockets and moves the bytes. A policy you write decides who may open a session, what a credential means, which sockets and destinations a session may use, and how fast its bytes move. [`webvpnd`](/docs/running-a-relay/) is one program built on it.
 
-A program uses the crate from a checkout of the source, with a path dependency. For a checkout in `../webvpn`, the dependencies of the [example](#an-example) are:
+The dependencies of the [example](#an-example) are:
 
 ```toml
 [dependencies]
-webvpn-server = { path = "../webvpn/crates/webvpn-server" }
-webvpn-proto = { path = "../webvpn/crates/webvpn-proto" }
+webvpn-server = "0.1"
+webvpn-proto = "0.1"
 anyhow = "1"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal"] }
 ```
@@ -126,7 +126,7 @@ Make it with the fields that differ and the defaults for the rest: `Basic { max_
 
 ## An example
 
-`crates/webvpn-server/examples/embed.rs` runs a relay over the WebSocket carrier, on plain `ws://`. Its policy keeps the rules of `Basic`, requires one shared credential, and counts the bytes relayed each way. From a checkout:
+`crates/webvpn-server/examples/embed.rs` runs a relay over the WebSocket carrier, on plain `ws://`. Its policy keeps the rules of `Basic`, requires one shared credential, and counts the bytes relayed each way. From a checkout of [the source](https://github.com/banou26/webvpn):
 
 ```sh
 export RELAY_CREDENTIAL="$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"

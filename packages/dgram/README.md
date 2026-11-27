@@ -5,6 +5,10 @@ Code written for Node's `dgram`, such as a DHT or a tracker client, runs in the 
 
 ## Use
 
+```sh
+npm install @webvpn/client @webvpn/dgram
+```
+
 ```js
 import { connect as openSession } from '@webvpn/client'
 import dgram, { setProvider } from '@webvpn/dgram'
