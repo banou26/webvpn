@@ -19,6 +19,8 @@ mod tcp;
 #[cfg(test)]
 mod testing;
 mod transport;
+#[cfg(all(feature = "tun", target_os = "linux"))]
+pub mod tun;
 mod tunnel;
 mod udp;
 #[cfg(feature = "websocket")]

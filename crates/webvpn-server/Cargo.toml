@@ -19,6 +19,8 @@ websocket = ["dep:futures", "dep:tokio-rustls", "dep:tokio-tungstenite"]
 # shows a page. Needs a wtransport that has `Connection::close_session` (its pull request 337), so it is off by
 # default.
 close-capsule = ["webtransport"]
+# `tun::TunForwarder`, a forwarder for IP tunnels over a TUN device. Linux only: elsewhere it adds nothing.
+tun = []
 
 [dependencies]
 webvpn-proto = { path = "../webvpn-proto", version = "0.1.0" }
