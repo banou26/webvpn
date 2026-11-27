@@ -73,6 +73,8 @@ const DATAGRAM_IN_BYTES: usize = 4 * 1024 * 1024;
 /// RFC 6455 holds a Close frame to 125 bytes, two of them the code. A receiver fails the connection on a longer one,
 /// which loses the code too, so a longer reason is cut.
 const MAX_CLOSE_REASON_BYTES: usize = 123;
+/// How long the writer is given to send what is queued ahead of the close, and the close.
+const WRITER_WAIT: Duration = Duration::from_secs(1);
 
 const PEER_RESET_PAYLOAD: [u8; 4] = webvpn_proto::reset::PEER_RESET.to_be_bytes();
 
@@ -462,6 +464,8 @@ struct Inner {
     datagram_in: AsyncMutex<mpsc::Receiver<InboundChunk>>,
     close_tx: mpsc::Sender<(u16, String)>,
     cancel: CancellationToken,
+    /// Cancelled once the writer task ended.
+    written: CancellationToken,
     // A session can end without `close`; the guard then stops the tasks, which would otherwise hold the connection.
     _cancel_guard: DropGuard,
 }
@@ -485,7 +489,7 @@ impl WsSessionTasks {
         self.reader.abort();
         let _ = self.reader.await;
 
-        if tokio::time::timeout(Duration::from_secs(1), &mut self.writer).await.is_err() {
+        if tokio::time::timeout(WRITER_WAIT, &mut self.writer).await.is_err() {
             self.writer.abort();
             let _ = self.writer.await;
         }
@@ -564,6 +568,10 @@ impl Transport for WsTransport {
         let reason = &reason[..reason.floor_char_boundary(MAX_CLOSE_REASON_BYTES)];
         let _ = self.inner.close_tx.try_send((webvpn_proto::close::websocket(code), reason.to_owned()));
         self.inner.cancel.cancel();
+        // The writer may wait on a client that reads slowly. Waiting for it here keeps the session open until the
+        // `Bye` and the close went out, so a stop, which waits for its sessions and then lets its program end, does
+        // not drop them.
+        let _ = tokio::time::timeout(WRITER_WAIT, self.inner.written.cancelled()).await;
     }
 
     fn send_datagram(&self, _data: Vec<u8>) -> Result<()> {
@@ -637,8 +645,17 @@ where
     let send_states: SendStates = Arc::default();
     let terminals = Arc::new(Terminals::default());
     let cancel = CancellationToken::new();
+    let written = CancellationToken::new();
 
-    let writer = tokio::spawn(writer_task(ws_sink, priority_rx, bulk_rx, close_rx, terminals.clone(), cancel.clone()));
+    let writer = tokio::spawn(writer_task(
+        ws_sink,
+        priority_rx,
+        bulk_rx,
+        close_rx,
+        terminals.clone(),
+        cancel.clone(),
+        written.clone().drop_guard(),
+    ));
     let reader = tokio::spawn(reader_task(
         ws_stream,
         inbound.clone(),
@@ -662,6 +679,7 @@ where
             terminals,
             datagram_in: AsyncMutex::new(datagram_in_rx),
             close_tx,
+            written,
             _cancel_guard: cancel.clone().drop_guard(),
             cancel: cancel.clone(),
         }),
@@ -838,6 +856,7 @@ async fn writer_task<S>(
     mut close_rx: mpsc::Receiver<(u16, String)>,
     terminals: Arc<Terminals>,
     cancel: CancellationToken,
+    _written: DropGuard,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {

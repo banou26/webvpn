@@ -20,8 +20,9 @@ use crate::transport::Transport;
 pub(crate) const STOPPING: &str = "the relay is stopping";
 
 /// How long a stop waits for closes to go out. It is spent twice: once for the sessions to say `Bye`, close and
-/// release (a session takes at most `session::BYE_WAIT` of it), once more for QUIC to deliver its closes (that second
-/// wait is the WebTransport carrier's, on its endpoint).
+/// release (a session takes at most `session::BYE_WAIT` of it, and one over the WebSocket mux a second more for its
+/// writer to send the close), once more for QUIC to deliver its closes (that second wait is the WebTransport
+/// carrier's, on its endpoint).
 pub(crate) const CLOSE_WAIT: Duration = Duration::from_secs(2);
 
 /// How a relay is set up, apart from its policy.

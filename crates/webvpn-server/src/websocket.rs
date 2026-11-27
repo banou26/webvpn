@@ -609,6 +609,75 @@ mod tests {
         assert!(writes < 100, "the connection outlived its session by 5 seconds");
     }
 
+    #[tokio::test]
+    async fn a_stop_returns_once_the_bye_and_the_close_reached_a_client_that_reads_slowly() {
+        // The relay runs on a runtime of its own, shut down as soon as its stop returns, as a program ends after it.
+        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        let source = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote = source.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut peer, _) = source.accept().await.unwrap();
+            let _ = peer.write_all(&vec![0; 2 << 20]).await;
+            let _ = peer.read(&mut [0; 1]).await;
+        });
+        let relay = relay(Config::default());
+        let address = runtime
+            .spawn({
+                let relay = relay.clone();
+                async move {
+                    let socket = TcpSocket::new_v4().unwrap();
+                    socket.set_send_buffer_size(4096).unwrap();
+                    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+                    let listener = socket.listen(16).unwrap();
+                    let address = listener.local_addr().unwrap();
+                    tokio::spawn(serve(relay, listener, Options::default()));
+                    address
+                }
+            })
+            .await
+            .unwrap();
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(4096).unwrap();
+        let mut client = upgrade(within(socket.connect(address)).await.unwrap()).await;
+        client.hello().await;
+        client.send(ClientPacket::TcpConnect { id: 1, remote }).await;
+        // Far more than both socket buffers hold went toward the client, so the relay's writer waits on it.
+        let enough = || relay.metrics().get(Counter::BytesDown) >= 256 * 1024;
+        for _ in 0..100 {
+            if enough() {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert!(enough());
+
+        // The client reads again a moment into the stop, well within the second the writer is given.
+        let reading = tokio::spawn(async move {
+            sleep(Duration::from_millis(300)).await;
+            let (mut control, mut bye) = (Vec::new(), None);
+            loop {
+                match within(client.ws.next()).await {
+                    Some(Ok(Message::Binary(data))) => {
+                        let Some((kind::DATA, CONTROL_STREAM, payload)) = mux::decode(&data) else { continue };
+                        control.extend_from_slice(payload);
+                        while let Some((packet, taken)) = RelayPacket::decode(&control).unwrap() {
+                            control.drain(..taken);
+                            if let RelayPacket::Bye { code, .. } = packet {
+                                bye = Some(code);
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Close(frame))) => return (bye, frame.map(|frame| u16::from(frame.code))),
+                    Some(Ok(_)) => {}
+                    None | Some(Err(_)) => return (bye, None),
+                }
+            }
+        });
+        within(runtime.spawn(async move { relay.stop(Duration::ZERO).await })).await.unwrap();
+        runtime.shutdown_background();
+        assert_eq!(within(reading).await.unwrap(), (Some(close::RESTARTING), Some(4004)));
+    }
+
     #[test]
     fn requests_are_told_apart_by_their_upgrade_header_and_routed_by_method_and_path() {
         assert!(is_websocket_upgrade(
