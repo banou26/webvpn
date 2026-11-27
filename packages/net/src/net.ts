@@ -173,6 +173,7 @@ class Socket extends Duplex {
   // `process.nextTick` is one
   _destroy(error: Error | null, callback: Callback): void {
     this._destroyError = error ?? undefined
+    this.connecting = false
     clearTimeout(this._timer)
     this._connection
       ?.then((connected) => connected && (this._resetRequested ? connected.socket.reset() : connected.socket.close()))

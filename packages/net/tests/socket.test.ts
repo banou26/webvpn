@@ -472,6 +472,17 @@ describe('destroy', () => {
     expect(await settled()).toEqual(['close false d=1 r=0 w=0'])
   })
 
+  // Node 26.12.1 on Linux (measured 2026-11-28): a socket destroyed while it connects is no longer connecting
+  it('a socket destroyed during the connection is no longer connecting, and reads as closed', async () => {
+    const { relay, net } = setup()
+    relay.next = fakeSocket().socket
+    const socket = net.connect(443, 'example.com')
+    socket.destroy()
+    expect([socket.connecting, socket.readyState]).toEqual([false, 'closed'])
+    await Promise.race([new Promise((resolve) => socket.once('close', resolve)), wait(100)])
+    expect([socket.connecting, socket.readyState]).toEqual([false, 'closed'])
+  })
+
   it('a socket option that fails after destroy() emits no error', async () => {
     const { socket, settled } = await stalled()
     socket.setNoDelay(true)
