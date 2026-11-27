@@ -1,4 +1,5 @@
 import type { Carrier, CloseInfo, Context, Opened, Opens, Owner, Request, SocketStream } from './context'
+import type { IpTunnel } from './ip'
 import type { TcpListener } from './listener'
 import type { Address, ClientPacket, RelayPacket } from './protocol'
 import type { TcpSocket } from './tcp'
@@ -6,6 +7,7 @@ import type { UdpSocket } from './udp'
 
 import { closeError, concat, EMPTY, framed, noop, ok, readU32, unexpected, WebVpnError, within } from './context'
 import { dnsQuery } from './dns'
+import { ipTunnel } from './ip'
 import { tcpListener } from './listener'
 import {
   CloseCode,
@@ -40,7 +42,7 @@ const LATE_REPLY_MAX = 512
 
 const FRAME_HEADER_BYTES = 5
 
-const CLOSES = { tcp: 'tcpClose', listener: 'tcpUnlisten', udp: 'udpClose' } as const
+const CLOSES = { tcp: 'tcpClose', listener: 'tcpUnlisten', udp: 'udpClose', ip: 'ipClose' } as const
 
 /**
  * One session with a relay, over WebTransport or the WebSocket mux, from `connect`. Every request rejects with a
@@ -71,6 +73,11 @@ export type Session = {
   udpBind: (local: Address) => Promise<UdpSocket>,
   /** Puts a whole DNS message to the relay's resolver and returns its whole answer. Needs the `DNS` feature. */
   lookup: (query: Uint8Array) => Promise<Uint8Array>,
+  /**
+   * Opens an IP tunnel, which carries whole IP packets for a program that brings its own network stack. Resolves once
+   * the tunnel's stream arrived, and rejects with `NO_STREAM` when it did not in 30 seconds. Needs the `IP` feature.
+   */
+  ipOpen: () => Promise<IpTunnel>,
   /** Closes the session with `NORMAL`. */
   close: () => void,
 }
@@ -315,7 +322,7 @@ export const openSession = async (carrier: Carrier, options: { agent?: string } 
     if (!given) return
     late.delete(packet.id)
     // a socket opened for a request that already gave up is closed, since nobody holds it
-    if (packet.type === 'socket' && given.opens) release(given.opens, packet.socket)
+    if ((packet.type === 'socket' || packet.type === 'ipTunnel') && given.opens) release(given.opens, packet.socket)
   }
 
   const notify = (socket: number, packet: RelayPacket) => {
@@ -334,6 +341,7 @@ export const openSession = async (carrier: Carrier, options: { agent?: string } 
           case 'error':
           case 'socket':
           case 'dnsAnswer':
+          case 'ipTunnel':
             reply(packet)
             break
           case 'accepted':
@@ -415,6 +423,10 @@ export const openSession = async (carrier: Carrier, options: { agent?: string } 
         if (reply.type !== 'dnsAnswer') throw unexpected(reply)
         return reply.answer
       })
+    },
+    ipOpen: async () => {
+      offered(Feature.IP, 'IP tunnels')
+      return request({ type: 'ipOpen' }, (reply) => ipTunnel(context, reply), { opens: 'ip' })
     },
     close: () => fail(CloseCode.NORMAL, 'the client closed the session'),
   }

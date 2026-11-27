@@ -19,13 +19,15 @@ const relayStream = () => {
   let down!: ReadableStreamDefaultController<Uint8Array>
   const seen = { cancelled: false, aborted: false, finished: false, received: [] as Uint8Array[] }
   let broken: unknown
+  let held: Promise<void> | undefined
   const readable = new ReadableStream<Uint8Array>({
     start: (controller) => { down = controller },
     cancel: () => { seen.cancelled = true },
   })
   const writable = new WritableStream<Uint8Array>({
-    write: (chunk) => {
+    write: async (chunk) => {
       if (broken) throw broken
+      await held
       seen.received.push(chunk.slice())
     },
     close: () => { seen.finished = true },
@@ -41,6 +43,15 @@ const relayStream = () => {
     fail: (error: unknown) => down.error(error),
     /** Fails the client's writes from now on. */
     breakWrites: (error: unknown) => { broken = error },
+    /** Takes none of the client's writes until the call it returns, as a stream with no room left. */
+    holdWrites: () => {
+      let release!: () => void
+      held = new Promise((resolve) => { release = resolve })
+      return () => {
+        held = undefined
+        release()
+      }
+    },
     /** 1 once the client read all the relay wrote, 0 or less while it holds some unread. */
     desiredSize: () => down.desiredSize,
     received: () => seen.received.reduce(concat, new Uint8Array(0)),
@@ -124,7 +135,7 @@ export const fakeRelay = (kind: Carrier['kind'] = 'webtransport') => {
       return packets[read++]!
     },
     /** Opens a stream for `socket`, both ways or toward the client only, and writes `first`, its id by default. */
-    open: (socket: number, both = true, first = u32(socket)) => {
+    open: (socket: number, both = true, first: Uint8Array = u32(socket)) => {
       const stream = relayStream()
       streams.push(stream)
       if (both) incoming.enqueue({ readable: stream.readable, writable: stream.writable })

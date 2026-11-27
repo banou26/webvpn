@@ -37,8 +37,8 @@ export const closeError = ({ code, reason }: CloseInfo) => new WebVpnError(
 )
 
 /**
- * Who closed a listener or a UDP socket: the client with its `close()`, the relay with a `Closed` notice and its
- * `ErrorCode`, or the end of the session.
+ * Who closed a listener, a UDP socket or an IP tunnel: the client with its `close()`, the relay with a `Closed` notice
+ * and its `ErrorCode`, or the end of the session.
  */
 export type ClosedBy = { by: 'client' } | { by: 'relay', code: number } | { by: 'session' }
 
@@ -83,12 +83,12 @@ export type Request = ClientPacket extends infer Packet
   : never
 
 /** The kind of socket a request opens, so that the socket a late reply names can be closed. */
-export type Opens = 'tcp' | 'listener' | 'udp'
+export type Opens = 'tcp' | 'listener' | 'udp' | 'ip'
 
 /** A socket the relay opened, as a `socket` or an `accepted` packet names it. */
 export type Opened = { socket: number, local: Address, remote?: Address }
 
-/** What a listener or a UDP socket hears from its session. */
+/** What a listener, a UDP socket or an IP tunnel hears from its session. */
 export type Owner = {
   /** A notice that names the socket: `closed`, and for a listener `accepted` and `acceptRefused`. */
   notice: (packet: RelayPacket) => void,

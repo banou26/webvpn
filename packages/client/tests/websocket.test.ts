@@ -2,8 +2,22 @@ import type { Carrier, Duplex } from '../src/context'
 
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test'
 
-import { readU32, WebVpnError } from '../src/context'
-import { CloseCode, CONTROL_STREAM, decodeMuxFrame, encodeMuxFrame, ErrorCode, MuxKind, MuxStreamType } from '../src/protocol'
+import { concat, readU32, u32, WebVpnError } from '../src/context'
+import {
+  CloseCode,
+  CONTROL_STREAM,
+  decodeClientPacket,
+  decodeMuxFrame,
+  encodeIpFrame,
+  encodeMuxFrame,
+  encodeRelayPacket,
+  ErrorCode,
+  Feature,
+  hello,
+  MuxKind,
+  MuxStreamType,
+} from '../src/protocol'
+import { openSession } from '../src/session'
 import { webSocketCarrier } from '../src/websocket'
 import { settle } from './relay'
 
@@ -211,5 +225,35 @@ describe('the WebSocket mux', () => {
     carrier.close(CloseCode.NORMAL, 'done')
     expect(socket.closedWith).toEqual([4000, 'done'])
     expect(await ending).toEqual({ code: CloseCode.NORMAL, reason: 'done' })
+  })
+})
+
+describe('an IP tunnel over the WebSocket mux', () => {
+  it('carries packets both ways on the stream the relay opens with type 2', async () => {
+    const socket = new FakeSocket()
+    const opening = openSession(await webSocketCarrier(socket as unknown as WebSocket))
+    socket.receive(MuxKind.DATA, CONTROL_STREAM, encodeRelayPacket(hello(Feature.IP, 'relay')))
+    const session = await opening
+    // the client writes each control frame whole
+    const requests = async () => {
+      await settle()
+      return socket.frames(MuxKind.DATA, CONTROL_STREAM).map(({ payload }) => decodeClientPacket(payload)!.packet)
+    }
+    expect(await requests()).toMatchObject([{ type: 'hello' }])
+
+    const tunnelling = session.ipOpen()
+    const request = (await requests())[1]!
+    expect(request.type).toBe('ipOpen')
+    socket.receive(MuxKind.OPEN, 5, Uint8Array.of(MuxStreamType.IP))
+    socket.receive(MuxKind.DATA, 5, concat(u32(5), encodeIpFrame(Uint8Array.of(0x45, 1, 2))))
+    const id = (request as { id: number }).id
+    const ipv4 = Uint8Array.of(198, 18, 0, 2)
+    socket.receive(MuxKind.DATA, CONTROL_STREAM, encodeRelayPacket({ type: 'ipTunnel', id, socket: 5, mtu: 1500, ipv4 }))
+    const tunnel = await tunnelling
+
+    expect((await tunnel.readable.getReader().read()).value).toEqual(Uint8Array.of(0x45, 1, 2))
+    tunnel.send(Uint8Array.of(0x60, 3))
+    await settle()
+    expect(socket.frames(MuxKind.DATA, 5).map(({ payload }) => payload)).toEqual([encodeIpFrame(Uint8Array.of(0x60, 3))])
   })
 })

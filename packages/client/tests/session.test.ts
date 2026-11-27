@@ -1,4 +1,4 @@
-import type { Session, UdpSocket } from '../src'
+import type { IpTunnel, Session, UdpSocket } from '../src'
 import type { ClientPacket, RelayPacket } from '../src/protocol'
 import type { FakeRelay } from './relay'
 
@@ -10,6 +10,7 @@ import { dnsQuery } from '../src/dns'
 import {
   CloseCode,
   encodeFramedUdpPacket,
+  encodeIpFrame,
   encodeRelayPacket,
   ErrorCode,
   Feature,
@@ -685,6 +686,201 @@ describe('a UDP socket over the WebSocket mux', () => {
     await vi.advanceTimersByTimeAsync(8000)
     await udp.writable.getWriter().write({ remote: SITE, data: Uint8Array.of(2) })
     expect(relay.sentDatagrams).toEqual([{ socket: 7, remote: SITE, data: Uint8Array.of(2) }])
+  })
+})
+
+describe('an IP tunnel', () => {
+  const MTU = 1500
+  const TUNNEL_V4 = Uint8Array.of(198, 18, 0, 2)
+  const TUNNEL_V6 = Uint8Array.of(0xfd, ...new Uint8Array(14), 2)
+  const BOTH = { ipv4: TUNNEL_V4, ipv6: TUNNEL_V6 }
+
+  const packet = (length: number, fill = length & 0xff) => new Uint8Array(length).fill(fill)
+
+  const framed = (packets: Uint8Array[]) => packets.map(encodeIpFrame).reduce<Uint8Array>(concat, new Uint8Array(0))
+
+  // the reply first, then the stream
+  const tunnelled = async (relay: FakeRelay, session: Session, addresses: { ipv4?: Uint8Array, ipv6?: Uint8Array } = BOTH) => {
+    const opening = session.ipOpen()
+    const request = await answer(relay, (id) => ({ type: 'ipTunnel', id, socket: 12, mtu: MTU, ...addresses }))
+    await settle()
+    const stream = relay.open(12)
+    return { tunnel: await opening, stream, request }
+  }
+
+  const reads = async (tunnel: IpTunnel, count: number) => {
+    const reader = tunnel.readable.getReader()
+    const read: Uint8Array[] = []
+    for (let at = 0; at < count; at++) read.push((await reader.read()).value!)
+    reader.releaseLock()
+    return read
+  }
+
+  it('is refused with UNSUPPORTED, and not asked for, when the relay does not offer it', async () => {
+    const { relay, session } = await opened(Feature.DNS)
+    expect(await outcome(session.ipOpen())).toMatchObject({ code: ErrorCode.UNSUPPORTED })
+    await settle()
+    expect(relay.packets).toHaveLength(1)
+  })
+
+  it('opens with IpOpen and gives the relay\'s addresses and mtu', async () => {
+    const { relay, session } = await opened(Feature.IP)
+    const { tunnel, request } = await tunnelled(relay, session)
+    expect(request).toEqual({ type: 'ipOpen', id: idOf(request) })
+    expect(tunnel).toMatchObject({ id: 12, ipv4: '198.18.0.2', ipv6: 'fd00::2', mtu: MTU })
+  })
+
+  it('gives no IPv6 address when the relay gave only an IPv4 one', async () => {
+    const { relay, session } = await opened(Feature.IP)
+    const { tunnel } = await tunnelled(relay, session, { ipv4: TUNNEL_V4 })
+    expect(tunnel.ipv4).toBe('198.18.0.2')
+    expect(tunnel.ipv6).toBeUndefined()
+  })
+
+  it('rejects with the relay\'s refusal', async () => {
+    const { relay, session } = await opened(Feature.IP)
+    const opening = outcome(session.ipOpen())
+    await answer(relay, (id) => ({ type: 'error', id, code: ErrorCode.CAPACITY, message: 'no address is free' }))
+    expect(await opening).toMatchObject({ code: ErrorCode.CAPACITY, message: 'no address is free' })
+  })
+
+  it('waits for the reply when its stream comes first', async () => {
+    const { relay, session } = await opened(Feature.IP)
+    const opening = session.ipOpen()
+    const request = await relay.next()
+    relay.open(12, true, concat(u32(12), encodeIpFrame(packet(40))))
+    await settle()
+    relay.send({ type: 'ipTunnel', id: idOf(request), socket: 12, mtu: MTU, ...BOTH })
+    const tunnel = await opening
+    expect(await reads(tunnel, 1)).toEqual([packet(40)])
+  })
+
+  it('gives up when its stream does not come in 30 seconds, and closes the tunnel', async () => {
+    vi.useFakeTimers()
+    const { relay, session } = await opened(Feature.IP)
+    const opening = outcome(session.ipOpen())
+    await answer(relay, (id) => ({ type: 'ipTunnel', id, socket: 12, mtu: MTU, ...BOTH }))
+    await vi.advanceTimersByTimeAsync(29_999)
+    expect(await isPending(opening)).toBe(true)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(await opening).toMatchObject({ code: ErrorCode.NO_STREAM })
+    expect(await relay.next()).toMatchObject({ type: 'ipClose', socket: 12 })
+  })
+
+  it('closes a tunnel the relay gave after the request gave up', async () => {
+    vi.useFakeTimers()
+    const { relay, session } = await opened(Feature.IP)
+    await bound(relay, session, 1)
+    const opening = outcome(session.ipOpen())
+    const request = await relay.next()
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(await opening).toMatchObject({ code: ErrorCode.TIMED_OUT })
+    relay.send({ type: 'ipTunnel', id: idOf(request), socket: 12, mtu: MTU, ...BOTH })
+    expect(await relay.next()).toMatchObject({ type: 'ipClose', socket: 12 })
+  })
+
+  it('gives each packet whole, however its frames are cut across the stream\'s chunks', async () => {
+    const { relay, session } = await opened(Feature.IP)
+    const { tunnel, stream } = await tunnelled(relay, session)
+    const sent = [packet(20), packet(1500), packet(1), packet(300), packet(60)]
+    const bytes = framed(sent)
+    // one byte, then a cut inside the second frame's length, then the rest with several frames in one chunk
+    stream.write(bytes.subarray(0, 1))
+    stream.write(bytes.subarray(1, 23))
+    stream.write(bytes.subarray(23))
+    expect(await reads(tunnel, sent.length)).toEqual(sent)
+  })
+
+  it('gives each packet in a buffer of its own', async () => {
+    const { relay, session } = await opened(Feature.IP)
+    const { tunnel, stream } = await tunnelled(relay, session)
+    stream.write(concat(encodeIpFrame(packet(20)), encodeIpFrame(packet(30))))
+    for (const read of await reads(tunnel, 2)) {
+      expect(read.byteOffset).toBe(0)
+      expect(read.buffer.byteLength).toBe(read.byteLength)
+    }
+  })
+
+  it('reads its stream only as its readable is read', async () => {
+    const { relay, session } = await opened(Feature.IP)
+    const { tunnel, stream } = await tunnelled(relay, session)
+    for (let at = 0; at < 10; at++) stream.write(encodeIpFrame(packet(100)))
+    await settle()
+    // the relay's side holds what nobody read, so its own queue fills and drops
+    expect(stream.desiredSize()).toBe(-9)
+    await reads(tunnel, 1)
+    await settle()
+    expect(stream.desiredSize()).toBe(-8)
+  })
+
+  it('sends a packet behind its length on the stream', async () => {
+    const { relay, session } = await opened(Feature.IP)
+    const { tunnel, stream } = await tunnelled(relay, session)
+    expect(tunnel.send(packet(20))).toBe(true)
+    expect(tunnel.send(packet(MTU))).toBe(true)
+    await vi.waitFor(() => expect(stream.received()).toEqual(concat(encodeIpFrame(packet(20)), encodeIpFrame(packet(MTU)))))
+  })
+
+  it('drops a packet that is empty or longer than its mtu', async () => {
+    const { relay, session } = await opened(Feature.IP)
+    const { tunnel, stream } = await tunnelled(relay, session)
+    expect(tunnel.send(new Uint8Array(0))).toBe(false)
+    expect(tunnel.send(packet(MTU + 1))).toBe(false)
+    tunnel.send(packet(7))
+    await vi.waitFor(() => expect(stream.received()).toEqual(encodeIpFrame(packet(7))))
+  })
+
+  it('drops the newest packets once 64 KiB wait for the stream, and sends the earlier ones in order', async () => {
+    const { relay, session } = await opened(Feature.IP)
+    const { tunnel, stream } = await tunnelled(relay, session)
+    const resume = stream.holdWrites()
+    const taken: Uint8Array[] = []
+    for (let at = 0; at < 60; at++) {
+      const sent = packet(1400, at)
+      if (tunnel.send(sent)) taken.push(sent)
+    }
+    // 1402 bytes a frame, 46 of them in 65536
+    expect(taken).toHaveLength(46)
+    expect(taken.at(-1)![0]).toBe(45)
+    resume()
+    await vi.waitFor(() => expect(stream.received()).toEqual(framed(taken)))
+    expect(tunnel.send(packet(1400, 99))).toBe(true)
+  })
+
+  it('closes with IpClose, resolves on its Ok, and stops', async () => {
+    const { relay, session } = await opened(Feature.IP)
+    const { tunnel, stream } = await tunnelled(relay, session)
+    const reader = tunnel.readable.getReader()
+    const reading = reader.read()
+    const closing = tunnel.close()
+    const request = await relay.next()
+    expect(request).toEqual({ type: 'ipClose', id: idOf(request), socket: 12 })
+    expect(await isPending(closing)).toBe(true)
+    expect(await tunnel.closed).toEqual({ by: 'client' })
+    expect(await reading).toEqual({ done: true, value: undefined })
+    expect(tunnel.send(packet(20))).toBe(false)
+    relay.send({ type: 'ok', id: idOf(request) })
+    await closing
+    await vi.waitFor(() => expect(stream.seen.finished).toBe(true))
+  })
+
+  it('stops at the relay\'s Closed notice', async () => {
+    const { relay, session } = await opened(Feature.IP)
+    const { tunnel } = await tunnelled(relay, session)
+    relay.send({ type: 'closed', socket: 12, code: ErrorCode.OTHER })
+    expect(await tunnel.closed).toEqual({ by: 'relay', code: ErrorCode.OTHER })
+    expect((await tunnel.readable.getReader().read()).done).toBe(true)
+    expect(tunnel.send(packet(20))).toBe(false)
+    await settle()
+    expect(relay.packets).toHaveLength(2)
+  })
+
+  it('stops when the session ends', async () => {
+    const { relay, session } = await opened(Feature.IP)
+    const { tunnel } = await tunnelled(relay, session)
+    session.close()
+    expect(await tunnel.closed).toEqual({ by: 'session' })
+    expect(tunnel.send(packet(20))).toBe(false)
   })
 })
 
