@@ -521,7 +521,12 @@ fd000000000000000000000000000001 06 40 00 80    eth0
         let _b_bound = hairpin.register(Proto::Udp, b.local_addr().unwrap());
         // the relay's route, then the source the receiving app is told
         let pass = |from: &std::net::UdpSocket, to: &std::net::UdpSocket, target: SocketAddr| {
-            from.send_to(b"x", hairpin.own_route(Proto::Udp, target).unwrap().unwrap().dial).unwrap();
+            // an IPv6 socket takes an IPv4 destination in its IPv4-mapped spelling on every system, and macOS only so
+            let dial = match hairpin.own_route(Proto::Udp, target).unwrap().unwrap().dial {
+                SocketAddr::V4(v4) => SocketAddr::from((v4.ip().to_ipv6_mapped(), v4.port())),
+                v6 => v6,
+            };
+            from.send_to(b"x", dial).unwrap();
             to.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
             let (_, source) = to.recv_from(&mut [0; 8]).unwrap();
             hairpin.public_spelling(source)

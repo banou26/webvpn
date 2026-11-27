@@ -21,10 +21,8 @@ use crate::transport::{open_udp_bi_with_prefix, open_uni_with_prefix, SendHalf, 
 
 /// Tries at locking the port of a port-0 bind: another socket on the host can take the port between the disconnect
 /// that frees it and the bind that locks it.
+#[cfg(target_os = "linux")]
 const UDP_PORT_LOCK_ATTEMPTS: usize = 3;
-
-/// Linux's number for EAFNOSUPPORT.
-const EAFNOSUPPORT: i32 = 97;
 
 /// Runs a socket a client asked for. `requests` yields its `UdpBind` first. `datagrams` yields the client's packets
 /// for this socket that came outside its own stream, and `queue` is where the socket puts the ones its stream
@@ -195,6 +193,12 @@ pub(crate) async fn bind<T: Transport, S: Session>(
                 }
                 Some(ClientPacket::UdpConnect { id, remote, .. }) => {
                     staged = Some(answer(id, connect(&udp, hairpin, &*session.policy, &connected, remote).await));
+                    #[cfg(not(target_os = "linux"))]
+                    if !address_kept(&udp, bound) {
+                        session.reply(staged.take().expect("a reply is staged")).await;
+                        ended_alone = Some(ErrorCode::ADDRESS_NOT_AVAILABLE);
+                        break Ok(());
+                    }
                 }
                 Some(ClientPacket::UdpDisconnect { id, .. }) => {
                     let (disconnected, lost_port) = disconnect(&udp, bound, &connected);
@@ -254,7 +258,8 @@ pub(crate) async fn bind<T: Transport, S: Session>(
 
 /// Binds as BSD does: port 0 takes a free port, any other port is bound exactly or refused. A named port is never
 /// swapped for a free one: the policy decides which ports a client may bind, and the system refuses one that is
-/// taken.
+/// taken. The port stays the socket's through a later disconnect.
+#[cfg(target_os = "linux")]
 async fn bind_port_locked(local: SocketAddr) -> std::io::Result<(UdpSocket, SocketAddr)> {
     let mut attempt = 1;
     loop {
@@ -274,19 +279,36 @@ async fn bind_port_locked(local: SocketAddr) -> std::io::Result<(UdpSocket, Sock
     }
 }
 
+// macOS 27.2.1, measured 2026-11-28: a port-0 bind keeps its port through a disconnect, connected or not, and a
+// second bind of a bound socket fails with EINVAL.
+#[cfg(not(target_os = "linux"))]
+async fn bind_port_locked(local: SocketAddr) -> std::io::Result<(UdpSocket, SocketAddr)> {
+    let udp = UdpSocket::bind(local).await?;
+    let bound = udp.local_addr()?;
+    Ok((udp, bound))
+}
+
 /// Drops the socket's peer, as connect(2) with AF_UNSPEC does (udp(7)).
 fn kernel_disconnect(udp: &UdpSocket) -> std::io::Result<()> {
     // SAFETY: `try_init` zeroes the storage, so it holds a whole address whose family is AF_UNSPEC.
     let (_, unspecified) = unsafe { SockAddr::try_init(|_, _| Ok(())) }?;
+    #[cfg(target_os = "linux")]
     match SockRef::from(udp).connect(&unspecified) {
         // some systems report EAFNOSUPPORT once they have dropped the peer already
-        Err(failure) if failure.raw_os_error() == Some(EAFNOSUPPORT) => Ok(()),
+        Err(failure) if failure.raw_os_error() == Some(libc::EAFNOSUPPORT) => Ok(()),
+        done => done,
+    }
+    // macOS 27.2.1, measured 2026-11-28: the call drops the peer, then fails with EINVAL (EADDRNOTAVAIL for an IPv6
+    // socket with an IPv4 peer), and fails with EINVAL on a socket with no peer.
+    #[cfg(not(target_os = "linux"))]
+    match SockRef::from(udp).connect(&unspecified) {
+        Err(_) if udp.peer_addr().is_err() => Ok(()),
         done => done,
     }
 }
 
-/// Drops the socket's peer, and says whether the socket lost its port doing so, in which case it must close alone:
-/// the client was told that port.
+/// Drops the socket's peer, and says whether the socket lost its address or port doing so, in which case it must
+/// close alone: the client was told that address and port.
 fn disconnect(udp: &UdpSocket, bound: SocketAddr, connected: &Mutex<Option<Lease>>) -> (Result<(), Refusal>, bool) {
     if udp.peer_addr().is_err() {
         // never connected, or disconnected already: a disconnect now would free the port
@@ -297,13 +319,40 @@ fn disconnect(udp: &UdpSocket, bound: SocketAddr, connected: &Mutex<Option<Lease
     }
     // the lease goes only once the peer is gone
     *connected.lock().unwrap() = None;
-    if udp.local_addr().is_ok_and(|local| local.port() == bound.port()) {
-        return (Ok(()), false);
+    #[cfg(target_os = "linux")]
+    {
+        if udp.local_addr().is_ok_and(|local| local.port() == bound.port()) {
+            return (Ok(()), false);
+        }
+        match SockRef::from(udp).bind(&SockAddr::from(bound)) {
+            Ok(()) => (Ok(()), false),
+            Err(failure) => (Err(Refusal::from_io(&failure)), true),
+        }
     }
-    match SockRef::from(udp).bind(&SockAddr::from(bound)) {
-        Ok(()) => (Ok(()), false),
-        Err(failure) => (Err(Refusal::from_io(&failure)), true),
+    #[cfg(not(target_os = "linux"))]
+    (Ok(()), !address_kept(udp, bound))
+}
+
+/// `target` in the spelling the socket's family takes. macOS 27.2.1, measured 2026-11-28: an IPv6 socket refuses an
+/// IPv4 address with EINVAL, in sendto and connect alike, and takes its IPv4-mapped spelling.
+#[cfg(not(target_os = "linux"))]
+fn in_family(udp: &UdpSocket, target: SocketAddr) -> SocketAddr {
+    match target {
+        SocketAddr::V4(v4) if udp.local_addr().is_ok_and(|local| local.is_ipv6()) => {
+            SocketAddr::from((v4.ip().to_ipv6_mapped(), v4.port()))
+        }
+        _ => target,
     }
+}
+
+/// Whether the socket still has the address and port it was bound to. macOS 27.2.1, measured 2026-11-28: a
+/// disconnect keeps the port and puts back the unspecified address, and a connect of a connected socket first
+/// disconnects it, so a socket bound to one address can come out of either on another address.
+#[cfg(not(target_os = "linux"))]
+fn address_kept(udp: &UdpSocket, bound: SocketAddr) -> bool {
+    udp.local_addr().is_ok_and(|local| {
+        local.port() == bound.port() && (bound.ip().is_unspecified() || local.ip() == bound.ip())
+    })
 }
 
 async fn connect<S: Session>(
@@ -314,6 +363,8 @@ async fn connect<S: Session>(
     remote: SocketAddr,
 ) -> Result<(), Refusal> {
     let route = crate::hairpin::route(hairpin, policy, Proto::Udp, remote)?;
+    #[cfg(not(target_os = "linux"))]
+    let route = crate::hairpin::Route { dial: in_family(udp, route.dial), ..route };
     udp.connect(route.dial).await.map_err(|failure| Refusal::from_io(&failure))?;
     *connected.lock().unwrap() = route.lease;
     Ok(())
@@ -378,6 +429,8 @@ async fn send_revalidated(
     hairpin: &Hairpin,
     data: &[u8],
 ) -> LeaseSend {
+    #[cfg(not(target_os = "linux"))]
+    let target = target.map(|target| in_family(udp, target));
     loop {
         if let Err(failure) = udp.writable().await {
             return LeaseSend::Failed(failure);
@@ -769,6 +822,13 @@ mod tests {
         assert_eq!(stream.next().await, (Some(peer_address), b"reply".to_vec()));
 
         assert_eq!(harness.ask(ClientPacket::UdpDisconnect { id: 3, socket: SOCKET }).await, RelayPacket::Ok { id: 3 });
+        // macOS puts the unspecified address back on a disconnect, so a socket bound to one address ends and says so
+        if cfg!(not(target_os = "linux")) {
+            let closed = RelayPacket::Closed { socket: SOCKET, code: ErrorCode::ADDRESS_NOT_AVAILABLE };
+            assert_eq!(harness.reply().await, closed);
+            assert!(harness.ended().await.is_ok());
+            return;
+        }
         assert_eq!(harness.metric(Counter::UdpDisconnects), 1);
         stream.send(None, b"nowhere").await;
         stream.send(Some(other_address), b"after").await;
@@ -778,6 +838,27 @@ mod tests {
         // With no peer left, a disconnect changes nothing.
         assert_eq!(harness.ask(ClientPacket::UdpDisconnect { id: 4, socket: SOCKET }).await, RelayPacket::Ok { id: 4 });
         other.send_to(b"kept", local).await.unwrap();
+        assert_eq!(stream.next().await, (Some(other_address), b"kept".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn a_socket_bound_to_every_address_keeps_its_port_through_a_disconnect() {
+        let opening = Opening { local: sa("0.0.0.0:0"), ..Opening::new(Probe::open()) };
+        let (mut harness, local, mut stream) = opening.bind().await;
+        let on_loopback = sa(&format!("127.0.0.1:{}", local.port()));
+        let (peer, peer_address) = outside().await;
+        let (other, other_address) = outside().await;
+
+        let connect = ClientPacket::UdpConnect { id: 2, socket: SOCKET, remote: peer_address };
+        assert_eq!(harness.ask(connect).await, RelayPacket::Ok { id: 2 });
+        stream.send(None, b"to the peer").await;
+        assert_eq!(receive(&peer).await, (b"to the peer".to_vec(), on_loopback));
+
+        assert_eq!(harness.ask(ClientPacket::UdpDisconnect { id: 3, socket: SOCKET }).await, RelayPacket::Ok { id: 3 });
+        assert_eq!(harness.metric(Counter::UdpDisconnects), 1);
+        stream.send(Some(other_address), b"after").await;
+        assert_eq!(receive(&other).await, (b"after".to_vec(), on_loopback));
+        other.send_to(b"kept", on_loopback).await.unwrap();
         assert_eq!(stream.next().await, (Some(other_address), b"kept".to_vec()));
     }
 
@@ -905,23 +986,29 @@ mod tests {
 
         let (_peer, peer_address) = outside().await;
         udp.connect(peer_address).await.unwrap();
-        assert_eq!(disconnect(&udp, bound, &connected), (Ok(()), false));
+        // macOS puts the unspecified address back, which a socket bound to one address cannot keep
+        let lost = cfg!(not(target_os = "linux"));
+        assert_eq!(disconnect(&udp, bound, &connected), (Ok(()), lost));
         assert!(connected.lock().unwrap().is_none());
         assert!(udp.peer_addr().is_err());
-        assert_eq!(udp.local_addr().unwrap(), bound);
+        let local = if lost { SocketAddr::from((Ipv4Addr::UNSPECIFIED, bound.port())) } else { bound };
+        assert_eq!(udp.local_addr().unwrap(), local);
     }
 
     #[tokio::test]
     async fn a_port_0_bind_locks_the_port_it_was_given_against_a_kernel_disconnect() {
         let (_peer, peer_address) = outside().await;
-        // The control: a port the system gave is lost on a disconnect, with or without a peer.
+        // The control: on Linux a port the system gave is lost on a disconnect, with or without a peer, and macOS keeps
+        // it.
         for connected in [false, true] {
             let unlocked = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let given = unlocked.local_addr().unwrap().port();
             if connected {
                 unlocked.connect(peer_address).await.unwrap();
             }
             kernel_disconnect(&unlocked).unwrap();
-            assert_eq!(unlocked.local_addr().unwrap().port(), 0, "connected: {connected}");
+            let kept = if cfg!(target_os = "linux") { 0 } else { given };
+            assert_eq!(unlocked.local_addr().unwrap().port(), kept, "connected: {connected}");
         }
 
         for connected in [false, true] {
@@ -931,7 +1018,12 @@ mod tests {
                 udp.connect(peer_address).await.unwrap();
             }
             kernel_disconnect(&udp).unwrap();
-            assert_eq!(udp.local_addr().unwrap(), bound, "connected: {connected}");
+            // macOS puts the unspecified address back once a peer is dropped
+            let local = match connected && cfg!(not(target_os = "linux")) {
+                true => SocketAddr::from((Ipv4Addr::UNSPECIFIED, bound.port())),
+                false => bound,
+            };
+            assert_eq!(udp.local_addr().unwrap(), local, "connected: {connected}");
         }
     }
 
@@ -949,9 +1041,10 @@ mod tests {
         }
         assert_eq!(udp.ttl().unwrap(), 7);
         assert!(!udp.multicast_loop_v4().unwrap());
-        // Linux doubles the size it is given, and reports that.
+        // Linux doubles the size it is given, and reports that; macOS 27.2.1 reports the size given (2026-11-28).
         let sizes = [SockRef::from(&udp).send_buffer_size().unwrap(), SockRef::from(&udp).recv_buffer_size().unwrap()];
-        assert_eq!(sizes, [2 * MAX_CLIENT_SOCKET_BUFFER_BYTES; 2]);
+        let factor = if cfg!(target_os = "linux") { 2 } else { 1 };
+        assert_eq!(sizes, [factor * MAX_CLIENT_SOCKET_BUFFER_BYTES; 2]);
     }
 
     #[tokio::test]
