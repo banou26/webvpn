@@ -5,15 +5,18 @@ import { playwright } from 'vite-plus/test/browser-playwright'
 
 import { commands } from './tests/browser/rig'
 
-// Playwright's own Chromium download does not run on NixOS, so the headless shell of the Playwright builds the
-// system provides is taken when there is one, or the one `WEBVPN_CHROMIUM` names
-const chromium = () => {
-  if (process.env.WEBVPN_CHROMIUM) return process.env.WEBVPN_CHROMIUM
+// Playwright's own browser downloads do not run on NixOS, so the builds the system provides under
+// `PLAYWRIGHT_BROWSERS_PATH` are taken when there are some, or the ones `WEBVPN_CHROMIUM` and `WEBVPN_FIREFOX` name
+const build = (variable: string, prefix: string, ...path: string[]) => {
+  if (process.env[variable]) return process.env[variable]
   const builds = process.env.PLAYWRIGHT_BROWSERS_PATH
-  const shell = builds && existsSync(builds) && readdirSync(builds).find((name) => name.startsWith('chromium_headless_shell-'))
-  const path = shell && join(builds, shell, 'chrome-headless-shell-linux64', 'chrome-headless-shell')
-  return path && existsSync(path) ? path : undefined
+  const found = builds && existsSync(builds) && readdirSync(builds).find((name) => name.startsWith(prefix))
+  const executable = found && join(builds, found, ...path)
+  return executable && existsSync(executable) ? executable : undefined
 }
+const chromium = () =>
+  build('WEBVPN_CHROMIUM', 'chromium_headless_shell-', 'chrome-headless-shell-linux64', 'chrome-headless-shell')
+const firefox = () => build('WEBVPN_FIREFOX', 'firefox-', 'firefox', 'firefox')
 
 export default defineConfig({
   fmt: { semi: false, singleQuote: true },
@@ -43,8 +46,18 @@ export default defineConfig({
             headless: true,
             // the provider opens every page with `ignoreHTTPSErrors`, which is what lets `wss://` reach a relay
             // whose certificate is self-signed
-            provider: playwright({ launchOptions: { executablePath: chromium(), args: ['--mute-audio'] } }),
-            instances: [{ browser: 'chromium' }],
+            instances: [
+              {
+                browser: 'chromium',
+                provider: playwright({ launchOptions: { executablePath: chromium(), args: ['--mute-audio'] } }),
+              },
+              {
+                browser: 'firefox',
+                provider: playwright({
+                  launchOptions: { executablePath: firefox(), firefoxUserPrefs: { 'media.volume_scale': '0.0' } },
+                }),
+              },
+            ],
             commands,
           },
         },
