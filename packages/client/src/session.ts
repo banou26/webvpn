@@ -4,7 +4,7 @@ import type { Address, ClientPacket, RelayPacket } from './protocol'
 import type { TcpSocket } from './tcp'
 import type { UdpSocket } from './udp'
 
-import { concat, EMPTY, framed, noop, ok, readU32, unexpected, WebVpnError, within } from './context'
+import { closeError, concat, EMPTY, framed, noop, ok, readU32, unexpected, WebVpnError, within } from './context'
 import { dnsQuery } from './dns'
 import { tcpListener } from './listener'
 import {
@@ -74,14 +74,6 @@ export type Session = {
   /** Closes the session with `NORMAL`. */
   close: () => void,
 }
-
-const closeError = ({ code, reason }: CloseInfo) => new WebVpnError(
-  code === CloseCode.SESSION_LIMIT ? ErrorCode.CAPACITY
-  : code === CloseCode.VERSION_MISMATCH ? ErrorCode.UNSUPPORTED
-  : ErrorCode.OTHER,
-  `the session closed: ${reason}`,
-  code,
-)
 
 // keeps the map in stamping order, so the oldest entries go first once they outlive `ms` or outnumber `max`
 const remember = <V extends { at: number }>(map: Map<number, V>, key: number, value: V, ms: number, max: number) => {

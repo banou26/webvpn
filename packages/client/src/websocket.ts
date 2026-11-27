@@ -1,6 +1,6 @@
 import type { Carrier, CloseInfo, Duplex } from './context'
 
-import { readU32, u32, WebVpnError, within } from './context'
+import { closeError, readU32, u32, WebVpnError, within } from './context'
 import { CloseCode, CONTROL_STREAM, decodeMuxFrame, encodeMuxFrame, ErrorCode, MuxKind, MuxStreamType } from './protocol'
 
 const OPEN_TIMEOUT_MS = 6000
@@ -32,9 +32,14 @@ type MuxStream = {
   writable?: WritableStreamDefaultController,
 }
 
+/** The session's `CloseCode` a WebSocket close carries, and `LOST` for a close with none of the relay's codes. */
+const closeInfo = ({ code, reason }: CloseEvent): CloseInfo =>
+  ({ code: code >= 4000 && code < 5000 ? code - 4000 : CloseCode.LOST, reason })
+
 /**
  * The carrier of a WebSocket session: the mux of `spec/protocol.md` over `socket`, which the caller made just before.
- * Rejects, with the socket closed, when it does not open in 6 seconds.
+ * Rejects, with the socket closed, when it does not open in 6 seconds, or when it closes before it opened: with the
+ * session's end as the error when that close carries one of the relay's codes.
  */
 export const webSocketCarrier = async (socket: WebSocket): Promise<Carrier> => {
   socket.binaryType = 'arraybuffer'
@@ -179,8 +184,7 @@ export const webSocketCarrier = async (socket: WebSocket): Promise<Carrier> => {
   }
   socket.onclose = (event: CloseEvent) => {
     // first, so whoever reads the streams' end below finds the code already there
-    const code = event.code >= 4000 && event.code < 5000 ? event.code - 4000 : CloseCode.LOST
-    settle({ code, reason: event.reason })
+    settle(closeInfo(event))
     clearTimeout(timer)
     const failure = new Error('the WebSocket closed')
     for (const stream of [...streams.values()]) terminate(stream, failure, false)
@@ -220,7 +224,12 @@ export const webSocketCarrier = async (socket: WebSocket): Promise<Carrier> => {
   const opened = new Promise<void>((resolve, reject) => {
     if (socket.readyState === OPEN) return resolve()
     socket.addEventListener('open', () => resolve(), { once: true })
-    socket.addEventListener('close', () => reject(new WebVpnError(ErrorCode.OTHER, 'the WebSocket did not open')), { once: true })
+    // Firefox 157 gives about 1 in 10 of the sessions a relay refused as a close alone, with the relay's code and no
+    // `open` or message before it, so the code is read here too (2026-11-28)
+    socket.addEventListener('close', (event) => {
+      const info = closeInfo(event)
+      reject(info.code === CloseCode.LOST ? new WebVpnError(ErrorCode.OTHER, 'the WebSocket did not open') : closeError(info))
+    }, { once: true })
   })
   await within(opened, OPEN_TIMEOUT_MS, ErrorCode.TIMED_OUT, `the WebSocket did not open in ${OPEN_TIMEOUT_MS} ms`)
     .catch((error: unknown) => {

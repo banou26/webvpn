@@ -1,6 +1,6 @@
 import type { Address, ClientPacket, RelayPacket, UdpPacket } from './protocol'
 
-import { ErrorCode } from './protocol'
+import { CloseCode, ErrorCode } from './protocol'
 
 /**
  * A request the relay refused, or one the client refused on its own: a feature the relay has off, no answer in
@@ -26,6 +26,15 @@ export type Duplex = { readable: ReadableStream<Uint8Array>, writable: WritableS
 
 /** How a session ended: a `CloseCode` and a reason for a person. */
 export type CloseInfo = { code: number, reason: string }
+
+/** The error of whatever a session's end made fail, with the session's `CloseCode` as its `closeCode`. */
+export const closeError = ({ code, reason }: CloseInfo) => new WebVpnError(
+  code === CloseCode.SESSION_LIMIT ? ErrorCode.CAPACITY
+  : code === CloseCode.VERSION_MISMATCH ? ErrorCode.UNSUPPORTED
+  : ErrorCode.OTHER,
+  `the session closed: ${reason}`,
+  code,
+)
 
 /**
  * Who closed a listener or a UDP socket: the client with its `close()`, the relay with a `Closed` notice and its

@@ -2,8 +2,8 @@ import type { Carrier, Duplex } from '../src/context'
 
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test'
 
-import { readU32 } from '../src/context'
-import { CloseCode, CONTROL_STREAM, decodeMuxFrame, encodeMuxFrame, MuxKind, MuxStreamType } from '../src/protocol'
+import { readU32, WebVpnError } from '../src/context'
+import { CloseCode, CONTROL_STREAM, decodeMuxFrame, encodeMuxFrame, ErrorCode, MuxKind, MuxStreamType } from '../src/protocol'
 import { webSocketCarrier } from '../src/websocket'
 import { settle } from './relay'
 
@@ -16,6 +16,7 @@ class FakeSocket {
   closedWith: [number, string] | undefined
   onmessage: ((event: { data: ArrayBuffer }) => void) | undefined
   onclose: ((event: { code: number, reason: string }) => void) | undefined
+  closeListeners: ((event: { code: number, reason: string }) => void)[] = []
 
   send(data: Uint8Array) {
     this.sent.push(decodeMuxFrame(data.slice())!)
@@ -25,7 +26,9 @@ class FakeSocket {
     this.closedWith = [code, reason]
   }
 
-  addEventListener() {}
+  addEventListener(type: string, listener: (event: { code: number, reason: string }) => void) {
+    if (type === 'close') this.closeListeners.push(listener)
+  }
 
   receive(kind: number, stream: number, payload?: Uint8Array) {
     this.onmessage?.({ data: encodeMuxFrame(kind, stream, payload).buffer as ArrayBuffer })
@@ -34,6 +37,7 @@ class FakeSocket {
   end(code: number, reason: string) {
     this.readyState = 3
     this.onclose?.({ code, reason })
+    for (const listener of this.closeListeners) listener({ code, reason })
   }
 
   frames(kind: number, stream?: number) {
@@ -171,6 +175,24 @@ describe('the WebSocket mux', () => {
     }
     expect(await closes[0]![1]).toEqual({ code: CloseCode.RESTARTING, reason: 'stopping' })
     expect(await closes[1]![1]).toEqual({ code: CloseCode.LOST, reason: 'stopping' })
+  })
+
+  it('reads a close before the WebSocket opened as the session\'s end when it carries the relay\'s code', async () => {
+    const outcomes: unknown[] = []
+    for (const code of [4003, 1006]) {
+      const socket = new FakeSocket()
+      socket.readyState = 0
+      const opening = webSocketCarrier(socket as unknown as WebSocket).catch((error: unknown) => error)
+      socket.end(code, 'the relay is full')
+      outcomes.push(await opening)
+    }
+    expect(outcomes[0]).toBeInstanceOf(WebVpnError)
+    expect(outcomes[0]).toMatchObject({
+      code: ErrorCode.CAPACITY,
+      closeCode: CloseCode.SESSION_LIMIT,
+      message: 'the session closed: the relay is full',
+    })
+    expect(outcomes[1]).toMatchObject({ code: ErrorCode.OTHER, closeCode: undefined, message: 'the WebSocket did not open' })
   })
 
   it('closes the WebSocket with 4000 and the session close code', async () => {
