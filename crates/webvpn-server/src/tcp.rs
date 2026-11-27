@@ -310,6 +310,7 @@ where
     if let Some(id) = close {
         session.reply(RelayPacket::Ok { id }).await;
     }
+    session.answer_left(&mut requests).await;
     if drain && !up_ended {
         let first_quiet = (DRAIN_FIRST_QUIET + 2 * session.transport.rtt()).min(DRAIN_QUIET);
         let _ = start_drain.send(first_quiet);

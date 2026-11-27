@@ -248,6 +248,7 @@ pub(crate) async fn bind<T: Transport, S: Session>(
     if let Some(code) = ended_alone {
         session.reply(RelayPacket::Closed { socket, code }).await;
     }
+    session.answer_left(&mut requests).await;
     ended
 }
 

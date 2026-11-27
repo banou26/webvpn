@@ -79,6 +79,7 @@ pub(crate) async fn listen<T: Transport, S: Session>(
     if let Some(id) = unlisten {
         session.reply(RelayPacket::Ok { id }).await;
     }
+    session.answer_left(&mut requests).await;
     Ok(())
 }
 

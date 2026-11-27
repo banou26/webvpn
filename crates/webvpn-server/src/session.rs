@@ -367,6 +367,29 @@ impl<T: Transport, S: Session> SessionHandle<T, S> {
     pub(crate) async fn reply(&self, packet: RelayPacket) {
         let _ = self.replies.send(packet).await;
     }
+
+    /// Answers the requests left in a socket's queue once its task reads it no more, as the session answers a request
+    /// for a socket that is gone: `Ok` for one that ends a socket, `UNKNOWN_SOCKET` for any other. The queue is closed
+    /// first, so the session answers every later request itself.
+    pub(crate) async fn answer_left(&self, requests: &mut mpsc::Receiver<ClientPacket>) {
+        requests.close();
+        while let Ok(request) = requests.try_recv() {
+            let answer = match request {
+                ClientPacket::TcpClose { id, .. }
+                | ClientPacket::TcpReset { id, .. }
+                | ClientPacket::TcpUnlisten { id, .. }
+                | ClientPacket::UdpClose { id, .. } => RelayPacket::Ok { id },
+                ClientPacket::TcpSetOption { id, .. }
+                | ClientPacket::UdpSetOption { id, .. }
+                | ClientPacket::UdpConnect { id, .. }
+                | ClientPacket::UdpDisconnect { id, .. } => {
+                    error(id, Refusal::new(ErrorCode::UNKNOWN_SOCKET, "no open socket has this id"))
+                }
+                _ => continue,
+            };
+            self.reply(answer).await;
+        }
+    }
 }
 
 /// What the session's control loop holds between requests.
@@ -836,9 +859,12 @@ mod tests {
     impl Harness {
         /// A session whose relay wrote its hello, which the client has not answered yet.
         async fn start(config: Config, auth: Auth, udp_carrier: UdpCarrier) -> Self {
+            Self::start_with(Probe::default(), config, auth, udp_carrier).await
+        }
+
+        async fn start_with(policy: Probe, config: Config, auth: Auth, udp_carrier: UdpCarrier) -> Self {
             let (transport, mut client) = testing::session(IpAddr::from([192, 0, 2, 1]));
             let relay = Shared::new(config);
-            let policy = Probe::default();
             let setup_slots = Arc::new(Semaphore::new(1));
             let setup = Setup {
                 permit: setup_slots.clone().try_acquire_owned().unwrap(),
@@ -1087,6 +1113,51 @@ mod tests {
             assert_eq!(harness.ask(ClientPacket::AuthClear { id }).await, RelayPacket::Ok { id });
         }
         assert!(!harness.ended.is_finished());
+    }
+
+    #[tokio::test]
+    async fn a_request_queued_behind_the_end_of_its_socket_is_answered_as_for_a_socket_that_is_gone() {
+        let mut harness = Harness::start_with(Probe::opening(8), Config::default(), Auth::None, UdpCarrier::Bidi).await;
+        harness.control.send(client_hello()).await;
+        let local = address("127.0.0.1:0");
+        let RelayPacket::Socket { socket: udp, .. } = harness.ask(ClientPacket::UdpBind { id: 1, local }).await else {
+            panic!("the bind was not answered with its socket");
+        };
+        let RelayPacket::Socket { socket: listener, local: listening, .. } =
+            harness.ask(ClientPacket::TcpListen { id: 2, local }).await
+        else {
+            panic!("the listen was not answered with its socket");
+        };
+        let _peer = tokio::net::TcpStream::connect(listening).await.unwrap();
+        let Some(RelayPacket::Accepted { socket: tcp, .. }) = harness.control.next().await else {
+            panic!("the connection was not announced");
+        };
+
+        // One write, so the session hands each socket both of its requests before the socket's task reads the first.
+        let mut queued = Vec::new();
+        for request in [
+            ClientPacket::UdpClose { id: 10, socket: udp },
+            ClientPacket::UdpSetOption { id: 11, socket: udp, option: UdpOption::Ttl(64) },
+            ClientPacket::TcpUnlisten { id: 12, socket: listener },
+            ClientPacket::TcpUnlisten { id: 13, socket: listener },
+            ClientPacket::TcpClose { id: 14, socket: tcp },
+            ClientPacket::TcpSetOption { id: 15, socket: tcp, option: TcpOption::NoDelay(true) },
+        ] {
+            request.encode(&mut queued);
+        }
+        harness.control.write(&queued).await;
+
+        let mut answered = Vec::new();
+        for _ in 0..6 {
+            answered.push(match harness.control.next().await.expect("the relay answers") {
+                RelayPacket::Ok { id } => (id, None),
+                RelayPacket::Error { id, code, .. } => (id, Some(code.0)),
+                other => panic!("expected an answer, got {other:?}"),
+            });
+        }
+        answered.sort();
+        let gone = Some(ErrorCode::UNKNOWN_SOCKET.0);
+        assert_eq!(answered, [(10, None), (11, gone), (12, None), (13, None), (14, None), (15, gone)]);
     }
 
     #[tokio::test]
