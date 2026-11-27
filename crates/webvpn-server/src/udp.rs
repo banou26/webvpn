@@ -970,8 +970,17 @@ mod tests {
     #[tokio::test]
     async fn a_close_ends_the_socket_and_its_stream_and_frees_the_port_before_it_is_answered() {
         let (mut harness, local, mut stream) = Opening::new(Probe::open()).bind().await;
-        assert_eq!(harness.ask(ClientPacket::UdpClose { id: 2, socket: SOCKET }).await, RelayPacket::Ok { id: 2 });
-        UdpSocket::bind(local).await.expect("the port is free");
+        // A full reply queue holds the answer back, so the port must be free while the answer still waits.
+        let mut held = 0;
+        while harness.handle.replies.try_send(RelayPacket::Draining).is_ok() {
+            held += 1;
+        }
+        harness.requests.send(ClientPacket::UdpClose { id: 2, socket: SOCKET }).await.unwrap();
+        until(|| std::net::UdpSocket::bind(local).is_ok()).await;
+        for _ in 0..held {
+            assert_eq!(harness.reply().await, RelayPacket::Draining);
+        }
+        assert_eq!(harness.reply().await, RelayPacket::Ok { id: 2 });
         assert!(harness.ended().await.is_ok());
         let read = timeout(WAIT, stream.recv.read(&mut [0; 1])).await.expect("the stream ends in time");
         assert_eq!(read.unwrap(), 0);
