@@ -5,11 +5,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+homepage.workspace = true
+keywords = ["webvpn", "webtransport", "websocket", "relay", "proxy"]
+categories = ["network-programming", "command-line-utilities"]
 
 [dependencies]
-webvpn-proto = { path = "../webvpn-proto" }
-webvpn-server = { path = "../webvpn-server" }
+webvpn-proto = { path = "../webvpn-proto", version = "0.1.0" }
+webvpn-server = { path = "../webvpn-server", version = "0.1.0" }
 anyhow = "1"
 axum = { version = "0.7", default-features = false, features = ["http1", "tokio"] }
 rlimit = "0.10"

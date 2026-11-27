@@ -1,9 +1,17 @@
 {
   "name": "@webvpn/net",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.5.0",
   "description": "Node's net module for a web page, with its sockets on a WebVPN relay",
   "license": "MIT",
+  "homepage": "https://webvpn.dev",
+  "keywords": [
+    "webvpn",
+    "net",
+    "tcp",
+    "sockets",
+    "browser",
+    "polyfill"
+  ],
   "type": "module",
   "main": "build/index.js",
   "types": "build/index.d.ts",
@@ -26,7 +34,7 @@
   },
   "dependencies": {
     "@types/node": "^25.9.5",
-    "@webvpn/client": "^0.1.0",
+    "@webvpn/client": "^0.5.0",
     "events": "^3.3.0",
     "readable-stream": "^4.7.0"
   },
@@ -39,5 +47,8 @@
     "type": "git",
     "url": "git+https://github.com/banou26/webvpn.git",
     "directory": "packages/net"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

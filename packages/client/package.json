@@ -1,9 +1,18 @@
 {
   "name": "@webvpn/client",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.5.0",
   "description": "The WebVPN client: real TCP and UDP sockets for a web page, through a relay",
   "license": "MIT",
+  "homepage": "https://webvpn.dev",
+  "keywords": [
+    "webvpn",
+    "webtransport",
+    "websocket",
+    "tcp",
+    "udp",
+    "sockets",
+    "browser"
+  ],
   "type": "module",
   "main": "build/index.js",
   "types": "build/index.d.ts",
@@ -36,5 +45,8 @@
     "type": "git",
     "url": "git+https://github.com/banou26/webvpn.git",
     "directory": "packages/client"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
