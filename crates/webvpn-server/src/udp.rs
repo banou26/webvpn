@@ -842,6 +842,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_socket_connected_onto_a_relay_socket_that_closed_ends_at_its_next_packet_and_says_so() {
+        let relay = Shared::new(Config { own_addresses: vec![ip(OWN)], ..Config::default() });
+        let (mut a, _, mut a_stream) = Opening { relay: relay.clone(), ..Opening::new(Probe::open()) }.bind().await;
+        let (mut b, b_local, mut b_stream) = Opening { relay, ..Opening::new(Probe::open()) }.bind().await;
+
+        let connect =
+            ClientPacket::UdpConnect { id: 2, socket: SOCKET, remote: sa(&format!("{OWN}:{}", b_local.port())) };
+        assert_eq!(a.ask(connect).await, RelayPacket::Ok { id: 2 });
+        a_stream.send(None, b"first").await;
+        let (a_as_b_sees_it, _) = b_stream.next().await;
+        b_stream.send(a_as_b_sees_it, b"reply").await;
+        assert_eq!(a_stream.next().await.1, b"reply");
+
+        assert_eq!(b.ask(ClientPacket::UdpClose { id: 2, socket: SOCKET }).await, RelayPacket::Ok { id: 2 });
+        // Another socket on the freed port is the peer the system lets through, though it is not the relay socket
+        // the lease named.
+        let stranger = std::net::UdpSocket::bind(sa(&format!("127.0.0.1:{}", b_local.port()))).unwrap();
+        let a_port = a_as_b_sees_it.unwrap().port();
+        stranger.send_to(b"stale", sa(&format!("127.0.0.1:{a_port}"))).unwrap();
+        assert_eq!(a.reply().await, RelayPacket::Closed { socket: SOCKET, code: ErrorCode::OTHER });
+        assert!(a.ended().await.is_ok());
+        let read = timeout(WAIT, a_stream.recv.read(&mut [0; 1])).await.expect("the stream ends in time");
+        assert_eq!(read.unwrap(), 0, "the packet was not delivered");
+    }
+
+    #[tokio::test]
     async fn a_send_checks_the_lease_right_before_it_goes() {
         let hairpin = Hairpin::new(vec![ip(OWN)]);
         let (receiver, target) = outside().await;
