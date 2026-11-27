@@ -886,6 +886,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_port_0_bind_locks_the_port_it_was_given_against_a_kernel_disconnect() {
+        let (_peer, peer_address) = outside().await;
+        // The control: a port the system gave is lost on a disconnect, with or without a peer.
+        for connected in [false, true] {
+            let unlocked = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            if connected {
+                unlocked.connect(peer_address).await.unwrap();
+            }
+            kernel_disconnect(&unlocked).unwrap();
+            assert_eq!(unlocked.local_addr().unwrap().port(), 0, "connected: {connected}");
+        }
+
+        for connected in [false, true] {
+            let (udp, bound) = bind_port_locked(sa("127.0.0.1:0")).await.unwrap();
+            assert_ne!(bound.port(), 0);
+            if connected {
+                udp.connect(peer_address).await.unwrap();
+            }
+            kernel_disconnect(&udp).unwrap();
+            assert_eq!(udp.local_addr().unwrap(), bound, "connected: {connected}");
+        }
+    }
+
+    #[tokio::test]
     async fn options_are_applied_and_buffer_sizes_clamped() {
         let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let policy = Probe::open();
