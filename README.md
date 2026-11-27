@@ -29,3 +29,5 @@ The documentation is at [webvpn.dev](https://webvpn.dev/docs/).
 cargo test
 npm install && npm test
 ```
+
+`sh crates/webvpnd/tests/ip-tunnel.sh` runs IP tunnels over a real network on Linux, in namespaces of its own.

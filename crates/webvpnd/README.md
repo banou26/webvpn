@@ -34,7 +34,16 @@ level (`info` by default).
 | `WEBVPN_ALLOW_PRIVATE_TARGETS` | `false` | Lets clients reach private, local and reserved addresses. For a relay on a network you trust. |
 | `WEBVPN_MIN_BIND_PORT` | `1024` | The lowest port a client may bind. Port 0, any free port, always passes. |
 | `WEBVPN_CREDENTIALS` | none | When set, a client must present one of these credentials before it opens a socket. Unset, the relay is open to every client. |
+| `WEBVPN_IP_DEVICE` | none | The TUN device IP tunnels go through, which a setup step made for the relay's user (see `ip-tunnel-setup.sh`). Unset, the relay carries no tunnels. Linux only. |
+| `WEBVPN_IP_POOL` | none | The device's IPv4 network, such as `198.18.0.0/16`. Required with `WEBVPN_IP_DEVICE`, refused without it. Linux only. |
+| `WEBVPN_MAX_TUNNEL_PACKETS_PER_SECOND` | `20000` | The packets one IP tunnel takes from its client each second. `0` lifts the ceiling. Linux only. |
 | `WEBVPN_DRAIN_SECONDS` | `5` | On SIGTERM or SIGINT the relay takes no new session and tells the open ones it is stopping. They keep their sockets this long, then the relay closes them and the program exits with code 0. |
+
+## IP tunnels
+
+On Linux the relay can carry whole IP packets through a TUN device: a privileged setup step makes the device and the
+host's rules, and the relay opens it with no privilege. [IP tunnels](https://webvpn.dev/docs/running-a-relay/#ip-tunnels)
+in the guide explains both halves and the setup script.
 
 ## On macOS
 
@@ -44,3 +53,4 @@ The relay builds, serves and passes its tests on macOS too. A client can see the
 - A connect that fails on a UDP socket that already has a peer leaves the socket with no peer, where Linux keeps the one it had.
 - A TTL of 0 is accepted, where Linux refuses it.
 - `WEBVPN_WATCH_OWN_IPV6` does nothing.
+- IP tunnels are not available, and their settings stop the program at start.

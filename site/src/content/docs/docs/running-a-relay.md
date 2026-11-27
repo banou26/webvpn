@@ -139,6 +139,68 @@ The relay decides about its own addresses itself, before the rules above. A conn
 
 Set `WEBVPN_OWN_ADDRESSES` to every public address of the relay's host. An address left out of it is a public address like any other, and a client that connects to it reaches whatever listens on that host.
 
+## IP tunnels
+
+A relay can also carry whole IP packets, for a client that brings its own network stack, such as a virtual machine. Each tunnel is given an address, and its packets go out through the relay's host as through a router. IP tunnels are Linux only, and off unless `WEBVPN_IP_DEVICE` is set: without it, the relay's hello does not offer them.
+
+They come in two halves:
+
+- **The setup step, with privilege.** Run as root once, before the relay starts, it makes a TUN device owned by the relay's user, gives it its network, turns forwarding on and loads the host's rules for it. `crates/webvpnd/ip-tunnel-setup.sh` does all of it.
+- **The relay, with none.** It only opens the device that exists and belongs to its user, and needs no capability. A device that is missing, belongs to another user, or has an MTU under 1280 stops the program at start, with a message that says what to check.
+
+### Settings
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `WEBVPN_IP_DEVICE` | none | The TUN device's name. Unset, the relay carries no tunnels. |
+| `WEBVPN_IP_POOL` | none | The device's IPv4 network, such as `198.18.0.0/16`, with a prefix length of 8 to 30. Required with the device, refused without it. The device holds the first host address, and each tunnel is given one of the others. |
+| `WEBVPN_MAX_TUNNEL_PACKETS_PER_SECOND` | `20000` | The packets one tunnel takes from its client each second, past which they are dropped. `0` lifts the ceiling. |
+
+On another system than Linux, any of the three stops the program at start, with a message that says IP tunnels need Linux. A tunnel is one of the session's sockets: it counts toward `WEBVPN_MAX_SOCKETS` and `WEBVPN_MAX_SOCKETS_PER_SESSION`, and `WEBVPN_CREDENTIALS` applies to it. The relay checks the destination of every packet against [the default rules](#what-the-default-rules-allow), as for a socket's: public addresses only, unless `WEBVPN_ALLOW_PRIVATE_TARGETS` is set. A tunnel's address is given again only once every other address of the network was given, so that a freed address stays unused as long as possible.
+
+### The setup script
+
+```sh
+WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=198.18.0.0/16 WEBVPN_IP_USER=webvpnd sh ip-tunnel-setup.sh up
+```
+
+It takes `WEBVPN_IP_DEVICE` (`webvpn0` by default) and `WEBVPN_IP_POOL` as the relay does, `WEBVPN_IP_USER`, the user the relay runs as, which is required (a device with no owner is open to every local user), `WEBVPN_IP_MTU` (`1500` by default), and `WEBVPN_IP_OUT`, the interface the packets leave by (by default, the one of the default route). `up` prints nothing unless something fails, and running it again changes nothing. It:
+
+1. makes the device for its user, gives it the network's first host address, sets its MTU and brings it up;
+2. turns IPv4 forwarding on;
+3. loads one nftables table of its own, named after the device, with:
+   - packets from the device to the device dropped, so that no tunnel reaches another;
+   - packets from the device to private, loopback, link-local, shared, multicast and reserved addresses dropped, the same list as the relay's own rule, as a second layer under it;
+   - a ceiling on the connections the kernel tracks for one tunnel address, set a little above the 3584 flows the relay keeps for a tunnel;
+   - every other packet from the device accepted;
+   - packets toward the device accepted only when they belong to, or relate to, a connection that began from the device, and every other packet toward the device dropped;
+   - nothing from the device accepted for the host itself;
+   - the network's addresses translated to the host's where packets leave by `WEBVPN_IP_OUT`.
+
+`down` removes that table and the device, and leaves forwarding on, since other things on the host may need it.
+
+The table does not assume it is the only firewall on the host. Another table that drops forwarded packets, such as a firewall manager's, still drops the tunnels' packets: let packets from and toward the device through there too.
+
+### In a container
+
+The device lives in the host's network, so the relay's container shares it, and needs the device node `/dev/net/tun`, which a plain container does not have. Run the setup step on the host with the user the container runs as, then:
+
+```sh
+docker run --rm --network host --device /dev/net/tun --user 1000:1000 \
+  -e WEBVPN_IP_DEVICE=webvpn0 -e WEBVPN_IP_POOL=198.18.0.0/16 webvpnd
+```
+
+With `--network host`, the relay binds its ports on the host itself, so no `-p` is needed.
+
+### What a client can expect
+
+- **Its address is private, and translated.** It is one of the network's addresses, and the host translates it to its own where packets leave. It lasts as long as the tunnel does.
+- **A tunnel takes only answers.** A packet reaches the client only when it answers a flow the client sent on, or is an ICMP error about a packet it sent. Nothing reaches a tunnel unasked, and nothing that answers the address's earlier holder.
+- **Flows are bounded and forgotten when silent.** The relay keeps at most 3584 flows a tunnel, and forgets a flow silent for 2 minutes, 5 for UDP, and 2 hours for an open TCP connection. A client that needs a quiet flow kept sends on it more often than that.
+- **Packets may be dropped.** A tunnel is a link that may drop, when a queue is full or a packet is refused, and nothing is sent again.
+
+`webvpn_ip_packets_total` counts the tunnels' packets by direction, and `webvpn_ip_dropped_total` the relay's drops by reason.
+
 ## Health, readiness and metrics
 
 The HTTP listener speaks plain HTTP, on `127.0.0.1:8080` by default. It starts after both carriers, so it answers once they serve.
@@ -189,3 +251,4 @@ On SIGTERM or SIGINT, the relay:
 - A UDP connect that fails on a socket that already has a peer leaves the socket with no peer. On Linux the socket keeps the peer it had.
 - A TTL of 0 is accepted. Linux refuses it.
 - `WEBVPN_WATCH_OWN_IPV6` does nothing.
+- [IP tunnels](#ip-tunnels) are not available, and their settings stop the program at start.
