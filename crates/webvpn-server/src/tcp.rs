@@ -634,6 +634,13 @@ pub(crate) mod tests {
         (dialed.unwrap(), accepted.unwrap().0)
     }
 
+    /// More than a [`pair`] with tiny buffers takes in while its peer does not read. macOS 27.2.1 takes in about 132
+    /// KiB whatever sizes are asked, the receive window its handshake advertised (measured 2026-11-28).
+    #[cfg(target_os = "linux")]
+    const UNREAD: usize = 60 * 1024;
+    #[cfg(not(target_os = "linux"))]
+    const UNREAD: usize = 200 * 1024;
+
     /// Relays `connection` over a carrier with this round trip.
     async fn relayed(policy: Probe, (connection, peer): (TcpStream, TcpStream), rtt: Duration) -> Relayed {
         let (session, mut replies) = handle(Distant(rtt), policy, Config::default());
@@ -851,6 +858,8 @@ pub(crate) mod tests {
     }
 
     // A listener with no room left in its accept queue drops a further connection's handshake, which then waits.
+    // macOS answers it with a reset instead (27.2.1, measured 2026-11-28).
+    #[cfg(target_os = "linux")]
     #[tokio::test(start_paused = true)]
     async fn a_connect_past_its_limit_answers_timed_out() {
         let full = TcpSocket::new_v4().unwrap();
@@ -901,8 +910,8 @@ pub(crate) mod tests {
         assert!(options.send_buffer_size().unwrap() <= 2 * MAX_CLIENT_SOCKET_BUFFER_BYTES);
         assert!(options.recv_buffer_size().unwrap() <= 2 * MAX_CLIENT_SOCKET_BUFFER_BYTES);
 
-        // the system refuses a TTL of 0
-        assert_eq!(code(&relayed.control.ask(set(TcpOption::Ttl(0))).await), (2, ErrorCode::OTHER));
+        // the system refuses a TTL over 255
+        assert_eq!(code(&relayed.control.ask(set(TcpOption::Ttl(256))).await), (2, ErrorCode::OTHER));
         assert_eq!(code(&relayed.control.ask(set(TcpOption::Unknown(9))).await), (2, ErrorCode::UNSUPPORTED));
     }
 
@@ -978,8 +987,7 @@ pub(crate) mod tests {
     async fn a_drain_counts_quiet_only_while_it_waits_on_the_client() {
         let Relayed { mut control, mut upload, peer, task, .. } =
             relayed(Probe::open(), pair(true).await, NO_RTT).await;
-        // one read, more than the tiny buffers hold
-        let chunk = vec![1; 60 * 1024];
+        let chunk = vec![1; UNREAD];
 
         control.end(false).await;
         upload.write_all(&chunk).await.unwrap();
@@ -1047,8 +1055,8 @@ pub(crate) mod tests {
     async fn a_drain_resets_the_download_only_once_the_upload_is_done_with() {
         let Relayed { mut control, mut upload, peer, task, events, .. } =
             relayed(Probe::open(), pair(true).await, NO_RTT).await;
-        // one read, more than the tiny buffers hold, so the drain waits on a peer that is not reading yet
-        let chunk = vec![1; 60 * 1024];
+        // the drain waits on a peer that is not reading yet
+        let chunk = vec![1; UNREAD];
         upload.write_all(&chunk).await.unwrap();
         control.end(false).await;
         sleep(Duration::from_millis(300)).await;
