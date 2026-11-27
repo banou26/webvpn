@@ -50,6 +50,8 @@ Each carrier re-exports the crate its types come from, at the version `webvpn-se
 | `own_addresses` | empty | The relay's own public addresses. A connection to one of them goes to the socket a session bound on that port, and is refused when there is none. |
 | `max_pending_sessions` | `256` | Sessions in setup at once, from the client's arrival to its hello. A client that arrives while that many are in setup is turned away at once. |
 | `setup_timeout` | 15 seconds | How long a session's setup may take. A session past it is closed with `PROTOCOL_ERROR`. |
+| `forwarder` | `None` | Where [IP tunnels](#ip-tunnels) send their packets. `None` turns tunnels off. |
+| `max_tunnel_packets_per_second` | `Some(20000)` | The packets one IP tunnel takes from its client each second. `None` lifts the ceiling. |
 
 ### The carriers
 
@@ -90,10 +92,10 @@ Its methods take `&self`, and the relay may call them from several sockets' task
 
 - **`authenticate(credential)`** is called when the client presents a credential, which it may do at any time and again later, for example with a renewed one. `Ok` gives the session that identity from then on: what it may open, and how its bytes are counted and paced, follow from it. `Err` must leave the session exactly as it was. The default refuses with `UNSUPPORTED`.
 - **`clear_auth()`** is called when the client gives its identity up, and returns the session to what `admit` made it. The default does nothing.
-- **`open_socket(kind)`** is called when the client asks for a TCP connection, a listener or a UDP socket (`SocketKind::Tcp`, `TcpListener` or `Udp`), and when one of its listeners accepted a connection (`SocketKind::Tcp`). The relay calls it after its own checks, the credential and `max_sockets_per_session`, and before the socket counts as open. `Ok` returns the socket's [permit](#permits). A refusal reaches the client under the request's id, or as `AcceptRefused` for an accepted connection, and leaves the session untouched.
-- **`check_egress(proto, target)`** decides whether the session may send to `target`, the literal address the bytes go to: a TCP connection's, after its name was looked up, the destination of every UDP datagram, a multicast group a socket joins, and the limited broadcast address when a socket turns broadcast on. The relay never asks it about its own addresses: it routes those to the sockets bound on the relay, or refuses them itself.
+- **`open_socket(kind)`** is called when the client asks for a TCP connection, a listener, a UDP socket or an IP tunnel (`SocketKind::Tcp`, `TcpListener`, `Udp` or `IpTunnel`), and when one of its listeners accepted a connection (`SocketKind::Tcp`). The relay calls it after its own checks, the credential and `max_sockets_per_session`, and before the socket counts as open. `Ok` returns the socket's [permit](#permits). A refusal reaches the client under the request's id, or as `AcceptRefused` for an accepted connection, and leaves the session untouched.
+- **`check_egress(proto, target)`** decides whether the session may send to `target`, the literal address the bytes go to: a TCP connection's, after its name was looked up, the destination of every UDP datagram, a multicast group a socket joins, the limited broadcast address when a socket turns broadcast on, and the destination of every packet of an [IP tunnel](#ip-tunnels). The relay never asks it about its own addresses: it routes those to the sockets bound on the relay, or refuses them itself.
 - **`check_bind(proto, local)`** decides whether the session may bind `local`, for a UDP socket or a listener. Port `0` asks for any free port. It has no default, so a policy that wraps another one forwards it or decides itself.
-- **`relayed(direction, bytes)`** is called before `bytes` move, in both directions of every socket, and for a DNS answer as `Direction::Down`. The bytes move once the returned future resolves. The default resolves at once.
+- **`relayed(direction, bytes)`** is called before `bytes` move, in both directions of every socket, for each packet of an IP tunnel, and for a DNS answer as `Direction::Down`. The bytes move once the returned future resolves. The default resolves at once.
 
 ### Permits
 
@@ -124,6 +126,34 @@ Both go in `relayed`. A policy that meters adds `bytes` to its count and resolve
 
 Make it with the fields that differ and the defaults for the rest: `Basic { max_sessions: 64, ..Basic::default() }`. Its last field, `held`, holds the sessions and sockets in use, which its clones share. Leave it at its default. A policy of your own can wrap `Basic` and the `BasicSession` it admits, as the example does. `egress::is_public(ip)` is the test `Basic` applies to a destination.
 
+## IP tunnels
+
+A relay may also carry whole IP packets, for a client that brings its own network stack, such as a virtual machine. The library does every check and all the accounting for them. Where the packets go is a `Forwarder` the program provides, for example one over a TUN device. A relay with no forwarder, the default, does not offer tunnels and answers a request for one with `UNSUPPORTED`. A relay has one forwarder, given in `Config::forwarder` as an `Arc<dyn Forwarder>`.
+
+### `Forwarder`
+
+- **`mtu()`** is the largest packet a tunnel carries, which the client is told. It is at least 1280: the relay refuses every tunnel of a forwarder under it.
+- **`attach()`** gives a new tunnel its end, a `TunnelEnd`: `ipv4` and `ipv6`, the addresses the client's end is given, at least one of them, and `packets`, the receiving half of a bounded tokio channel of `Vec<u8>` that brings the packets arriving for those addresses. The relay calls it once the policy gave the tunnel its permit. A refusal, such as `CAPACITY` when no address is free, reaches the client under the request's id.
+- **`send(packet)`** takes one packet from a tunnel toward its destination. It is called on the async runtime and must return at once: a forwarder that cannot take the packet now drops it.
+
+The forwarder sends into a tunnel's channel with `try_send` and drops the packet when the channel is full, so no client ever holds it. The relay drops the `TunnelEnd` when the tunnel ends, however it ends: the client closes it, its stream or its session ends, or the relay stops. The forwarder then reads the channel's sender as closed, with `is_closed()` or when `closed()` resolves, and takes the addresses back. A forwarder that drops the sender ends the tunnel, and the client is told `Closed`.
+
+### What the relay checks
+
+- A tunnel is one of the session's sockets. The credential, `max_sockets_per_session` and `open_socket(SocketKind::IpTunnel)` apply as to any socket, and the tunnel holds its permit while it is open.
+- The relay drops, and counts, a packet from the client that is longer than the `mtu`, is not IPv4 or IPv6, has a header cut short, has an own length that is not the length it came with, comes from a source that is not the tunnel's address of its family, carries an IPv4 source route or an IPv6 type 0 routing header, or comes past the tunnel's packets a second.
+- Then `check_egress` decides on the destination, as for a socket. A TCP or UDP packet that holds its ports is asked about as `Proto::Tcp` or `Proto::Udp` with its destination port. A packet of another protocol, and a fragment after the first, is asked about as `Proto::Other` with the IP protocol number and port `0`. A policy that refuses a port refuses the first fragment, and the destination cannot put the datagram together without it. The relay never asks about its own addresses: it drops a packet to one.
+- A packet that passed is metered with `relayed(Direction::Up, length)`, then handed to `send`. A packet toward the client is metered with `relayed(Direction::Down, length)`, then queued for the tunnel's stream. When the queue is full the newest packet is dropped, so a slow client loses packets, as on a full link, and holds neither the forwarder nor another tunnel.
+- The relay's counters hold the tunnels' packets each way and their drops by reason, and a tunnel's bytes count with the sockets' bytes. Nothing the relay logs names an address or holds a packet.
+
+### Limits
+
+| What | Limit |
+| --- | --- |
+| A packet | the forwarder's `mtu`, at least 1280 bytes |
+| Packets a second from one tunnel's client | `max_tunnel_packets_per_second`, 20000 by default |
+| Packets queued toward one client | 64 KiB, beyond what the tunnel's stream holds |
+
 ## An example
 
 `crates/webvpn-server/examples/embed.rs` runs a relay over the WebSocket carrier, on plain `ws://`. Its policy keeps the rules of `Basic`, requires one shared credential, and counts the bytes relayed each way. From a checkout of [the source](https://github.com/banou26/webvpn):
@@ -150,6 +180,7 @@ A carrier of your own implements `Transport` for each client's session, and call
 - `open_bi()` opens a stream for one TCP socket.
 - `open_uni()` opens a stream that carries a UDP socket's packets toward the client only.
 - `open_udp_bi()` opens a stream that carries a UDP socket's packets both ways.
+- `open_ip_bi()` opens a stream for one IP tunnel. By default it opens it as `open_bi()` does, which suits a carrier whose streams carry no type.
 - `send_datagram(data)` and `recv_datagram()` carry one UDP packet outside any stream.
 - `accept_uni()` returns the one stream a client opens, for a UDP socket whose own stream did not reach it. It never resolves on a carrier whose clients open no streams.
 
