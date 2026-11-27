@@ -258,7 +258,6 @@ mod tests {
     use std::future::Future;
     use std::net::{Ipv4Addr, SocketAddr};
 
-    use futures::FutureExt;
     use tokio::io::AsyncReadExt;
     use tokio::task::JoinHandle;
     use tokio::time::timeout;
@@ -422,7 +421,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_session_open_after_the_grace_says_bye_restarting_before_its_sockets_end_and_is_counted() {
+    async fn a_session_open_after_the_grace_says_bye_restarting_ends_its_sockets_and_is_counted() {
         let relay = relay();
         let mut open = open(&relay).await;
         open.bind().await;
@@ -433,10 +432,9 @@ mod tests {
         let start = Instant::now();
         let stopping = stop(&relay, GRACE);
         assert_eq!(open.control.next().await, Some(RelayPacket::Draining));
-        // Once the socket's stream ended, the `Bye` is already there to read.
         assert_eq!(within(socket.recv.read(&mut [0; 1])).await.unwrap(), 0);
         let bye = RelayPacket::Bye { code: close::RESTARTING, reason: STOPPING.into() };
-        assert_eq!(open.control.next().now_or_never(), Some(Some(bye)));
+        assert_eq!(open.control.next().await, Some(bye));
         assert_eq!(open.client.closed().await.0, close::RESTARTING);
         assert_eq!(relay.metrics().get(Counter::DrainCapCloses), 1);
 
@@ -449,15 +447,22 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_session_whose_client_reads_nothing_still_closes_once_its_bye_had_its_time() {
+    async fn a_session_whose_client_reads_nothing_still_closes_once_its_bye_had_its_time_and_then_ends_its_sockets() {
         let relay = relay();
         let mut open = open(&relay).await;
+        open.bind().await;
+        let mut socket = open.client.next_stream().await;
+        within(socket.recv.read_exact(&mut [0; 4])).await.unwrap();
         // Enough answers, never read, to fill the control stream and the reply queue, so the `Bye` finds no room.
         for id in 0..8000 {
             open.control.send(ClientPacket::AuthClear { id }).await;
         }
         let start = Instant::now();
-        within(relay.stop(GRACE)).await;
+        let stopping = stop(&relay, GRACE);
+        // The socket outlives the time the `Bye` is given, so a client that reads it learns why before its sockets end.
+        assert_eq!(within(socket.recv.read(&mut [0; 1])).await.unwrap(), 0);
+        assert_eq!(start.elapsed(), GRACE + BYE_WAIT);
+        within(stopping).await.unwrap();
         assert_eq!(open.client.closed().await.0, close::RESTARTING);
         within(open.serving).await.unwrap();
         assert_eq!(start.elapsed(), GRACE + BYE_WAIT);
