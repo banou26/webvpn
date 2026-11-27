@@ -4,8 +4,11 @@ The WebVPN relay as a program. It runs one relay on WebTransport and on WebSocke
 its settings from environment variables only.
 
 ```sh
-cargo run --release -p webvpnd
+cargo install webvpnd
+webvpnd
 ```
+
+[Running a relay](https://webvpn.dev/docs/running-a-relay/) is the guide.
 
 ## Settings
 

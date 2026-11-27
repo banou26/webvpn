@@ -1,0 +1,190 @@
+# Publishes the three crates and the three npm packages when their versions change.
+#
+# THE FILENAME IS PART OF THE TRUST RELATIONSHIP AND MUST NOT CHANGE. crates.io and npm each bind a package to this
+# repository plus this workflow's filename, so renaming the file, or the repository, stops every publish until each
+# trusted publisher is entered again by hand. The `name:` below is display text and is safe to edit.
+#
+# No token is stored anywhere: each job exchanges its OIDC identity for a short-lived credential. A trusted publisher
+# is bound by hand, on crates.io and on npmjs.com, and neither registry binds one for a name that does not exist. So
+# the first version of a new crate or package is published by hand, and this workflow takes over from the next one.
+# Until then the job that meets such a name publishes nothing and says so.
+#
+# A version is compared with the REGISTRY, not with the commit before, so a publish that failed halfway is retried
+# and a rerun of a finished one does nothing. Nothing here tests: `main` only takes what passed the full gate.
+name: Publish
+
+on:
+  push:
+    branches: [main]
+    # a publish is a version change, and these are the files a version lives in
+    paths:
+      - 'Cargo.toml'
+      - 'crates/*/Cargo.toml'
+      - 'packages/client/package.json'
+      - 'packages/net/package.json'
+      - 'packages/dgram/package.json'
+  # to run a publish again after it failed with the version already on main, which a push cannot repeat
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  crates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # the OIDC token crates.io exchanges for a short-lived publish token
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # In dependency order, which is also the order they publish in. The sparse index answers 404 for a crate
+      # that does not exist and 200 with one line per version for one that does; any other answer is no evidence.
+      - name: Decide which crates moved
+        id: decide
+        run: |
+          index_path() {
+            case ${#1} in
+              1) echo "1/$1" ;;
+              2) echo "2/$1" ;;
+              3) echo "3/${1:0:1}/$1" ;;
+              *) echo "${1:0:2}/${1:2:2}/$1" ;;
+            esac
+          }
+          moved=""
+          for crate in webvpn-proto webvpn-server webvpnd; do
+            local_version=$(cargo metadata --no-deps --format-version 1 | jq -r --arg name "$crate" '.packages[] | select(.name == $name) | .version')
+            code=$(curl -sS -o /tmp/index -w '%{http_code}' "https://index.crates.io/$(index_path "$crate")")
+            if [ "$code" = 404 ]; then
+              echo "::notice::$crate is not on crates.io. Its first version is published by hand; nothing is published in this run."
+              moved=""
+              break
+            elif [ "$code" != 200 ]; then
+              echo "::error::could not read $crate from the crates.io index (HTTP $code). Refusing to guess."
+              exit 1
+            elif jq -e --arg version "$local_version" 'select(.vers == $version)' /tmp/index > /dev/null; then
+              echo "::notice::$crate $local_version is already published."
+            else
+              echo "::notice::publishing $crate $local_version"
+              moved="$moved $crate"
+            fi
+          done
+          echo "crates=${moved# }" >> "$GITHUB_OUTPUT"
+
+      - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+        id: auth
+        if: steps.decide.outputs.crates != ''
+
+      # `cargo publish` builds each crate from its package before it uploads, and waits for the index to list it, so
+      # the next crate finds the one it depends on.
+      - name: Publish
+        if: steps.decide.outputs.crates != ''
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          CRATES: ${{ steps.decide.outputs.crates }}
+        run: |
+          for crate in $CRATES; do
+            cargo publish --locked -p "$crate"
+          done
+
+  npm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # the OIDC token npm exchanges for a short-lived publish credential
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No `registry-url`: that input writes an .npmrc that pins the auth token to an empty variable, which can turn
+      # trusted publishing into ENEEDAUTH. registry.npmjs.org is npm's default.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      # Trusted publishing needs npm 11.5.1 or newer. Exact, so a new npm only arrives by a change here.
+      - name: Use an npm that supports trusted publishing
+        run: |
+          npm install -g npm@12.2.2
+          echo "npm $(npm --version)"
+
+      # In dependency order: the other two depend on @webvpn/client at their own version.
+      - name: Decide which packages moved
+        id: decide
+        run: |
+          moved=""
+          for directory in client net dgram; do
+            name=$(node -p "require('./packages/$directory/package.json').name")
+            local_version=$(node -p "require('./packages/$directory/package.json').version")
+            set +e
+            published=$(cd "${RUNNER_TEMP:-/tmp}" && npm view "$name" version 2> /tmp/npm-view.err)
+            view_code=$?
+            set -e
+            if [ "$view_code" -eq 0 ] && [ -n "$published" ]; then
+              :
+            elif grep -q 'E404' /tmp/npm-view.err; then
+              echo "::notice::$name is not on npm. Its first version is published by hand; nothing is published in this run."
+              moved=""
+              break
+            else
+              echo "::error::could not read $name from the registry (exit $view_code). Refusing to guess."
+              cat /tmp/npm-view.err
+              exit 1
+            fi
+            if [ "$local_version" = "$published" ]; then
+              echo "::notice::$name $local_version is already published."
+            else
+              echo "::notice::publishing $name $published -> $local_version"
+              moved="$moved $name"
+            fi
+          done
+          echo "packages=${moved# }" >> "$GITHUB_OUTPUT"
+
+      - name: Install and build
+        if: steps.decide.outputs.packages != ''
+        run: |
+          npm ci
+          npm run build
+
+      # Read the artifact, never the source that is meant to produce it.
+      - name: Verify each package before it leaves the runner
+        if: steps.decide.outputs.packages != ''
+        env:
+          PACKAGES: ${{ steps.decide.outputs.packages }}
+        run: |
+          for name in $PACKAGES; do
+            npm pack --dry-run --json --workspace "$name" > /tmp/pack.json
+            jq -r '.[0] | "\(.name)@\(.version): \(.entryCount) files"' /tmp/pack.json
+            stray=$(jq -r '.[0].files[].path' /tmp/pack.json | grep -v -E '^(build/|LICENSE$|README\.md$|package\.json$)' || true)
+            if [ -n "$stray" ]; then
+              echo "::error::$name would publish files that are not its build: $stray"
+              exit 1
+            fi
+            if ! jq -e '.[0].files[] | select(.path == "build/index.js")' /tmp/pack.json > /dev/null; then
+              echo "::error::$name has no build/index.js: the build did not run"
+              exit 1
+            fi
+          done
+
+      # No credential is passed: npm exchanges the job's OIDC identity against the trusted publisher entered on
+      # npmjs.com for this repository and this file.
+      - name: Publish
+        if: steps.decide.outputs.packages != ''
+        env:
+          PACKAGES: ${{ steps.decide.outputs.packages }}
+        run: |
+          for name in $PACKAGES; do
+            npm publish --workspace "$name"
+          done
