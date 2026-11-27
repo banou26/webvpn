@@ -47,6 +47,8 @@ export const tcpSocket = (
   let ending: Promise<void> | undefined
   let downloadEnded!: (error?: unknown) => void
   const downloadEnd = new Promise<unknown>((resolve) => { downloadEnded = resolve })
+  // watched on the reader rather than in pull, so a write learns of the peer's reset on a socket nobody reads
+  reader.closed.then(() => downloadEnded(), downloadEnded)
   let controller!: ReadableStreamDefaultController<Uint8Array>
 
   // pulled only as the reader reads, so a slow reader holds back this socket's stream and nothing else
@@ -61,13 +63,9 @@ export const tcpSocket = (
       try {
         const { value, done } = await reader.read()
         if (stopped) return
-        if (done) {
-          downloadEnded()
-          return controller.close()
-        }
+        if (done) return controller.close()
         controller.enqueue(value)
       } catch (error) {
-        downloadEnded(error)
         if (stopped) return
         const code = streamErrorCode(error)
         if (code === ResetCode.PEER_RESET) return controller.error(peerReset())

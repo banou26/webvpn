@@ -410,6 +410,17 @@ describe('a TCP socket', () => {
     expect(await written).toMatchObject({ code: ErrorCode.CONNECTION_RESET })
   })
 
+  it('fails a write with CONNECTION_RESET at once when the peer reset a socket nobody reads', async () => {
+    const { relay, session } = await opened()
+    const { socket, stream } = await connected(relay, session)
+    stream.reset(ResetCode.PEER_RESET)
+    stream.breakWrites(new Error('error writing data'))
+    const started = Date.now()
+    const written = outcome(socket.writable.getWriter().write(Uint8Array.of(1)))
+    expect(await written).toMatchObject({ code: ErrorCode.CONNECTION_RESET })
+    expect(Date.now() - started).toBeLessThan(500)
+  })
+
   it('half closes when its writable closes, and keeps reading', async () => {
     const { relay, session } = await opened()
     const { socket, stream } = await connected(relay, session)
