@@ -97,6 +97,19 @@ describe('listen', () => {
     expect(error).toBe(relay.listenError)
   })
 
+  // Node 26.12.1 on Linux (measured 2026-11-28): with no host, a port in use on the IPv6 wildcard fails there, with
+  // no try on the IPv4 one; a refused port (EACCES) does go on to the IPv4 wildcard
+  it('fails a listen with no host on a port in use with the IPv6 wildcard\'s error, and takes no IPv4 one', async () => {
+    const { relay, net } = setup()
+    relay.listenError = (local) => local.ip.byteLength === 16 ? relayError(ErrorCode.ADDRESS_IN_USE) : undefined
+    const server = net.createServer()
+    const failed = new Promise<Error>((resolve) => server.once('error', resolve))
+    server.listen(6881)
+    const error = await Promise.race([failed, wait(100).then(() => undefined)])
+    expect(error).toMatchObject({ message: 'listen EADDRINUSE: address already in use :::6881', address: '::', port: 6881 })
+    expect(relay.calls.listens).toHaveLength(1)
+  })
+
   it('refuses an IPC path', () => {
     const { net } = setup()
     expect(() => net.createServer().listen('/tmp/socket')).toThrow('IPC paths are not supported')

@@ -405,8 +405,13 @@ class Server extends EventEmitter {
       const listen = (ip: Uint8Array) => ready.tcpListen({ ip, port }).catch((error: unknown) => {
         throw nodeError(error, 'listen', formatIp(ip), port)
       })
-      // as Node, a server with no host takes the IPv6 wildcard, and the IPv4 one where IPv6 is missing
-      return host ? listen(await resolve(ready, host)) : listen(IPV6_ANY).catch(() => listen(IPV4_ANY))
+      // as Node, a server with no host takes the IPv6 wildcard, and the IPv4 one where IPv6 is missing. A port in use
+      // is no reason to try IPv4: Linux reports it at listen, after the IPv6 bind Node falls back from succeeded
+      if (host) return listen(await resolve(ready, host))
+      return listen(IPV6_ANY).catch((error: { code?: unknown }) => {
+        if (error?.code === 'EADDRINUSE') throw error
+        return listen(IPV4_ANY)
+      })
     }).catch((error: unknown) => {
       // as Node, a server whose listen failed is not listening, and may listen again
       if (this._listening !== listening) return undefined
