@@ -224,7 +224,8 @@ the addresses the relay gives the client's end: an IPv4 address, an IPv6 address
 no address of is all zero bytes. `IpClose` ends the tunnel and is answered `Ok`, also for a tunnel that is already
 gone. A tunnel the relay has to end on its own is told with `Closed`.
 
-The relay opens one bidirectional stream for the tunnel, as for a TCP socket. After the id, each side repeats:
+The relay opens one bidirectional stream for the tunnel, as for a TCP socket: the relay's side starts with the id,
+the client's side does not. Then each side repeats:
 
 ```
 [u16 length][packet: length bytes]
@@ -239,8 +240,13 @@ between them: there is no gateway address to learn, and a client whose stack wan
   header, or whose destination the relay's rules refuse. A relay applies its egress rules to a packet's destination
   exactly as to a socket's, with one difference: a packet to one of the relay's own addresses is dropped, since a
   tunnel does not reach the sockets other sessions bound on the relay.
-- **Toward the client.** The relay sends the packets that arrive for the tunnel's addresses: the answers to what the
-  client sent, and the ICMP errors about it.
+- **Toward the client.** The relay sends only what answers the tunnel: a packet of a flow the client sent on before
+  (the same protocol, the same peer address and, where the protocol has them, the same ports or echo identifier),
+  and an ICMP error about a packet the tunnel sent. Whatever else arrives for the tunnel's addresses is dropped, so
+  nothing reaches a tunnel unasked, and nothing that answers an earlier holder of its address.
+- **Flows.** A relay bounds the flows one tunnel holds, and forgets a flow that stays silent: after no less than two
+  minutes, and for an open TCP connection after no less than two hours. A program that needs a quiet flow kept
+  sends on it more often than that.
 - **Loss.** A tunnel is a link that may drop. Each side holds a short queue for the stream and drops the newest
   packet once the queue is full, so neither side waits on the other and what flows through a tunnel paces itself, as
   on any link. Nothing is sent again and nothing is reordered.
