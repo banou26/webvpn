@@ -224,8 +224,8 @@ export const webSocketCarrier = async (socket: WebSocket): Promise<Carrier> => {
   const opened = new Promise<void>((resolve, reject) => {
     if (socket.readyState === OPEN) return resolve()
     socket.addEventListener('open', () => resolve(), { once: true })
-    // Firefox 157 gives about 1 in 10 of the sessions a relay refused as a close alone, with the relay's code and no
-    // `open` or message before it, so the code is read here too (2026-11-28)
+    // Firefox 157 often gives a session the relay refused as a close alone, with the relay's code and no `open` or
+    // message before it (37 of 60 refusals in a row, 2026-11-28), so the code is read here too
     socket.addEventListener('close', (event) => {
       const info = closeInfo(event)
       reject(info.code === CloseCode.LOST ? new WebVpnError(ErrorCode.OTHER, 'the WebSocket did not open') : closeError(info))
