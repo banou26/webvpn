@@ -70,6 +70,7 @@ class Socket extends EventEmitter {
   _local?: Endpoint
   _remote?: Endpoint
   _generation = 0
+  _connecting = false
   _closed = false
   // the last values asked for, so the getters answer them rather than 0; the relay's system may have changed them
   _recvBufferSize = 0
@@ -184,21 +185,25 @@ class Socket extends EventEmitter {
   connect(port: number, address?: string | ((error?: Error) => void), callback?: (error?: Error) => void): void {
     if (typeof address === 'function') [callback, address] = [address, undefined]
     if (this._closed) throw notRunning()
-    if (this._remote) throw coded('Already connected', 'ERR_SOCKET_DGRAM_IS_CONNECTED')
+    // as Node, a connect on its way counts as connected until it fails
+    if (this._remote || this._connecting) throw coded('Already connected', 'ERR_SOCKET_DGRAM_IS_CONNECTED')
     const bound = this._bound ?? this.bind()._bound!
     if (callback) this.once('connect', callback)
     const host = address ?? (this._type === 'udp6' ? '::1' : '127.0.0.1')
     const generation = ++this._generation
+    this._connecting = true
     bound.then(async (ready) => {
-      if (!ready || this._closed) return
+      if (!ready || this._closed) return void (this._connecting = false)
       const ip = await this._resolve(ready.provider, host)
       await ready.socket.connect({ ip, port }).catch((error: unknown) => {
         throw nodeError(error, 'connect', formatIp(ip), port)
       })
+      this._connecting = false
       if (this._closed || generation !== this._generation) return
       this._remote = endpoint({ ip, port })
       this.emit('connect')
     }).catch((error: unknown) => {
+      this._connecting = false
       if (this._closed) return
       if (!callback) return void this.emit('error', error)
       this.removeListener('connect', callback)

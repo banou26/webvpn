@@ -237,6 +237,26 @@ describe('connect', () => {
     expect(() => socket.connect(7001, '192.0.2.9')).toThrow(expect.objectContaining({ code: 'ERR_SOCKET_DGRAM_IS_CONNECTED', message: 'Already connected' }))
   })
 
+  // Node 26.12.1 on Linux (measured 2026-11-28): a second connect throws while the first is still on its way, and a
+  // connect that failed leaves the socket free to connect again
+  it('throws on a connect while one is on its way, and connects again after one failed', async () => {
+    const { socket, udp } = await bound()
+    socket.on('error', () => {})
+    socket.connect(7000, '192.0.2.9')
+    expect(() => socket.connect(7001, '192.0.2.9')).toThrow(expect.objectContaining({ code: 'ERR_SOCKET_DGRAM_IS_CONNECTED' }))
+    await Promise.race([new Promise((resolve) => socket.once('connect', resolve)), wait(100)])
+    expect(udp.calls).toEqual(['connect 192.0.2.9:7000'])
+    socket.disconnect()
+    await wait(0)
+
+    udp.failures.connect = relayError(ErrorCode.REFUSED)
+    await new Promise((resolve) => socket.connect(9, '255.255.255.255', resolve as () => void))
+    udp.failures.connect = undefined
+    socket.connect(7000, '192.0.2.9')
+    await Promise.race([new Promise((resolve) => socket.once('connect', resolve)), wait(100)])
+    expect(socket.remoteAddress()).toEqual({ address: '192.0.2.9', family: 'IPv4', port: 7000 })
+  })
+
   it('binds first when the socket is not bound, as Node does', async () => {
     const { relay, dgram } = setup()
     const socket = dgram.createSocket('udp4')
