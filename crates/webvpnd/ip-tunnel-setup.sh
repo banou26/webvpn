@@ -13,8 +13,6 @@
 #   WEBVPN_IP_USER     the user the relay runs as, a name or a number, which owns the device. Required for up: a
 #                      device with no owner is open to every local user.
 #   WEBVPN_IP_MTU      the device's MTU, at least 1280. Default: 1500
-#   WEBVPN_IP_OUT      the interface tunnels' packets leave by, translated to its address. Default: the interface of
-#                      the default IPv4 route.
 #
 # up loads one nftables table of its own, named after the device. It does not assume it is the only firewall on the
 # host: another table that drops forwarded packets still drops the tunnels' packets, and has to let them through.
@@ -38,8 +36,6 @@ up() {
 	pool=${WEBVPN_IP_POOL:?WEBVPN_IP_POOL is required, such as 198.18.0.0/16}
 	user=${WEBVPN_IP_USER:?WEBVPN_IP_USER is required: the user the relay runs as}
 	mtu=${WEBVPN_IP_MTU:-1500}
-	out=${WEBVPN_IP_OUT:-$(ip -4 route show default | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')}
-	[ -n "$out" ] || fail "no default IPv4 route: set WEBVPN_IP_OUT"
 	case $pool in
 	*.*.*.*/*) ;;
 	*) fail "WEBVPN_IP_POOL is not an IPv4 network written with its prefix length" ;;
@@ -93,7 +89,7 @@ table inet $table {
 
 	chain postrouting {
 		type nat hook postrouting priority srcnat; policy accept;
-		ip saddr $pool oifname "$out" masquerade
+		ip saddr $pool oifname != "$device" masquerade
 	}
 }
 EOF

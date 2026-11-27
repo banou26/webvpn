@@ -52,8 +52,9 @@ trap 'exit 1' INT TERM
 
 ip link set lo up
 
-# "The internet": a network namespace held open by a process, with the peer at 11.0.0.2. Its address is a public one
-# so that the setup's rules, which drop reserved destinations, let it through; nothing leaves the namespaces.
+# "The internet": a network namespace held open by a process, with the peer at 11.0.0.2 behind the default route and at
+# 12.0.0.2 behind a second interface. Its addresses are public ones so that the setup's rules, which drop reserved
+# destinations, let them through; nothing leaves the namespaces.
 unshare --net sleep 1000000 &
 peer=$!
 sleep 0.2
@@ -68,6 +69,12 @@ ip route add default via 11.0.0.2 dev out0
 on_peer ip link set lo up
 on_peer ip address add 11.0.0.2/24 dev peer0
 on_peer ip link set peer0 up
+ip link add out1 type veth peer name peer1
+ip link set peer1 netns "$peer"
+ip address add 12.0.0.1/24 dev out1
+ip link set out1 up
+on_peer ip address add 12.0.0.2/24 dev peer1
+on_peer ip link set peer1 up
 # so that the peer can send to a tunnel's address straight, which the setup's rules must drop
 on_peer ip route add 198.18.0.0/29 via 11.0.0.1
 

@@ -2,9 +2,9 @@
 //! network in namespaces of its own, starts the relay and runs this test there; a plain `cargo test` skips it.
 //!
 //! The network: the relay's host routes the pool 198.18.0.0/29 to its TUN device, under `ip-tunnel-setup.sh`, and
-//! reaches "the internet" at 11.0.0.0/24 by a veth pair. The peer at 11.0.0.2 answers ICMP echoes, answers a UDP
-//! datagram on port 7001 with the source address it saw, writes what reaches UDP port 7002 to a file, accepts TCP on
-//! port 7003, and has nothing on UDP port 7004.
+//! reaches "the internet" at 11.0.0.0/24 by a veth pair, its default route, and at 12.0.0.0/24 by a second one. The
+//! peer, at 11.0.0.2 and 12.0.0.2, answers ICMP echoes, answers a UDP datagram on port 7001 with the source address it
+//! saw, writes what reaches UDP port 7002 to a file, accepts TCP on port 7003, and has nothing on UDP port 7004.
 #![cfg(target_os = "linux")]
 
 use std::net::{IpAddr, Ipv4Addr};
@@ -32,6 +32,9 @@ const WEBTRANSPORT_PORT: u16 = 4433;
 const PEER: Ipv4Addr = Ipv4Addr::new(11, 0, 0, 2);
 /// The relay host's address as the peer sees it, which tunnels' packets are translated to.
 const OUTSIDE: Ipv4Addr = Ipv4Addr::new(11, 0, 0, 1);
+/// The peer and the relay's host on the second interface, which the default route does not take.
+const PEER_2: Ipv4Addr = Ipv4Addr::new(12, 0, 0, 2);
+const OUTSIDE_2: Ipv4Addr = Ipv4Addr::new(12, 0, 0, 1);
 /// The TUN device's own address, the pool's first host.
 const DEVICE: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 1);
 const POOL: [Ipv4Addr; 5] = [
@@ -357,7 +360,13 @@ async fn tunnels_reach_a_real_network_and_take_only_answers() {
     let answer = first.expect("UDP answer", |p| from_peer(p, UDP) && p.ports() == (UDP_WHO, 40002)).await;
     let seen = String::from_utf8_lossy(&answer.payload[8..]).trim().to_owned();
     assert_eq!(seen.parse::<IpAddr>().ok(), Some(OUTSIDE.into()), "the peer saw {seen:?}");
-    println!("ok 2: a UDP datagram gets its answer, from the translated address");
+    first.send(&udp_packet((me, 40012), (PEER_2, UDP_WHO), b"who")).await;
+    let answer = first
+        .expect("UDP answer on the second interface", |p| p.source == PEER_2 && p.ports() == (UDP_WHO, 40012))
+        .await;
+    let seen = String::from_utf8_lossy(&answer.payload[8..]).trim().to_owned();
+    assert_eq!(seen.parse::<IpAddr>().ok(), Some(OUTSIDE_2.into()), "the peer saw {seen:?} on the second interface");
+    println!("ok 2: a UDP datagram gets its answer, from the address translated on either interface");
 
     first.send(&whole(me, PEER, TCP, &tcp((me, 40003), (PEER, TCP_LISTENER), 1000, 0x02))).await;
     let syn_ack = first
