@@ -95,7 +95,7 @@ Any request may be answered by `Error` instead.
 | `0x02` | `Error` | `id u32`, `code u16`, `message`, the rest, UTF-8, for a person |
 | `0x03` | `Socket` | `id u32`, `socket u32`, `local Address`, `remote OptionalAddress` |
 | `0x04` | `DnsAnswer` | `id u32`, `answer`, the rest: the resolver's whole DNS message |
-| `0x05` | `IpTunnel` | `id u32`, `socket u32`, `mtu u16`, `ipv4`: 4 address bytes, `ipv6`: 16 address bytes |
+| `0x05` | `IpTunnel` | `id u32`, `socket u32`, `mtu u16`, `ipv4`: 4 address bytes, `ipv6`: 16 address bytes, `public ipv4`: 4 address bytes, `public ipv6`: 16 address bytes, `first port u16`, `ports u16` |
 | `0x10` | `Accepted` | `listener u32`, `socket u32`, `local Address`, `remote Address` |
 | `0x11` | `AcceptRefused` | `listener u32`, `code u16`, `remote Address` |
 | `0x12` | `Closed` | `socket u32`, `code u16` |
@@ -243,7 +243,14 @@ between them: there is no gateway address to learn, and a client whose stack wan
 - **Toward the client.** The relay sends only what answers the tunnel: a packet of a flow the client sent on before
   (the same protocol, the same peer address and, where the packet holds them, the same ports or echo identifier),
   and an ICMP error about a packet the tunnel sent. Whatever else arrives for the tunnel's addresses is dropped, so
-  nothing reaches a tunnel unasked, and nothing that answers an earlier holder of its address.
+  nothing reaches a tunnel unasked, and nothing that answers an earlier holder of its address. The one exception is
+  a packet to one of the tunnel's public ports.
+- **Public ports.** A relay may give a tunnel public ports, so that the client's own stack can listen. `IpTunnel`
+  then names the relay's public address, as others dial it (`public ipv4`, `public ipv6`, all zero bytes for a
+  family it has none of), and `ports` ports from `first port` on. A TCP or UDP packet that anyone sends to that
+  address on one of those ports reaches the tunnel's own address on the same port, and begins a flow as a packet
+  from the client does. The ports are the tunnel's for as long as it lives. A tunnel with `ports` 0 has none and
+  is reached only by answers.
 - **Flows.** A relay bounds the flows one tunnel holds, and forgets a flow that stays silent: after no less than two
   minutes, and for an open TCP connection after no less than two hours. A program that needs a quiet flow kept
   sends on it more often than that.
