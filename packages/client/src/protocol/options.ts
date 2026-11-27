@@ -1,5 +1,7 @@
 import type { Reader, Writer } from './wire'
 
+import { sized } from './wire'
+
 /**
  * A TCP socket option a client may set. `unknown` holds the tag of an option this package does not name, which a
  * relay answers with `UNSUPPORTED`.
@@ -27,11 +29,6 @@ export type UdpOption =
   | { type: 'sendBufferSize', value: number }
   | { type: 'recvBufferSize', value: number }
   | { type: 'unknown', tag: number }
-
-const sized = (bytes: Uint8Array, length: number) => {
-  if (bytes.byteLength !== length) throw new TypeError(`expected ${length} bytes, not ${bytes.byteLength}`)
-  return bytes
-}
 
 export const putTcpOption = (w: Writer, option: TcpOption) => {
   switch (option.type) {

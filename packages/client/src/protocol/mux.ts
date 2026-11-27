@@ -24,6 +24,8 @@ export const MuxStreamType = {
   TCP: 0,
   /** A UDP socket's datagrams toward the client. */
   UDP_DOWNLOAD: 1,
+  /** An IP tunnel's packets, both ways. */
+  IP: 2,
 } as const
 
 export const encodeMuxFrame = (kind: number, stream: number, payload: Uint8Array = EMPTY) => {

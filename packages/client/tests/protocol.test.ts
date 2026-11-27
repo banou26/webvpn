@@ -8,11 +8,13 @@ import {
   CloseCode,
   compatible,
   decodeClientPacket,
+  decodeIpFrame,
   decodeMuxFrame,
   decodeRelayPacket,
   decodeUdpPacket,
   encodeClientPacket,
   encodeFramedUdpPacket,
+  encodeIpFrame,
   encodeMuxFrame,
   encodeRelayPacket,
   encodeUdpPacket,
@@ -26,6 +28,7 @@ import {
   ProtocolError,
   VERSION,
 } from '../src'
+import { concat } from '../src/context'
 
 const hex = (bytes: Uint8Array) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
 
@@ -73,7 +76,12 @@ const clientPackets: Record<string, ClientPacket> = {
     option: { type: 'addMembershipV4', group: Uint8Array.of(239, 1, 2, 3), interface: new Uint8Array(4) },
   },
   'dns-query': { type: 'dnsQuery', id: 8, query: Uint8Array.of(1, 2, 3) },
+  'ip-open': { type: 'ipOpen', id: 10 },
+  'ip-close': { type: 'ipClose', id: 11, socket: 12 },
 }
+
+const TUNNEL_V4 = Uint8Array.of(198, 18, 0, 2)
+const TUNNEL_V6 = Uint8Array.of(0xfd, ...new Uint8Array(14), 2)
 
 const relayPackets: Record<string, RelayPacket> = {
   'hello': hello(Feature.LISTEN | Feature.DNS, 'webvpnd'),
@@ -82,6 +90,8 @@ const relayPackets: Record<string, RelayPacket> = {
   'socket-connected': { type: 'socket', id: 1, socket: 5, local: RELAY_PORT, remote: SITE },
   'socket-bound': { type: 'socket', id: 4, socket: 6, local: LISTENER, remote: undefined },
   'dns-answer': { type: 'dnsAnswer', id: 8, answer: Uint8Array.of(9, 8) },
+  'ip-tunnel': { type: 'ipTunnel', id: 10, socket: 12, mtu: 1500, ipv4: TUNNEL_V4, ipv6: TUNNEL_V6 },
+  'ip-tunnel-v4': { type: 'ipTunnel', id: 10, socket: 12, mtu: 1500, ipv4: TUNNEL_V4 },
   'accepted': { type: 'accepted', listener: 6, socket: 7, local: LISTENER, remote: RELAY_PORT },
   'accept-refused': { type: 'acceptRefused', listener: 6, code: ErrorCode.CAPACITY, remote: RELAY_PORT },
   'closed': { type: 'closed', socket: 9, code: ErrorCode.CAPACITY },
@@ -91,7 +101,7 @@ const relayPackets: Record<string, RelayPacket> = {
 
 it('client frames match the vectors both ways', () => {
   const group = vectors('client')
-  expect(group).toHaveLength(16)
+  expect(group).toHaveLength(18)
   for (const { name, bytes } of group) {
     const packet = clientPackets[name]
     expect(packet, name).toBeDefined()
@@ -102,7 +112,7 @@ it('client frames match the vectors both ways', () => {
 
 it('relay frames match the vectors both ways', () => {
   const group = vectors('relay')
-  expect(group).toHaveLength(11)
+  expect(group).toHaveLength(13)
   for (const { name, bytes } of group) {
     const packet = relayPackets[name]
     expect(packet, name).toBeDefined()
@@ -113,12 +123,21 @@ it('relay frames match the vectors both ways', () => {
 
 it('data packets match the vectors both ways', () => {
   const group = vectors('data')
-  expect(group).toHaveLength(3)
+  expect(group).toHaveLength(5)
+  const opens: Record<string, [number, number]> = { 'mux-open-tcp': [3, MuxStreamType.TCP], 'mux-open-ip': [5, MuxStreamType.IP] }
   for (const { name, bytes } of group) {
-    if (name === 'mux-open-tcp') {
-      const payload = Uint8Array.of(MuxStreamType.TCP)
-      expect(hex(encodeMuxFrame(MuxKind.OPEN, 3, payload))).toBe(hex(bytes))
-      expect(decodeMuxFrame(bytes)).toEqual({ kind: MuxKind.OPEN, stream: 3, payload })
+    const opened = opens[name]
+    if (opened) {
+      const [stream, type] = opened
+      const payload = Uint8Array.of(type)
+      expect(hex(encodeMuxFrame(MuxKind.OPEN, stream, payload)), name).toBe(hex(bytes))
+      expect(decodeMuxFrame(bytes), name).toEqual({ kind: MuxKind.OPEN, stream, payload })
+      continue
+    }
+    if (name === 'ip-frame') {
+      const packet = unhex('4500001400004000400100000a0000010a000002')
+      expect(hex(encodeIpFrame(packet))).toBe(hex(bytes))
+      expect(decodeIpFrame(bytes)).toEqual({ packet, taken: bytes.byteLength })
       continue
     }
     const remotes: Record<string, Address | undefined> = { 'udp-packet': RESOLVER, 'udp-packet-bare': undefined }
@@ -203,6 +222,18 @@ it('a hello suits only the same minor while the major is 0', () => {
 it('an agent is cut at 255 bytes on a character', () => {
   const decoded = decodeClientPacket(encodeClientPacket(hello(0, 'é'.repeat(200))))
   expect(decoded?.packet).toMatchObject({ agent: 'é'.repeat(127) })
+})
+
+it('a tunnel frame is read only once it is whole, and leaves the next one', () => {
+  const two = concat(encodeIpFrame(Uint8Array.of(1, 2, 3, 4, 5)), encodeIpFrame(new Uint8Array(0)))
+  for (let cut = 0; cut < 7; cut++) expect(decodeIpFrame(two.subarray(0, cut)), `cut at ${cut}`).toBeUndefined()
+  expect(decodeIpFrame(two)).toEqual({ packet: Uint8Array.of(1, 2, 3, 4, 5), taken: 7 })
+  expect(decodeIpFrame(two.subarray(7))).toEqual({ packet: new Uint8Array(0), taken: 2 })
+})
+
+it('a tunnel\'s address is checked for its length when it is written', () => {
+  const packet: RelayPacket = { type: 'ipTunnel', id: 1, socket: 2, mtu: 1500, ipv6: TUNNEL_V4 }
+  expect(() => encodeRelayPacket(packet)).toThrow(TypeError)
 })
 
 it('a udp payload over the limit is refused from its length', () => {

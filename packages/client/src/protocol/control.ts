@@ -2,7 +2,7 @@ import type { TcpOption, UdpOption } from './options'
 import type { Address, Reader, Writer } from './wire'
 
 import { putTcpOption, putUdpOption, readTcpOption, readUdpOption } from './options'
-import { ProtocolError, reader, writer } from './wire'
+import { ProtocolError, reader, sized, writer } from './wire'
 
 /** The version this package speaks. While the major is 0, peers need the same minor. */
 export const VERSION = { major: 0, minor: 1 } as const
@@ -63,6 +63,10 @@ export type ClientPacket =
   | { type: 'udpSetOption', id: number, socket: number, option: UdpOption }
   /** `query` is a whole DNS message. Answered `dnsAnswer`. */
   | { type: 'dnsQuery', id: number, query: Uint8Array }
+  /** Answered `ipTunnel`. */
+  | { type: 'ipOpen', id: number }
+  /** Ends the tunnel. Answered `ok`, also for a tunnel that is gone. */
+  | { type: 'ipClose', id: number, socket: number }
   /** A type this package does not name. A relay answers `id`, when the body held one, with `UNSUPPORTED`. */
   | { type: 'unknown', kind: number, id?: number }
 
@@ -77,11 +81,16 @@ export type RelayPacket =
   | { type: 'socket', id: number, socket: number, local: Address, remote?: Address }
   /** The resolver's whole DNS message. */
   | { type: 'dnsAnswer', id: number, answer: Uint8Array }
+  /**
+   * The tunnel an `ipOpen` opened: the largest packet it carries, and the addresses the relay gave the client's end,
+   * 4 and 16 bytes, at least one of them. A family with no address is absent here and all zero bytes on the wire.
+   */
+  | { type: 'ipTunnel', id: number, socket: number, mtu: number, ipv4?: Uint8Array, ipv6?: Uint8Array }
   /** A listener accepted a connection, which is socket `socket` from now on. */
   | { type: 'accepted', listener: number, socket: number, local: Address, remote: Address }
   /** A listener had a connection the relay turned away. */
   | { type: 'acceptRefused', listener: number, code: number, remote: Address }
-  /** The relay ended a listener or a UDP socket on its own, and `code` says why. The socket is gone. */
+  /** The relay ended a listener, a UDP socket or an IP tunnel on its own, and `code` says why. The socket is gone. */
   | { type: 'closed', socket: number, code: number }
   /** The relay is about to stop: this session keeps its sockets, and new ones belong on a new session. */
   | { type: 'draining' }
@@ -111,6 +120,8 @@ const CLIENT = {
   udpDisconnect: 0x33,
   udpSetOption: 0x34,
   dnsQuery: 0x40,
+  ipOpen: 0x50,
+  ipClose: 0x51,
 } as const
 
 const RELAY = {
@@ -119,6 +130,7 @@ const RELAY = {
   error: 0x02,
   socket: 0x03,
   dnsAnswer: 0x04,
+  ipTunnel: 0x05,
   accepted: 0x10,
   acceptRefused: 0x11,
   closed: 0x12,
@@ -148,6 +160,11 @@ const readHello = (r: Reader): Hello => {
   }
 }
 
+const NO_IPV4 = new Uint8Array(4)
+const NO_IPV6 = new Uint8Array(16)
+
+const given = (ip: Uint8Array) => ip.some((byte) => byte !== 0) ? ip.slice() : undefined
+
 const open = (kind: number) => writer().u8(kind).u32(0)
 
 const seal = (w: Writer) => w.setU32(1, w.length() - HEADER_BYTES).done()
@@ -172,6 +189,7 @@ export const encodeClientPacket = (packet: ClientPacket) => {
       w.u32(packet.id).put(packet.credential)
       break
     case 'authClear':
+    case 'ipOpen':
       w.u32(packet.id)
       break
     case 'tcpConnect':
@@ -185,6 +203,7 @@ export const encodeClientPacket = (packet: ClientPacket) => {
     case 'tcpUnlisten':
     case 'udpClose':
     case 'udpDisconnect':
+    case 'ipClose':
       w.u32(packet.id).u32(packet.socket)
       break
     case 'tcpSetOption':
@@ -232,6 +251,8 @@ const readClientPacket = (kind: number, r: Reader): ClientPacket => {
     case CLIENT.udpSetOption:
       return { type: 'udpSetOption', id: r.u32(), socket: r.u32(), option: readUdpOption(r) }
     case CLIENT.dnsQuery: return { type: 'dnsQuery', id: r.u32(), query: r.rest().slice() }
+    case CLIENT.ipOpen: return { type: 'ipOpen', id: r.u32() }
+    case CLIENT.ipClose: return { type: 'ipClose', id: r.u32(), socket: r.u32() }
     default: return { type: 'unknown', kind, id: r.left() >= 4 ? r.u32() : undefined }
   }
 }
@@ -264,6 +285,11 @@ export const encodeRelayPacket = (packet: RelayPacket) => {
     case 'dnsAnswer':
       w.u32(packet.id).put(packet.answer)
       break
+    case 'ipTunnel':
+      w.u32(packet.id).u32(packet.socket).u16(packet.mtu)
+        .put(sized(packet.ipv4 ?? NO_IPV4, 4))
+        .put(sized(packet.ipv6 ?? NO_IPV6, 16))
+      break
     case 'accepted':
       w.u32(packet.listener).u32(packet.socket).address(packet.local).address(packet.remote)
       break
@@ -288,6 +314,8 @@ const readRelayPacket = (kind: number, r: Reader): RelayPacket => {
     case RELAY.socket:
       return { type: 'socket', id: r.u32(), socket: r.u32(), local: r.address(), remote: r.optionalAddress() }
     case RELAY.dnsAnswer: return { type: 'dnsAnswer', id: r.u32(), answer: r.rest().slice() }
+    case RELAY.ipTunnel:
+      return { type: 'ipTunnel', id: r.u32(), socket: r.u32(), mtu: r.u16(), ipv4: given(r.take(4)), ipv6: given(r.take(16)) }
     case RELAY.accepted:
       return { type: 'accepted', listener: r.u32(), socket: r.u32(), local: r.address(), remote: r.address() }
     case RELAY.acceptRefused:

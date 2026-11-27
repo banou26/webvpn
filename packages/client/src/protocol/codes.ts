@@ -8,6 +8,8 @@ export const Feature = {
   AUTH: 1 << 2,
   /** Socket requests are answered `AUTH_REQUIRED` until an `auth` succeeded. */
   AUTH_REQUIRED: 1 << 3,
+  /** `ipOpen` and `ipClose`. */
+  IP: 1 << 4,
 } as const
 
 /** Why a request failed, as an `error` reply carries it. A code not named here is treated as `OTHER`. */

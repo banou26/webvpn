@@ -15,6 +15,11 @@ export const addressFamily = (ip: Uint8Array) => {
   throw new TypeError(`an address holds 4 or 16 bytes, not ${ip.byteLength}`)
 }
 
+export const sized = (bytes: Uint8Array, length: number) => {
+  if (bytes.byteLength !== length) throw new TypeError(`expected ${length} bytes, not ${bytes.byteLength}`)
+  return bytes
+}
+
 /** Reads fields off `bytes` in order. `take` and `rest` return views into `bytes`, not copies. */
 export const reader = (bytes: Uint8Array) => {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
