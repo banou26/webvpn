@@ -148,7 +148,7 @@ export const webSocketCarrier = async (socket: WebSocket): Promise<Carrier> => {
     const { kind, stream: id, payload } = frame
     if (kind === MuxKind.OPEN) {
       if (id === CONTROL_STREAM || streams.has(id)) return
-      if (payload[0] === MuxStreamType.TCP) open(id, true)
+      if (payload[0] === MuxStreamType.TCP || payload[0] === MuxStreamType.IP) open(id, true)
       else if (payload[0] === MuxStreamType.UDP_DOWNLOAD) open(id, false)
       return
     }

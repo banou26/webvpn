@@ -50,8 +50,8 @@ const mux = async () => {
   const carrier = await webSocketCarrier(socket as unknown as WebSocket)
   const incoming = carrier.incoming.getReader()
   const control = (await incoming.read()).value!
-  const open = async (stream: number) => {
-    socket.receive(MuxKind.OPEN, stream, Uint8Array.of(MuxStreamType.TCP))
+  const open = async (stream: number, type: number = MuxStreamType.TCP) => {
+    socket.receive(MuxKind.OPEN, stream, Uint8Array.of(type))
     return (await incoming.read()).value as Duplex
   }
   return { socket, carrier, control, open }
@@ -164,6 +164,16 @@ describe('the WebSocket mux', () => {
     socket.bufferedAmount = 3 * 1024 * 1024
     carrier.sendDatagram(Uint8Array.of(6))
     expect(socket.frames(MuxKind.DATAGRAM).map(({ payload }) => payload)).toEqual([Uint8Array.of(5)])
+  })
+
+  it('carries an IP tunnel\'s stream both ways, as a TCP socket\'s', async () => {
+    const { socket, open } = await mux()
+    const { readable, writable } = await open(11, MuxStreamType.IP)
+    socket.receive(MuxKind.DATA, 11, Uint8Array.of(0, 1, 7))
+    expect((await readable.getReader().read()).value).toEqual(Uint8Array.of(0, 1, 7))
+    expect(credits(socket, 11)).toEqual([3])
+    await writable.getWriter().write(Uint8Array.of(0, 1, 8))
+    expect(socket.frames(MuxKind.DATA, 11).map(({ payload }) => payload)).toEqual([Uint8Array.of(0, 1, 8)])
   })
 
   it('reads the session close code from the WebSocket close code, and LOST from any other', async () => {
