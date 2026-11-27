@@ -20,6 +20,10 @@
     ".": {
       "types": "./build/index.d.ts",
       "import": "./build/index.js"
+    },
+    "./stack": {
+      "types": "./build/stack/index.d.ts",
+      "import": "./build/stack.js"
     }
   },
   "files": [
@@ -27,7 +31,7 @@
   ],
   "sideEffects": false,
   "scripts": {
-    "build": "vp build && tsc -p tsconfig.build.json",
+    "build": "node scripts/wasm.ts && vp build && tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vp test run",
     "test:unit": "vp test run --project unit",

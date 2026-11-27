@@ -25,21 +25,26 @@ export default defineConfig({
     target: 'esnext',
     emptyOutDir: true,
     minify: false,
-    lib: { entry: { index: 'src/index.ts' }, formats: ['es'] },
+    lib: { entry: { index: 'src/index.ts', stack: 'src/stack/index.ts' }, formats: ['es'] },
     rollupOptions: { external: [/^@banou\/ponyfill/] },
   },
   test: {
     projects: [
       {
         extends: true,
-        test: { name: 'unit', include: ['tests/**/*.test.ts'], exclude: ['tests/**/*.browser.test.ts'] },
+        test: {
+          name: 'unit',
+          include: ['tests/**/*.test.ts'],
+          exclude: ['tests/**/*.browser.test.ts'],
+          globalSetup: ['tests/stack/wasm.ts'],
+        },
       },
       {
         extends: true,
         test: {
           name: 'browser',
           include: ['tests/**/*.browser.test.ts'],
-          globalSetup: ['tests/browser/rig.ts'],
+          globalSetup: ['tests/stack/wasm.ts', 'tests/browser/rig.ts'],
           testTimeout: 30_000,
           browser: {
             enabled: true,
