@@ -507,3 +507,24 @@ async fn the_program_answers_health_and_exits_0_on_sigterm() {
     assert!(within(Command::new("kill").args(["-TERM", &pid]).status()).await.unwrap().success());
     assert_eq!(within(program.wait()).await.unwrap().code(), Some(0));
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn the_program_stops_at_start_on_a_tun_device_it_cannot_open() {
+    let program = Command::new(env!("CARGO_BIN_EXE_webvpnd"))
+        .env_clear()
+        .envs([
+            ("WEBVPN_ADDRESS", "127.0.0.1"),
+            ("WEBVPN_WEBTRANSPORT_PORT", "0"),
+            ("WEBVPN_WEBSOCKET_PORT", "0"),
+            ("WEBVPN_HTTP_PORT", "0"),
+            ("WEBVPN_IP_DEVICE", "webvpn-none0"),
+            ("WEBVPN_IP_POOL", "198.18.0.0/16"),
+        ])
+        .output();
+    let output = within(program).await.unwrap();
+    assert!(!output.status.success());
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("the TUN device webvpn-none0 does not exist"), "{said}");
+    assert!(!said.contains("198.18"), "{said}");
+}

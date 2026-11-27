@@ -111,10 +111,17 @@ mod tests {
         let policy = Credentials::new(basic, ["credential".to_owned()]);
         let session = policy.admit(CLIENT).unwrap();
         assert_eq!(policy.admit(CLIENT).err().unwrap().code, ErrorCode::CAPACITY);
+        let tunnel = session.open_socket(SocketKind::IpTunnel).unwrap();
+        assert_eq!(session.open_socket(SocketKind::Udp).err().unwrap().code, ErrorCode::CAPACITY, "a tunnel is a socket");
+        drop(tunnel);
         let _socket = session.open_socket(SocketKind::Tcp).unwrap();
         assert_eq!(session.open_socket(SocketKind::Udp).err().unwrap().code, ErrorCode::CAPACITY);
         let private = "10.0.0.1:443".parse().unwrap();
         assert_eq!(session.check_egress(Proto::Tcp, private).unwrap_err().code, ErrorCode::REFUSED);
+        // a tunnel's packet of another protocol is decided by its address alone
+        let (private, public) = ("10.0.0.1:0".parse().unwrap(), "93.184.215.14:0".parse().unwrap());
+        assert_eq!(session.check_egress(Proto::Other(1), private).unwrap_err().code, ErrorCode::REFUSED);
+        assert_eq!(session.check_egress(Proto::Other(1), public), Ok(()));
         assert_eq!(session.check_bind(Proto::Udp, "0.0.0.0:80".parse().unwrap()).unwrap_err().code, ErrorCode::REFUSED);
     }
 }

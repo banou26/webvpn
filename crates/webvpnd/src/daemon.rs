@@ -11,12 +11,14 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
+#[cfg(target_os = "linux")]
+use webvpn_server::tun::TunForwarder;
 use webvpn_server::websocket::rustls;
 use webvpn_server::websocket::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use webvpn_server::webtransport::wtransport::endpoint::endpoint_side::Server;
 use webvpn_server::webtransport::wtransport::tls::Sha256DigestFmt;
 use webvpn_server::webtransport::wtransport::{Endpoint, Identity, ServerConfig};
-use webvpn_server::{websocket, webtransport, Counter, Relay};
+use webvpn_server::{websocket, webtransport, Counter, Forwarder, Relay};
 
 use crate::policy::Credentials;
 use crate::settings::{CertificateFiles, Settings};
@@ -52,9 +54,10 @@ pub struct Daemon {
 impl Daemon {
     /// Loads the certificate or makes a self-signed one, takes the ports and serves.
     ///
-    /// An error is a certificate that cannot be read, a WebTransport or HTTP port that cannot be taken, or the
-    /// system's IPv6 addresses that cannot be read when they are watched. A WebSocket port that cannot be taken is
-    /// logged and leaves WebTransport serving alone. Logs name the ports the daemon holds and never an address.
+    /// An error is a certificate that cannot be read, a WebTransport or HTTP port that cannot be taken, the system's
+    /// IPv6 addresses that cannot be read when they are watched, or a TUN device that cannot be opened. A WebSocket
+    /// port that cannot be taken is logged and leaves WebTransport serving alone. Logs name the ports the daemon holds
+    /// and never an address.
     pub async fn start(settings: Settings) -> Result<Self> {
         let Certificate { identity, tls, hash } = match &settings.certificate {
             Some(files) => Certificate::read(files).await?,
@@ -73,7 +76,12 @@ impl Daemon {
         if !settings.credentials.is_empty() {
             info!("a client presents a credential before it opens a socket");
         }
-        let relay = Relay::new(Credentials::new(settings.policy, settings.credentials), settings.config);
+        let forwarder = forwarder(&settings)?;
+        let mut config = settings.config;
+        if forwarder.is_some() {
+            config.forwarder = forwarder;
+        }
+        let relay = Relay::new(Credentials::new(settings.policy, settings.credentials), config);
         if settings.watch_own_ipv6 {
             relay.watch_own_ipv6().context("the system's IPv6 addresses could not be read")?;
         }
@@ -134,6 +142,20 @@ impl Daemon {
         info!("stopped, {closed} sessions closed when the grace ran out");
         self.background.shutdown().await;
     }
+}
+
+/// The forwarder over the TUN device the settings name, if they name one.
+#[cfg(target_os = "linux")]
+fn forwarder(settings: &Settings) -> Result<Option<Arc<dyn Forwarder>>> {
+    let Some(tunnel) = &settings.ip_tunnel else { return Ok(None) };
+    let forwarder = TunForwarder::open(&tunnel.device, tunnel.pool).context("IP tunnels could not start")?;
+    info!("IP tunnels go through the TUN device {}", tunnel.device);
+    Ok(Some(Arc::new(forwarder)))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn forwarder(_: &Settings) -> Result<Option<Arc<dyn Forwarder>>> {
+    Ok(None)
 }
 
 /// The relay's certificate, in the forms the two carriers and `/cert-hash` take it.

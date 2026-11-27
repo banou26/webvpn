@@ -8,4 +8,6 @@ mod settings;
 
 pub use daemon::{Daemon, Ports};
 pub use policy::{CredentialSession, Credentials};
+#[cfg(target_os = "linux")]
+pub use settings::IpTunnel;
 pub use settings::{CertificateFiles, Settings};
