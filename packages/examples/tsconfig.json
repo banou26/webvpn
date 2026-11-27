@@ -10,6 +10,7 @@
     "noEmit": true,
     "paths": {
       "@webvpn/client": ["../client/src/index.ts"],
+      "@webvpn/client/stack": ["../client/src/stack/index.ts"],
       "@webvpn/dgram": ["../dgram/src/index.ts"],
       "@webvpn/net": ["../net/src/index.ts"]
     }
