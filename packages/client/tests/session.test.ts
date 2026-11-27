@@ -693,16 +693,17 @@ describe('an IP tunnel', () => {
   const MTU = 1500
   const TUNNEL_V4 = Uint8Array.of(198, 18, 0, 2)
   const TUNNEL_V6 = Uint8Array.of(0xfd, ...new Uint8Array(14), 2)
-  const BOTH = { ipv4: TUNNEL_V4, ipv6: TUNNEL_V6 }
+  const BOTH = { ipv4: TUNNEL_V4, ipv6: TUNNEL_V6, firstPort: 0, ports: 0 }
 
   const packet = (length: number, fill = length & 0xff) => new Uint8Array(length).fill(fill)
 
   const framed = (packets: Uint8Array[]) => packets.map(encodeIpFrame).reduce<Uint8Array>(concat, new Uint8Array(0))
 
   // the reply first, then the stream
-  const tunnelled = async (relay: FakeRelay, session: Session, addresses: { ipv4?: Uint8Array, ipv6?: Uint8Array } = BOTH) => {
+  type Given = { ipv4?: Uint8Array, ipv6?: Uint8Array, publicIpv4?: Uint8Array, firstPort?: number, ports?: number }
+  const tunnelled = async (relay: FakeRelay, session: Session, given: Given = BOTH) => {
     const opening = session.ipOpen()
-    const request = await answer(relay, (id) => ({ type: 'ipTunnel', id, socket: 12, mtu: MTU, ...addresses }))
+    const request = await answer(relay, (id) => ({ type: 'ipTunnel', id, socket: 12, mtu: MTU, firstPort: 0, ports: 0, ...given }))
     await settle()
     const stream = relay.open(12)
     return { tunnel: await opening, stream, request }
@@ -727,7 +728,17 @@ describe('an IP tunnel', () => {
     const { relay, session } = await opened(Feature.IP)
     const { tunnel, request } = await tunnelled(relay, session)
     expect(request).toEqual({ type: 'ipOpen', id: idOf(request) })
-    expect(tunnel).toMatchObject({ id: 12, ipv4: '198.18.0.2', ipv6: 'fd00::2', mtu: MTU })
+    expect(tunnel).toMatchObject({ id: 12, ipv4: '198.18.0.2', ipv6: 'fd00::2', mtu: MTU, ports: 0 })
+    expect(tunnel.publicIpv4).toBeUndefined()
+    expect(tunnel.publicIpv6).toBeUndefined()
+  })
+
+  it('gives the public address and ports the relay gave', async () => {
+    const { relay, session } = await opened(Feature.IP)
+    const publicIpv4 = Uint8Array.of(203, 0, 113, 9)
+    const { tunnel } = await tunnelled(relay, session, { ...BOTH, publicIpv4, firstPort: 40000, ports: 8 })
+    expect(tunnel).toMatchObject({ publicIpv4: '203.0.113.9', firstPort: 40000, ports: 8 })
+    expect(tunnel.publicIpv6).toBeUndefined()
   })
 
   it('gives no IPv6 address when the relay gave only an IPv4 one', async () => {

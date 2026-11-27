@@ -82,6 +82,8 @@ const clientPackets: Record<string, ClientPacket> = {
 
 const TUNNEL_V4 = Uint8Array.of(198, 18, 0, 2)
 const TUNNEL_V6 = Uint8Array.of(0xfd, ...new Uint8Array(14), 2)
+const PUBLIC_V4 = Uint8Array.of(203, 0, 113, 9)
+const PUBLIC_V6 = Uint8Array.of(0x20, 0x01, 0x0d, 0xb8, ...new Uint8Array(11), 9)
 
 const relayPackets: Record<string, RelayPacket> = {
   'hello': hello(Feature.LISTEN | Feature.DNS, 'webvpnd'),
@@ -90,8 +92,19 @@ const relayPackets: Record<string, RelayPacket> = {
   'socket-connected': { type: 'socket', id: 1, socket: 5, local: RELAY_PORT, remote: SITE },
   'socket-bound': { type: 'socket', id: 4, socket: 6, local: LISTENER, remote: undefined },
   'dns-answer': { type: 'dnsAnswer', id: 8, answer: Uint8Array.of(9, 8) },
-  'ip-tunnel': { type: 'ipTunnel', id: 10, socket: 12, mtu: 1500, ipv4: TUNNEL_V4, ipv6: TUNNEL_V6 },
-  'ip-tunnel-v4': { type: 'ipTunnel', id: 10, socket: 12, mtu: 1500, ipv4: TUNNEL_V4 },
+  'ip-tunnel': {
+    type: 'ipTunnel',
+    id: 10,
+    socket: 12,
+    mtu: 1500,
+    ipv4: TUNNEL_V4,
+    ipv6: TUNNEL_V6,
+    publicIpv4: PUBLIC_V4,
+    publicIpv6: PUBLIC_V6,
+    firstPort: 40000,
+    ports: 8,
+  },
+  'ip-tunnel-v4': { type: 'ipTunnel', id: 10, socket: 12, mtu: 1500, ipv4: TUNNEL_V4, firstPort: 0, ports: 0 },
   'accepted': { type: 'accepted', listener: 6, socket: 7, local: LISTENER, remote: RELAY_PORT },
   'accept-refused': { type: 'acceptRefused', listener: 6, code: ErrorCode.CAPACITY, remote: RELAY_PORT },
   'closed': { type: 'closed', socket: 9, code: ErrorCode.CAPACITY },
@@ -232,7 +245,7 @@ it('a tunnel frame is read only once it is whole, and leaves the next one', () =
 })
 
 it('a tunnel\'s address is checked for its length when it is written', () => {
-  const packet: RelayPacket = { type: 'ipTunnel', id: 1, socket: 2, mtu: 1500, ipv6: TUNNEL_V4 }
+  const packet: RelayPacket = { type: 'ipTunnel', id: 1, socket: 2, mtu: 1500, ipv6: TUNNEL_V4, firstPort: 0, ports: 0 }
   expect(() => encodeRelayPacket(packet)).toThrow(TypeError)
 })
 

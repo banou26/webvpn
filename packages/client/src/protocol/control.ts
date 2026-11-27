@@ -83,9 +83,22 @@ export type RelayPacket =
   | { type: 'dnsAnswer', id: number, answer: Uint8Array }
   /**
    * The tunnel an `ipOpen` opened: the largest packet it carries, and the addresses the relay gave the client's end,
-   * 4 and 16 bytes, at least one of them. A family with no address is absent here and all zero bytes on the wire.
+   * 4 and 16 bytes, at least one of them. Then its public ports, if any: the relay's public address as others dial
+   * it, and `ports` ports from `firstPort` on, each reaching the client's address on the same port; `ports` 0 is
+   * none. A family with no address, private or public, is absent here and all zero bytes on the wire.
    */
-  | { type: 'ipTunnel', id: number, socket: number, mtu: number, ipv4?: Uint8Array, ipv6?: Uint8Array }
+  | {
+    type: 'ipTunnel',
+    id: number,
+    socket: number,
+    mtu: number,
+    ipv4?: Uint8Array,
+    ipv6?: Uint8Array,
+    publicIpv4?: Uint8Array,
+    publicIpv6?: Uint8Array,
+    firstPort: number,
+    ports: number,
+  }
   /** A listener accepted a connection, which is socket `socket` from now on. */
   | { type: 'accepted', listener: number, socket: number, local: Address, remote: Address }
   /** A listener had a connection the relay turned away. */
@@ -289,6 +302,10 @@ export const encodeRelayPacket = (packet: RelayPacket) => {
       w.u32(packet.id).u32(packet.socket).u16(packet.mtu)
         .put(sized(packet.ipv4 ?? NO_IPV4, 4))
         .put(sized(packet.ipv6 ?? NO_IPV6, 16))
+        .put(sized(packet.publicIpv4 ?? NO_IPV4, 4))
+        .put(sized(packet.publicIpv6 ?? NO_IPV6, 16))
+        .u16(packet.firstPort)
+        .u16(packet.ports)
       break
     case 'accepted':
       w.u32(packet.listener).u32(packet.socket).address(packet.local).address(packet.remote)
@@ -315,7 +332,18 @@ const readRelayPacket = (kind: number, r: Reader): RelayPacket => {
       return { type: 'socket', id: r.u32(), socket: r.u32(), local: r.address(), remote: r.optionalAddress() }
     case RELAY.dnsAnswer: return { type: 'dnsAnswer', id: r.u32(), answer: r.rest().slice() }
     case RELAY.ipTunnel:
-      return { type: 'ipTunnel', id: r.u32(), socket: r.u32(), mtu: r.u16(), ipv4: given(r.take(4)), ipv6: given(r.take(16)) }
+      return {
+        type: 'ipTunnel',
+        id: r.u32(),
+        socket: r.u32(),
+        mtu: r.u16(),
+        ipv4: given(r.take(4)),
+        ipv6: given(r.take(16)),
+        publicIpv4: given(r.take(4)),
+        publicIpv6: given(r.take(16)),
+        firstPort: r.u16(),
+        ports: r.u16(),
+      }
     case RELAY.accepted:
       return { type: 'accepted', listener: r.u32(), socket: r.u32(), local: r.address(), remote: r.address() }
     case RELAY.acceptRefused:

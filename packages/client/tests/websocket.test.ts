@@ -248,7 +248,7 @@ describe('an IP tunnel over the WebSocket mux', () => {
     socket.receive(MuxKind.DATA, 5, concat(u32(5), encodeIpFrame(Uint8Array.of(0x45, 1, 2))))
     const id = (request as { id: number }).id
     const ipv4 = Uint8Array.of(198, 18, 0, 2)
-    socket.receive(MuxKind.DATA, CONTROL_STREAM, encodeRelayPacket({ type: 'ipTunnel', id, socket: 5, mtu: 1500, ipv4 }))
+    socket.receive(MuxKind.DATA, CONTROL_STREAM, encodeRelayPacket({ type: 'ipTunnel', id, socket: 5, mtu: 1500, ipv4, firstPort: 0, ports: 0 }))
     const tunnel = await tunnelling
 
     expect((await tunnel.readable.getReader().read()).value).toEqual(Uint8Array.of(0x45, 1, 2))

@@ -277,8 +277,20 @@ pub enum RelayPacket {
     /// The resolver's whole DNS message.
     DnsAnswer { id: u32, answer: Vec<u8> },
     /// The tunnel an `IpOpen` opened: the largest packet it carries, and the addresses the relay gave the client's
-    /// end, at least one of them. A family with no address is all zero bytes on the wire.
-    IpTunnel { id: u32, socket: u32, mtu: u16, ipv4: Option<Ipv4Addr>, ipv6: Option<Ipv6Addr> },
+    /// end, at least one of them. Then its public ports, if any: the relay's public address as others dial it, and
+    /// `ports` ports from `first_port` on, each reaching the client's address on the same port; `ports` 0 is none.
+    /// A family with no address, private or public, is all zero bytes on the wire.
+    IpTunnel {
+        id: u32,
+        socket: u32,
+        mtu: u16,
+        ipv4: Option<Ipv4Addr>,
+        ipv6: Option<Ipv6Addr>,
+        public_ipv4: Option<Ipv4Addr>,
+        public_ipv6: Option<Ipv6Addr>,
+        first_port: u16,
+        ports: u16,
+    },
     /// A listener accepted a connection, which is socket `socket` from now on.
     Accepted { listener: u32, socket: u32, local: SocketAddr, remote: SocketAddr },
     /// A listener had a connection the relay turned away.
@@ -326,11 +338,15 @@ impl RelayPacket {
                 out.extend_from_slice(answer);
                 relay::DNS_ANSWER
             }
-            Self::IpTunnel { id, socket, mtu, ipv4, ipv6 } => {
+            Self::IpTunnel { id, socket, mtu, ipv4, ipv6, public_ipv4, public_ipv6, first_port, ports } => {
                 on_socket(out, *id, *socket, 0);
                 put_u16(out, *mtu);
-                out.extend_from_slice(&ipv4.unwrap_or(Ipv4Addr::UNSPECIFIED).octets());
-                out.extend_from_slice(&ipv6.unwrap_or(Ipv6Addr::UNSPECIFIED).octets());
+                for (v4, v6) in [(ipv4, ipv6), (public_ipv4, public_ipv6)] {
+                    out.extend_from_slice(&v4.unwrap_or(Ipv4Addr::UNSPECIFIED).octets());
+                    out.extend_from_slice(&v6.unwrap_or(Ipv6Addr::UNSPECIFIED).octets());
+                }
+                put_u16(out, *first_port);
+                put_u16(out, *ports);
                 relay::IP_TUNNEL
             }
             Self::Accepted { listener, socket, local, remote } => {
@@ -390,6 +406,10 @@ impl RelayPacket {
                 mtu: r.u16()?,
                 ipv4: Some(Ipv4Addr::from(r.array::<4>()?)).filter(|ip| !ip.is_unspecified()),
                 ipv6: Some(Ipv6Addr::from(r.array::<16>()?)).filter(|ip| !ip.is_unspecified()),
+                public_ipv4: Some(Ipv4Addr::from(r.array::<4>()?)).filter(|ip| !ip.is_unspecified()),
+                public_ipv6: Some(Ipv6Addr::from(r.array::<16>()?)).filter(|ip| !ip.is_unspecified()),
+                first_port: r.u16()?,
+                ports: r.u16()?,
             },
             relay::ACCEPTED => Self::Accepted {
                 listener: r.u32()?,

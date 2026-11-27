@@ -32,6 +32,21 @@ export type IpTunnel = {
   ipv6?: string,
   /** The largest packet the tunnel carries, at least 1280 bytes. */
   mtu: number,
+  /**
+   * The relay's public IPv4 address, as text, as others dial it to reach the tunnel's public ports. Absent when the
+   * relay gave no public ports or none of this family.
+   */
+  publicIpv4?: string,
+  /** The relay's public IPv6 address, as `publicIpv4` is the IPv4 one. */
+  publicIpv6?: string,
+  /** The first of the tunnel's public ports. Meaningless when `ports` is 0. */
+  firstPort: number,
+  /**
+   * How many public ports the tunnel holds, from `firstPort` on: a TCP or UDP packet anyone sends to the public
+   * address on one of them reaches this end's address on the same port. 0 when the relay gave none, and the tunnel
+   * is then reached only by answers to what it sent.
+   */
+  ports: number,
   readable: ReadableStream<Uint8Array>,
   /**
    * Sends one packet and never waits. `false` when the packet was dropped: it is empty or longer than `mtu`, the
@@ -149,6 +164,10 @@ export const ipTunnel = async (context: Context, reply: RelayPacket): Promise<Ip
     ipv4: reply.ipv4 && formatIp(reply.ipv4),
     ipv6: reply.ipv6 && formatIp(reply.ipv6),
     mtu,
+    publicIpv4: reply.publicIpv4 && formatIp(reply.publicIpv4),
+    publicIpv6: reply.publicIpv6 && formatIp(reply.publicIpv6),
+    firstPort: reply.firstPort,
+    ports: reply.ports,
     readable,
     send,
     closed,

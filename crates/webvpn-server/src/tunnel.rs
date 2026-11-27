@@ -90,7 +90,18 @@ pub(crate) async fn open<T: Transport, S: Session>(
             return Err(failure);
         }
     };
-    session.reply(RelayPacket::IpTunnel { id, socket, mtu, ipv4: end.ipv4, ipv6: end.ipv6 }).await;
+    let opened = RelayPacket::IpTunnel {
+        id,
+        socket,
+        mtu,
+        ipv4: end.ipv4,
+        ipv6: end.ipv6,
+        public_ipv4: None,
+        public_ipv6: None,
+        first_port: 0,
+        ports: 0,
+    };
+    session.reply(opened).await;
     run(&session, &*forwarder, socket, usize::from(mtu), requests, end, streams).await;
     Ok(())
 }
@@ -421,7 +432,7 @@ mod tests {
         /// Opens a tunnel with request `id`, which must be given the addresses of the forwarder's tunnel `index`.
         async fn open(&mut self, id: u32, index: usize) -> Tunnel {
             let answer = self.ask(ClientPacket::IpOpen { id }).await;
-            let RelayPacket::IpTunnel { id: answered, socket, mtu, ipv4, ipv6 } = answer else {
+            let RelayPacket::IpTunnel { id: answered, socket, mtu, ipv4, ipv6, .. } = answer else {
                 panic!("the open was not answered with its tunnel");
             };
             let (v4, v6) = TestForwarder::addresses(index);

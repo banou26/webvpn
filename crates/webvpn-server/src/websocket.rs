@@ -727,7 +727,7 @@ mod tests {
         let (mut tunnel, mut stream, mut id) = (None, None, Vec::new());
         while tunnel.is_none() || id.len() < 4 {
             match client.next().await {
-                Received::Control(RelayPacket::IpTunnel { id: 1, socket, mtu: 1500, ipv4, ipv6 }) => {
+                Received::Control(RelayPacket::IpTunnel { id: 1, socket, mtu: 1500, ipv4, ipv6, .. }) => {
                     assert_eq!((ipv4, ipv6), (Some(CLIENT_V4), Some(CLIENT_V6)));
                     tunnel = Some(socket);
                 }

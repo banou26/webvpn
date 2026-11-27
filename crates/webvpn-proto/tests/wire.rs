@@ -92,10 +92,22 @@ fn relay_packet(name: &str) -> RelayPacket {
             mtu: 1500,
             ipv4: Some([198, 18, 0, 2].into()),
             ipv6: Some("fd00::2".parse().unwrap()),
+            public_ipv4: Some([203, 0, 113, 9].into()),
+            public_ipv6: Some("2001:db8::9".parse().unwrap()),
+            first_port: 40000,
+            ports: 8,
         },
-        "ip-tunnel-v4" => {
-            RelayPacket::IpTunnel { id: 10, socket: 12, mtu: 1500, ipv4: Some([198, 18, 0, 2].into()), ipv6: None }
-        }
+        "ip-tunnel-v4" => RelayPacket::IpTunnel {
+            id: 10,
+            socket: 12,
+            mtu: 1500,
+            ipv4: Some([198, 18, 0, 2].into()),
+            ipv6: None,
+            public_ipv4: None,
+            public_ipv6: None,
+            first_port: 0,
+            ports: 0,
+        },
         "accepted" => RelayPacket::Accepted {
             listener: 6,
             socket: 7,

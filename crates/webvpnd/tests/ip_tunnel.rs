@@ -137,7 +137,7 @@ impl Session {
         let id = self.next_id;
         self.next_id += 1;
         self.send(ClientPacket::IpOpen { id }).await;
-        let RelayPacket::IpTunnel { id: answered, socket, mtu, ipv4, ipv6 } = self.next().await else {
+        let RelayPacket::IpTunnel { id: answered, socket, mtu, ipv4, ipv6, .. } = self.next().await else {
             panic!("the tunnel was not opened");
         };
         assert_eq!((answered, mtu, ipv6), (id, 1500, None));
