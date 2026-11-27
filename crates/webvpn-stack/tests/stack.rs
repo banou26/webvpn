@@ -394,6 +394,16 @@ fn every_change_is_told_once_as_an_event() {
         net.tick();
         assert!(!net.client.events(usize::MAX).contains(&client), "no change, no event");
     }
+
+    // the next byte reaches the client's queue before the page takes the first, and both polls see one byte waiting
+    net.site.tcp_set_no_delay(site, true).unwrap();
+    net.site.tcp_send(site, b"y").unwrap();
+    net.tick();
+    net.tick();
+    assert!(net.client.events(usize::MAX).is_empty());
+    assert_eq!(net.client.tcp_recv(client, &mut [0; 1]), Some(1));
+    net.tick();
+    assert!(net.client.events(usize::MAX).contains(&client), "a byte that came after one was taken is a change");
 }
 
 #[test]

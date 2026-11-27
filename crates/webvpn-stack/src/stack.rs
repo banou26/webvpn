@@ -16,6 +16,7 @@ const RELEASED_MS: i64 = 60_000;
 const KEEP_ALIVE_DEFAULT_SECONDS: u64 = 7200;
 const UDP_BYTES_PER_SLOT: usize = 256;
 const UDP_MIN_SLOTS: usize = 16;
+const UNSEEN: (u8, usize, usize) = (u8::MAX, 0, 0);
 
 const TCP: u8 = 6;
 const ICMP: u8 = 1;
@@ -400,10 +401,11 @@ impl Stack {
 
     /// The next connection `listener` accepted, oldest first.
     pub fn tcp_accept(&mut self, listener: u32) -> Option<u32> {
-        match &mut self.entry_mut(listener)?.kind {
-            Kind::Listener(listener) => listener.accepted.pop_front(),
-            _ => None,
-        }
+        let entry = self.entry_mut(listener)?;
+        let Kind::Listener(listener) = &mut entry.kind else { return None };
+        let accepted = listener.accepted.pop_front()?;
+        entry.seen = UNSEEN;
+        Some(accepted)
     }
 
     /// The socket's state, as `state_number` numbers it.
@@ -430,14 +432,18 @@ impl Stack {
     pub fn tcp_send(&mut self, id: u32, data: &[u8]) -> Result<usize> {
         let tcp = self.tcp(id).ok_or(ErrorCode::UNKNOWN_SOCKET)?;
         let error = tcp.error.unwrap_or(ErrorCode::OTHER);
-        self.sockets.get_mut::<tcp::Socket>(tcp.handle).send_slice(data).map_err(|_| error)
+        let taken = self.sockets.get_mut::<tcp::Socket>(tcp.handle).send_slice(data).map_err(|_| error)?;
+        self.taken(id, taken > 0);
+        Ok(taken)
     }
 
     /// Takes received bytes into `out`: how many, 0 when none are there yet, `None` once the peer's end was read or
     /// the connection is gone. A slow taker closes the window the socket offers.
     pub fn tcp_recv(&mut self, id: u32, out: &mut [u8]) -> Option<usize> {
         let handle = self.tcp(id)?.handle;
-        self.sockets.get_mut::<tcp::Socket>(handle).recv_slice(out).ok()
+        let length = self.sockets.get_mut::<tcp::Socket>(handle).recv_slice(out).ok()?;
+        self.taken(id, length > 0);
+        Some(length)
     }
 
     /// Ends this side in order once the send buffer is sent: a half close, after which the peer's bytes still come.
@@ -527,6 +533,7 @@ impl Stack {
     /// buffer full is dropped.
     pub fn udp_recv(&mut self, id: u32, out: &mut [u8]) -> Option<(usize, SocketAddr)> {
         let (length, metadata) = self.udp_socket(id).ok()?.recv_slice(out).ok()?;
+        self.taken(id, true);
         Some((length, socket_address(metadata.endpoint)))
     }
 
@@ -581,7 +588,7 @@ impl Stack {
     }
 
     fn insert(&mut self, kind: Kind) -> u32 {
-        let entry = Some(Entry { kind, seen: (u8::MAX, 0, 0) });
+        let entry = Some(Entry { kind, seen: UNSEEN });
         let index = match self.entries.iter().position(Option::is_none) {
             Some(index) => {
                 self.entries[index] = entry;
@@ -593,6 +600,13 @@ impl Stack {
             }
         };
         index as u32 + 1
+    }
+
+    // a socket the page took from may look as it did at the last poll once more arrives, so the next poll tells it
+    fn taken(&mut self, id: u32, taken: bool) {
+        if let Some(entry) = self.entry_mut(id).filter(|_| taken) {
+            entry.seen = UNSEEN;
+        }
     }
 
     fn entry(&self, id: u32) -> Option<&Entry> {
