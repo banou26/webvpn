@@ -179,3 +179,12 @@ On SIGTERM or SIGINT, the relay:
 2. sends each open session `Draining` once, and the session keeps its sockets;
 3. after `WEBVPN_DRAIN_SECONDS`, sends each session still open a `Bye` with `RESTARTING` and the reason `the relay is stopping`, then closes it with the same, which a WebSocket client also reads as close code `4004`;
 4. exits with code `0`, as soon as every session has ended and at most 4 seconds after the grace. Its last log line counts the sessions it closed when the grace ran out.
+
+## On macOS
+
+`webvpnd` builds and runs on macOS as on Linux. A client can see these differences there:
+
+- A UDP socket bound to one address, and not to `0.0.0.0` or `::`, ends when it disconnects from a peer, or connects while it already has one, if macOS moved it to another address. The relay answers the request first, then sends `Closed` with `ADDRESS_NOT_AVAILABLE`.
+- A UDP connect that fails on a socket that already has a peer leaves the socket with no peer. On Linux the socket keeps the peer it had.
+- A TTL of 0 is accepted. Linux refuses it.
+- `WEBVPN_WATCH_OWN_IPV6` does nothing.
