@@ -130,11 +130,10 @@ pub(crate) async fn run<T: Transport, S: Session>(
         closing = cut(&relay) => Err(closing),
     };
     drop(setup.permit);
-    let mut reader = match greeted {
-        Ok(reader) => reader,
-        Err(closing) => return closing.close(&*transport, control.as_mut()).await,
-    };
-    let send = control.expect("a greeting holds the control stream");
+    if let Err(closing) = greeted {
+        return closing.close(&*transport, control.as_mut().map(|(send, _)| send)).await;
+    }
+    let (send, mut reader) = control.expect("a greeting holds the control stream");
     relay.metrics.count(Counter::Sessions);
     if udp_carrier == UdpCarrier::UniStreamRequired {
         relay.metrics.count(Counter::WsSessions);
@@ -311,17 +310,22 @@ impl Closing {
 
 /// Opens the control stream into `control`, writes the relay's hello and reads the client's, which must be its first
 /// frame.
+///
+/// Both halves stay with the caller, also when the greeting fails or is cut short, so the receive half is still open
+/// while the `Bye` is written. Dropping it sends STOP_SENDING, and Firefox then fails the client's read of the other
+/// half as well (bug 1986138): with the receive half dropped first, Firefox 157 read the `Bye` of a hello of another
+/// minor version in 0 of 20 sessions, and in 20 of 20 with it held (measured 2026-11-28; Chromium 156 read it either
+/// way).
 async fn greet<T: Transport>(
     transport: &T,
-    control: &mut Option<T::Send>,
+    control: &mut Option<(T::Send, ControlReader<T::Recv>)>,
     hello: Hello,
-) -> Result<ControlReader<T::Recv>, Closing> {
+) -> Result<(), Closing> {
     let (send, recv) = transport.control_stream().await.map_err(|_| Closing::SETUP_FAILED)?;
-    let send = control.insert(send);
+    let (send, reader) = control.insert((send, ControlReader { recv, buf: Vec::new() }));
     write(send, &RelayPacket::Hello(hello)).await.map_err(|_| Closing::SETUP_FAILED)?;
-    let mut reader = ControlReader { recv, buf: Vec::new() };
     match reader.next().await {
-        Ok(Some(ClientPacket::Hello(hello))) if hello.compatible() => Ok(reader),
+        Ok(Some(ClientPacket::Hello(hello))) if hello.compatible() => Ok(()),
         Ok(Some(ClientPacket::Hello(_))) => {
             Err(Closing(close::VERSION_MISMATCH, "the client's version does not suit the relay"))
         }

@@ -1,6 +1,5 @@
 import type { RelayPacket } from '../src/protocol'
 
-import { server } from 'vite-plus/test/browser'
 import { expect, inject, it } from 'vite-plus/test'
 
 import { framed } from '../src/context'
@@ -71,12 +70,10 @@ const mismatch = async () => {
   }
 }
 
-// measures the relay's order on a failed setup: it drops its receive half of the control stream, which sends
-// STOP_SENDING, before it writes `Bye` on the send half. Not run in Firefox: Firefox 157 errors the control stream's
-// readable on that STOP_SENDING (bug 1986138), so 0 of 20 sessions read the `Bye`, and 20 of 20 did with the `Bye`
-// written first (2026-11-28)
-const firefox = server.browser === 'firefox'
-it.skipIf(firefox)(`reads the relay's Bye after a hello of another minor version, ${SESSIONS} times`, async () => {
+// pins the relay's order on a failed setup: it writes `Bye` while it still holds its receive half of the control
+// stream. Firefox 157 errors the stream's readable on the STOP_SENDING that dropping that half sends (bug 1986138):
+// with the half dropped first, 0 of 20 sessions read the `Bye` there (2026-11-28)
+it(`reads the relay's Bye after a hello of another minor version, ${SESSIONS} times`, async () => {
   const results = []
   for (let session = 0; session < SESSIONS; session++) results.push(await mismatch())
   const missed = results.filter(({ last }) => last?.type !== 'bye')
