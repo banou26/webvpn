@@ -483,16 +483,14 @@ pub(crate) struct WsSessionTasks {
 }
 
 impl WsSessionTasks {
-    /// Stops both tasks, giving the writer a second to send a queued Close frame.
-    pub(crate) async fn shutdown(mut self) {
+    /// Stops both tasks at once. A session that closed gave its writer its time in `WsTransport::close`, so waiting
+    /// again here would hold the connection of a client that reads nothing a second longer.
+    pub(crate) async fn shutdown(self) {
         self.cancel.cancel();
         self.reader.abort();
+        self.writer.abort();
         let _ = self.reader.await;
-
-        if tokio::time::timeout(WRITER_WAIT, &mut self.writer).await.is_err() {
-            self.writer.abort();
-            let _ = self.writer.await;
-        }
+        let _ = self.writer.await;
     }
 }
 
@@ -927,7 +925,7 @@ async fn writer_task<S>(
         match next {
             Next::Close(code, reason) => {
                 // What the control stream queued ahead of the close, its `Bye` last, goes out first. The lane holds at
-                // most PRIORITY_LANE_CAP frames, and `WsSessionTasks::shutdown` gives this writer a second in all.
+                // most PRIORITY_LANE_CAP frames, and `WsTransport::close` gives this writer a second in all.
                 while let Ok(frame) = priority_rx.try_recv() {
                     if ws_sink.send(Message::Binary(Bytes::from(frame))).await.is_err() {
                         break;

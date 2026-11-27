@@ -123,8 +123,8 @@ async fn connection<P: Policy>(
     };
     let (transport, tasks) = ws::spawn_session(ws, peer, relay.shared_metrics());
     relay.serve_setup(transport, UdpCarrier::UniStreamRequired, setup).await;
-    // Only after the session: the close it queued goes out first, and a writer that waits on a client reading
-    // nothing is stopped a second later instead of holding the connection.
+    // Only after the session, whose close gave the writer a second to send it: a writer that still waits on a client
+    // reading nothing is stopped then instead of holding the connection.
     tasks.shutdown().await;
 }
 
@@ -600,6 +600,7 @@ mod tests {
         // The close ends the session. Stopping the writer then closes the connection, and the relay resets it at the
         // next byte the client writes, which the write after that meets.
         within(client.ws.send(Message::Close(None))).await.unwrap();
+        let began = Instant::now();
         let tcp = client.ws.get_mut();
         let mut writes = 0;
         while writes < 100 && within(tcp.write_all(b"x")).await.is_ok() {
@@ -607,6 +608,8 @@ mod tests {
             sleep(Duration::from_millis(50)).await;
         }
         assert!(writes < 100, "the connection outlived its session by 5 seconds");
+        // The writer's second, and not a second wait after it.
+        assert!(began.elapsed() < Duration::from_millis(1500), "the connection lasted {:?}", began.elapsed());
     }
 
     #[tokio::test]
