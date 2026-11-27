@@ -101,6 +101,28 @@ describe('listen', () => {
     const { net } = setup()
     expect(() => net.createServer().listen('/tmp/socket')).toThrow('IPC paths are not supported')
   })
+
+  // Node 26.12.1 on Linux (measured 2026-11-28): a server whose listen failed is not running, so close() emits close
+  // and calls back with ERR_SERVER_NOT_RUNNING, and it may listen again, on the next port say
+  it('listens again after a listen that failed, and closes as a server that is not running', async () => {
+    const { relay, net } = setup()
+    relay.listenError = (local) => local.port === 6881 ? relayError(ErrorCode.ADDRESS_IN_USE) : undefined
+    const server = net.createServer()
+    const log: string[] = []
+    server.on('error', (error: Error & { code?: string }) => log.push(`error ${error.code}`))
+    server.on('close', () => log.push('close'))
+    server.listen(6881, '0.0.0.0')
+    await wait(10)
+    server.close((error) => log.push(`callback ${(error as Error & { code?: string })?.code}`))
+    await wait(10)
+    expect(log).toEqual(['error EADDRINUSE', 'close', 'callback ERR_SERVER_NOT_RUNNING'])
+    server.listen(6881, '0.0.0.0')
+    await wait(10)
+    server.listen(6882, '0.0.0.0')
+    await Promise.race([new Promise((resolve) => server.once('listening', resolve)), wait(100)])
+    expect(server.address()).toEqual({ address: '0.0.0.0', family: 'IPv4', port: 6882 })
+  })
+
 })
 
 describe('connections', () => {

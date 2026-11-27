@@ -408,7 +408,10 @@ class Server extends EventEmitter {
       // as Node, a server with no host takes the IPv6 wildcard, and the IPv4 one where IPv6 is missing
       return host ? listen(await resolve(ready, host)) : listen(IPV6_ANY).catch(() => listen(IPV4_ANY))
     }).catch((error: unknown) => {
-      if (this._listening === listening) this.emit('error', error)
+      // as Node, a server whose listen failed is not listening, and may listen again
+      if (this._listening !== listening) return undefined
+      this._listening = undefined
+      this.emit('error', error)
       return undefined
     })
     this._listening = listening
@@ -441,8 +444,10 @@ class Server extends EventEmitter {
   close(callback?: (error?: Error) => void): this {
     const listening = this._listening
     this._listening = this._local = undefined
+    // as Node, a server that is not listening still emits 'close', and the callback is one of its listeners
     if (!listening) {
-      if (callback) queueMicrotask(() => callback(coded('Server is not running.', 'ERR_SERVER_NOT_RUNNING')))
+      if (callback) this.once('close', () => callback(coded('Server is not running.', 'ERR_SERVER_NOT_RUNNING')))
+      queueMicrotask(() => this.emit('close'))
       return this
     }
     listening.then(async (listener) => {
