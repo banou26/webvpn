@@ -25,6 +25,8 @@ pub mod stream_type {
     pub const TCP: u8 = 0;
     /// A UDP socket's datagrams toward the client.
     pub const UDP_DOWNLOAD: u8 = 1;
+    /// An IP tunnel's packets, both ways.
+    pub const IP: u8 = 2;
 }
 
 pub fn encode(kind: u8, stream: u32, payload: &[u8]) -> Vec<u8> {

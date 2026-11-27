@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use webvpn_proto::{
-    close, features, mux, ClientPacket, DecodeError, ErrorCode, Hello, RelayPacket, TcpOption, UdpOption, UdpPacket,
+    close, features, ip, mux, ClientPacket, DecodeError, ErrorCode, Hello, RelayPacket, TcpOption, UdpOption, UdpPacket,
     MAX_CLIENT_FRAME_BYTES, MAX_UDP_PAYLOAD_BYTES, VERSION,
 };
 
@@ -63,6 +63,8 @@ fn client_packet(name: &str) -> ClientPacket {
             option: UdpOption::AddMembershipV4 { group: [239, 1, 2, 3].into(), interface: [0, 0, 0, 0].into() },
         },
         "dns-query" => ClientPacket::DnsQuery { id: 8, query: vec![1, 2, 3] },
+        "ip-open" => ClientPacket::IpOpen { id: 10 },
+        "ip-close" => ClientPacket::IpClose { id: 11, socket: 12 },
         other => panic!("no client packet is named {other}"),
     }
 }
@@ -84,6 +86,16 @@ fn relay_packet(name: &str) -> RelayPacket {
         },
         "socket-bound" => RelayPacket::Socket { id: 4, socket: 6, local: address(LISTENER), remote: None },
         "dns-answer" => RelayPacket::DnsAnswer { id: 8, answer: vec![9, 8] },
+        "ip-tunnel" => RelayPacket::IpTunnel {
+            id: 10,
+            socket: 12,
+            mtu: 1500,
+            ipv4: Some([198, 18, 0, 2].into()),
+            ipv6: Some("fd00::2".parse().unwrap()),
+        },
+        "ip-tunnel-v4" => {
+            RelayPacket::IpTunnel { id: 10, socket: 12, mtu: 1500, ipv4: Some([198, 18, 0, 2].into()), ipv6: None }
+        }
         "accepted" => RelayPacket::Accepted {
             listener: 6,
             socket: 7,
@@ -105,7 +117,7 @@ fn relay_packet(name: &str) -> RelayPacket {
 #[test]
 fn client_frames_match_the_vectors_both_ways() {
     let vectors = vectors("client");
-    assert_eq!(vectors.len(), 16);
+    assert_eq!(vectors.len(), 18);
     for (name, bytes) in vectors {
         let packet = client_packet(name);
         let mut written = Vec::new();
@@ -118,7 +130,7 @@ fn client_frames_match_the_vectors_both_ways() {
 #[test]
 fn relay_frames_match_the_vectors_both_ways() {
     let vectors = vectors("relay");
-    assert_eq!(vectors.len(), 11);
+    assert_eq!(vectors.len(), 13);
     for (name, bytes) in vectors {
         let packet = relay_packet(name);
         let mut written = Vec::new();
@@ -131,11 +143,24 @@ fn relay_frames_match_the_vectors_both_ways() {
 #[test]
 fn data_packets_match_the_vectors_both_ways() {
     let vectors = vectors("data");
-    assert_eq!(vectors.len(), 3);
+    assert_eq!(vectors.len(), 5);
     for (name, bytes) in vectors {
-        if name == "mux-open-tcp" {
-            assert_eq!(mux::encode(mux::kind::OPEN, 3, &[mux::stream_type::TCP]), bytes);
-            assert_eq!(mux::decode(&bytes), Some((mux::kind::OPEN, 3, &[mux::stream_type::TCP][..])));
+        let opened = match name {
+            "mux-open-tcp" => Some((3, mux::stream_type::TCP)),
+            "mux-open-ip" => Some((5, mux::stream_type::IP)),
+            _ => None,
+        };
+        if let Some((stream, opened)) = opened {
+            assert_eq!(mux::encode(mux::kind::OPEN, stream, &[opened]), bytes, "{name} written");
+            assert_eq!(mux::decode(&bytes), Some((mux::kind::OPEN, stream, &[opened][..])), "{name} read");
+            continue;
+        }
+        if name == "ip-frame" {
+            let packet = unhex("4500001400004000400100000a0000010a000002");
+            let mut written = Vec::new();
+            ip::encode(&packet, &mut written);
+            assert_eq!(hex(&written), hex(&bytes), "{name} written");
+            assert_eq!(ip::decode(&bytes), Some((&packet[..], bytes.len())), "{name} read");
             continue;
         }
         let packet = UdpPacket {
@@ -248,4 +273,16 @@ fn a_udp_payload_over_the_limit_is_refused_from_its_length() {
 
     let cut_short = [0, 0, 0, 9, 2, 0, 0, 0, 4, b'h', b'i'];
     assert_eq!(UdpPacket::decode(&cut_short), Err(DecodeError::Truncated));
+}
+
+#[test]
+fn a_tunnel_frame_is_read_only_once_it_is_whole_and_leaves_the_next_one() {
+    let mut two = Vec::new();
+    ip::encode(b"first", &mut two);
+    ip::encode(b"", &mut two);
+    for cut in 0..7 {
+        assert_eq!(ip::decode(&two[..cut]), None, "cut at {cut}");
+    }
+    assert_eq!(ip::decode(&two), Some((&b"first"[..], 7)));
+    assert_eq!(ip::decode(&two[7..]), Some((&b""[..], 2)));
 }

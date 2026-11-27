@@ -445,7 +445,9 @@ impl<T: Transport, S: Session> State<T, S> {
                 self.sockets.forward(id, socket, packet, &self.handle.relay.metrics)
             }
             ClientPacket::DnsQuery { id, query } => self.lookup(id, query),
-            ClientPacket::Unknown { id: Some(id), .. } => {
+            ClientPacket::Unknown { id: Some(id), .. }
+            | ClientPacket::IpOpen { id }
+            | ClientPacket::IpClose { id, .. } => {
                 Some(error(id, Refusal::new(ErrorCode::UNSUPPORTED, NOT_TAKEN)))
             }
             ClientPacket::Unknown { id: None, .. } => None,

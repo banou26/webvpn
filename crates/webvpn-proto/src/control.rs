@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::error::{DecodeError, ErrorCode};
 use crate::options::{TcpOption, UdpOption};
@@ -27,6 +27,8 @@ pub mod features {
     pub const AUTH: u32 = 1 << 2;
     /// Socket requests are answered `AUTH_REQUIRED` until an `Auth` succeeded.
     pub const AUTH_REQUIRED: u32 = 1 << 3;
+    /// `IpOpen` and `IpClose`.
+    pub const IP: u32 = 1 << 4;
 }
 
 /// The first frame each side writes: the relay first, then the client.
@@ -91,6 +93,8 @@ mod client {
     pub const UDP_DISCONNECT: u8 = 0x33;
     pub const UDP_SET_OPTION: u8 = 0x34;
     pub const DNS_QUERY: u8 = 0x40;
+    pub const IP_OPEN: u8 = 0x50;
+    pub const IP_CLOSE: u8 = 0x51;
 }
 
 mod relay {
@@ -99,6 +103,7 @@ mod relay {
     pub const ERROR: u8 = 0x02;
     pub const SOCKET: u8 = 0x03;
     pub const DNS_ANSWER: u8 = 0x04;
+    pub const IP_TUNNEL: u8 = 0x05;
     pub const ACCEPTED: u8 = 0x10;
     pub const ACCEPT_REFUSED: u8 = 0x11;
     pub const CLOSED: u8 = 0x12;
@@ -134,6 +139,10 @@ pub enum ClientPacket {
     UdpSetOption { id: u32, socket: u32, option: UdpOption },
     /// `query` is a whole DNS message. Answered `DnsAnswer`.
     DnsQuery { id: u32, query: Vec<u8> },
+    /// Answered `IpTunnel`.
+    IpOpen { id: u32 },
+    /// Ends the tunnel. Answered `Ok`, also for a tunnel that is gone.
+    IpClose { id: u32, socket: u32 },
     /// A type this crate does not name. A relay answers `id`, when the body held one, with `UNSUPPORTED`.
     Unknown { kind: u8, id: Option<u32> },
 }
@@ -202,6 +211,11 @@ impl ClientPacket {
                 out.extend_from_slice(query);
                 client::DNS_QUERY
             }
+            Self::IpOpen { id } => {
+                put_u32(out, *id);
+                client::IP_OPEN
+            }
+            Self::IpClose { id, socket } => on_socket(out, *id, *socket, client::IP_CLOSE),
             Self::Unknown { kind, id } => {
                 if let Some(id) = id {
                     put_u32(out, *id);
@@ -242,6 +256,8 @@ impl ClientPacket {
                 Self::UdpSetOption { id: r.u32()?, socket: r.u32()?, option: UdpOption::read(&mut r)? }
             }
             client::DNS_QUERY => Self::DnsQuery { id: r.u32()?, query: r.rest().to_vec() },
+            client::IP_OPEN => Self::IpOpen { id: r.u32()? },
+            client::IP_CLOSE => Self::IpClose { id: r.u32()?, socket: r.u32()? },
             kind => Self::Unknown { kind, id: r.u32().ok() },
         };
         Ok(Some((packet, taken)))
@@ -260,11 +276,14 @@ pub enum RelayPacket {
     Socket { id: u32, socket: u32, local: SocketAddr, remote: Option<SocketAddr> },
     /// The resolver's whole DNS message.
     DnsAnswer { id: u32, answer: Vec<u8> },
+    /// The tunnel an `IpOpen` opened: the largest packet it carries, and the addresses the relay gave the client's
+    /// end, at least one of them. A family with no address is all zero bytes on the wire.
+    IpTunnel { id: u32, socket: u32, mtu: u16, ipv4: Option<Ipv4Addr>, ipv6: Option<Ipv6Addr> },
     /// A listener accepted a connection, which is socket `socket` from now on.
     Accepted { listener: u32, socket: u32, local: SocketAddr, remote: SocketAddr },
     /// A listener had a connection the relay turned away.
     AcceptRefused { listener: u32, code: ErrorCode, remote: SocketAddr },
-    /// The relay ended a listener or a UDP socket on its own, and `code` says why. The socket is gone.
+    /// The relay ended a listener, a UDP socket or an IP tunnel on its own, and `code` says why. The socket is gone.
     Closed { socket: u32, code: ErrorCode },
     /// The relay is about to stop: this session keeps its sockets, and new ones belong on a new session.
     Draining,
@@ -306,6 +325,13 @@ impl RelayPacket {
                 put_u32(out, *id);
                 out.extend_from_slice(answer);
                 relay::DNS_ANSWER
+            }
+            Self::IpTunnel { id, socket, mtu, ipv4, ipv6 } => {
+                on_socket(out, *id, *socket, 0);
+                put_u16(out, *mtu);
+                out.extend_from_slice(&ipv4.unwrap_or(Ipv4Addr::UNSPECIFIED).octets());
+                out.extend_from_slice(&ipv6.unwrap_or(Ipv6Addr::UNSPECIFIED).octets());
+                relay::IP_TUNNEL
             }
             Self::Accepted { listener, socket, local, remote } => {
                 put_u32(out, *listener);
@@ -358,6 +384,13 @@ impl RelayPacket {
                 remote: r.optional_address()?,
             },
             relay::DNS_ANSWER => Self::DnsAnswer { id: r.u32()?, answer: r.rest().to_vec() },
+            relay::IP_TUNNEL => Self::IpTunnel {
+                id: r.u32()?,
+                socket: r.u32()?,
+                mtu: r.u16()?,
+                ipv4: Some(Ipv4Addr::from(r.array::<4>()?)).filter(|ip| !ip.is_unspecified()),
+                ipv6: Some(Ipv6Addr::from(r.array::<16>()?)).filter(|ip| !ip.is_unspecified()),
+            },
             relay::ACCEPTED => Self::Accepted {
                 listener: r.u32()?,
                 socket: r.u32()?,

@@ -1,8 +1,10 @@
-//! The WebVPN wire protocol as `spec/protocol.md` lays it out: control frames, the UDP data packet and the WebSocket
-//! mux frame. No I/O and no dependencies: the caller owns the streams and hands bytes in.
+//! The WebVPN wire protocol as `spec/protocol.md` lays it out: control frames, the UDP data packet, the frame of an
+//! IP tunnel's stream and the WebSocket mux frame. No I/O and no dependencies: the caller owns the streams and hands
+//! bytes in.
 
 mod control;
 mod error;
+pub mod ip;
 pub mod mux;
 mod options;
 mod udp;
