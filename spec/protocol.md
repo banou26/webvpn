@@ -1,7 +1,8 @@
 # WebVPN protocol, version 0.1
 
 WebVPN gives a client real TCP and UDP sockets through a relay. The client asks for a socket on a control stream, the
-relay opens the operating system socket, and the socket's bytes travel on a stream of their own.
+relay opens the operating system socket, and the socket's bytes travel on a stream of their own. A relay may also
+carry whole IP packets, for a client that brings its own network stack.
 
 Version 0 is not stable: the wire may change between minor versions, and peers need the same minor. Every integer is
 big-endian. A boolean is one byte, 0 for false and any other value for true.
@@ -57,7 +58,8 @@ Feature bits a relay sets:
 | 0 | `LISTEN` | `TcpListen`, `TcpUnlisten` |
 | 1 | `DNS` | `DnsQuery`, `TcpConnectName` |
 | 2 | `AUTH` | `Auth`, `AuthClear` |
-| 3 | `AUTH_REQUIRED` | no socket request until an `Auth` succeeded; it answers `AUTH_REQUIRED` before that |
+| 3 | `AUTH_REQUIRED` | no socket or tunnel request until an `Auth` succeeded; it answers `AUTH_REQUIRED` before that |
+| 4 | `IP` | `IpOpen`, `IpClose` |
 
 A client sends a request only when the relay set its bit. Unknown bits are ignored.
 
@@ -80,6 +82,8 @@ A client sends a request only when the relay set its bit. Unknown bits are ignor
 | `0x33` | `UdpDisconnect` | `socket u32` | `Ok` |
 | `0x34` | `UdpSetOption` | `socket u32`, `UdpOption` | `Ok` |
 | `0x40` | `DnsQuery` | `query`, the rest: a whole DNS message | `DnsAnswer` |
+| `0x50` | `IpOpen` | nothing | `IpTunnel` |
+| `0x51` | `IpClose` | `socket u32` | `Ok` |
 
 Any request may be answered by `Error` instead.
 
@@ -91,6 +95,7 @@ Any request may be answered by `Error` instead.
 | `0x02` | `Error` | `id u32`, `code u16`, `message`, the rest, UTF-8, for a person |
 | `0x03` | `Socket` | `id u32`, `socket u32`, `local Address`, `remote OptionalAddress` |
 | `0x04` | `DnsAnswer` | `id u32`, `answer`, the rest: the resolver's whole DNS message |
+| `0x05` | `IpTunnel` | `id u32`, `socket u32`, `mtu u16`, `ipv4`: 4 address bytes, `ipv6`: 16 address bytes |
 | `0x10` | `Accepted` | `listener u32`, `socket u32`, `local Address`, `remote Address` |
 | `0x11` | `AcceptRefused` | `listener u32`, `code u16`, `remote Address` |
 | `0x12` | `Closed` | `socket u32`, `code u16` |
@@ -134,7 +139,7 @@ A credential, like every request body, fits one client frame: it holds at most 4
 ## Sockets
 
 The relay names each socket with a `u32` id. Ids rise through a session and are never used twice, and TCP sockets,
-listeners and UDP sockets share them. A relay that runs out of ids refuses new sockets with `CAPACITY`.
+listeners, UDP sockets and [IP tunnels](#ip-tunnels) share them. A relay that runs out of ids refuses new sockets with `CAPACITY`.
 
 For every TCP socket the relay opens one bidirectional stream whose first four bytes are the socket id. The stream and
 the reply that names the socket may arrive in either order, so a client holds a stream whose socket it does not know
@@ -209,6 +214,40 @@ A stream that carries datagrams starts with the socket id and then repeats `[u32
 A reliable stream under UDP is deliberate: a browser paces and drops WebTransport datagrams, which a protocol on top
 reads as loss on the path.
 
+## IP tunnels
+
+A relay that sets `IP` also carries whole IP packets, for a client that brings its own network stack, such as a
+virtual machine. A tunnel is one more thing a session holds beside its sockets, and it is named by a socket id.
+
+`IpOpen` asks for a tunnel. `IpTunnel` answers with its id, the largest packet it carries (`mtu`, at least 1280) and
+the addresses the relay gives the client's end: an IPv4 address, an IPv6 address, or both. A family the relay gives
+no address of is all zero bytes. `IpClose` ends the tunnel and is answered `Ok`, also for a tunnel that is already
+gone. A tunnel the relay has to end on its own is told with `Closed`.
+
+The relay opens one bidirectional stream for the tunnel, as for a TCP socket. After the id, each side repeats:
+
+```
+[u16 length][packet: length bytes]
+```
+
+A packet is one whole IPv4 or IPv6 packet, with no link header in front of it. A tunnel has two ends and nothing
+between them: there is no gateway address to learn, and a client whose stack wants one makes one up.
+
+- **From the client.** The relay forwards a packet as a router does. It drops, and says nothing about, a packet that
+  is not IPv4 or IPv6, whose header is cut short, whose own length is not `length`, that is longer than `mtu`, whose
+  source is not an address the relay gave this tunnel, that carries an IPv4 source route, or whose destination the
+  relay's rules refuse. A relay applies its egress rules to a packet's destination exactly as to a socket's.
+- **Toward the client.** The relay sends the packets that arrive for the tunnel's addresses: the answers to what the
+  client sent, and the ICMP errors about it.
+- **Loss.** A tunnel is a link that may drop. Each side holds a short queue for the stream and drops the newest
+  packet once the queue is full, so neither side waits on the other and what flows through a tunnel paces itself, as
+  on any link. Nothing is sent again and nothing is reordered.
+- **Addresses.** They are the relay's to choose, and may be private ones that it translates where its packets leave.
+  They last as long as the tunnel does.
+
+A reliable stream under IP is deliberate, for the reason it is under UDP, and because a WebTransport datagram holds
+less than the 1280 bytes an IPv6 link has to carry.
+
 ## Names
 
 `DnsQuery` carries a whole DNS message. The relay hands it to its resolver and returns the resolver's whole message
@@ -256,7 +295,7 @@ For a client without WebTransport, one WebSocket carries the same streams. Every
 
 | Kind | Name | Sent by | Payload |
 | --- | --- | --- | --- |
-| 0 | `OPEN` | relay | `u8` stream type: 0 a TCP socket's stream, 1 a UDP socket's stream toward the client |
+| 0 | `OPEN` | relay | `u8` stream type: 0 a TCP socket's stream, 1 a UDP socket's stream toward the client, 2 an IP tunnel's stream |
 | 1 | `DATA` | both | bytes of the stream |
 | 2 | `FIN` | both | nothing; this side of the stream is finished |
 | 3 | `RESET` | both | nothing, or a `u32` code as a stream reset carries it |
@@ -271,6 +310,7 @@ For a client without WebTransport, one WebSocket carries the same streams. Every
 - A client's `RESET` ends both sides of the stream.
 - A UDP socket has one stream toward the client, and its datagrams toward the relay travel as `DATAGRAM` frames. A
   `DATAGRAM` frame's stream is 0.
+- An IP tunnel's stream carries packets both ways, as a TCP socket's carries bytes.
 - A receiver ignores a message shorter than five bytes and a kind it does not know.
 
 ## Limits
@@ -281,6 +321,7 @@ For a client without WebTransport, one WebSocket carries the same streams. Every
 | A frame's body toward the client | 131072 bytes |
 | A DNS query | 512 bytes |
 | A UDP payload | 65536 bytes |
+| An IP packet | the tunnel's `mtu` |
 | The relay's answer to `TcpConnect` or `TcpConnectName` | within 10 seconds |
 | The relay's answer to `DnsQuery` | within 5 seconds |
 
