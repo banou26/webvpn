@@ -156,9 +156,11 @@ class Socket extends EventEmitter {
     const bound = this._bound ?? this.bind()._bound!
     const target = address === undefined && this._remote ? undefined : address ?? (this._type === 'udp6' ? '::1' : '127.0.0.1')
     const ip = target === undefined ? undefined : parseIp(target)
-    // waits for the bind in the order of the calls; one a failed bind or close() cut off ends silently, as in Node
+    // waits for the bind in the order of the calls; one a failed bind or close() cut off ends silently, as in Node.
+    // A send to the connected peer has no lookup to wait for, so as in Node a close() after it does not cut it off:
+    // it is written ahead of the close, which waits on the same bind
     bound.then(async (ready) => {
-      if (!ready || this._closed) return
+      if (!ready || (this._closed && target !== undefined)) return
       let remote: Address | undefined
       if (target !== undefined) {
         try {

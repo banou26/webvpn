@@ -425,6 +425,22 @@ describe('close', () => {
     expect(log).toEqual(['close'])
   })
 
+  // Node 26.12.1 on Linux (measured 2026-11-28): a connected socket's send needs no lookup, so it goes out and calls
+  // back even when close() follows it in the same turn
+  it('sends what a connected socket sent just before close()', async () => {
+    const { socket, udp } = await bound()
+    socket.connect(7000, '192.0.2.9')
+    await new Promise((resolve) => socket.once('connect', resolve))
+    const log: string[] = []
+    socket.on('close', () => log.push('close'))
+    socket.send('last words', (error, bytes) => log.push(`callback ${error} ${bytes}`))
+    socket.close()
+    await Promise.race([new Promise((resolve) => socket.once('close', resolve)), wait(100)])
+    await wait(10)
+    expect(udp.sent).toEqual([{ to: 'peer', data: 'last words' }])
+    expect(log).toEqual(['callback null 10', 'close'])
+  })
+
   it('emits error then close when the relay ends the socket or the session ends, and close alone with no error listener', async () => {
     for (const closed of [{ by: 'relay', code: ErrorCode.CAPACITY }, { by: 'session' }] as const) {
       const { socket, udp } = await bound()
