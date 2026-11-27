@@ -803,6 +803,8 @@ mod tests {
         max_sockets: usize,
         sockets: Arc<AtomicUsize>,
         cleared: Arc<AtomicUsize>,
+        /// How many times a socket was asked for.
+        asked: Arc<AtomicUsize>,
     }
 
     impl Probe {
@@ -831,6 +833,7 @@ mod tests {
         }
 
         fn open_socket(&self, _kind: SocketKind) -> Result<Slot, Refusal> {
+            self.asked.fetch_add(1, Ordering::SeqCst);
             Slot::take(&self.sockets, self.max_sockets)
                 .ok_or(Refusal::new(ErrorCode::REFUSED, "the test opens no more sockets"))
         }
@@ -1301,6 +1304,7 @@ mod tests {
         assert_eq!(refusal.code, ErrorCode::CAPACITY);
         assert_eq!(told.try_recv().unwrap(), refusal);
         assert_eq!(policy.held(), 2);
+        assert_eq!(policy.asked.load(Ordering::SeqCst), 2);
 
         abort_and_reap(&mut registry, 0).await;
         assert_eq!(registry.register(&policy, pending()).unwrap(), 2);
