@@ -129,6 +129,23 @@ describe('send', () => {
     ])
   })
 
+  // Node 26.12.1 on Linux (measured 2026-11-28): the port of a send that is not to a connected peer may be a string
+  // of digits, as one read from a setting is; one that is missing or no port at all throws, before any bind
+  it('takes a port given as a string, and throws Node\'s ERR_SOCKET_BAD_PORT for a port missing or out of range', async () => {
+    const { socket, udp } = await bound()
+    expect(await outcome((done) => socket.send('a', '7000' as unknown as number, '192.0.2.9', done))).toBe(1)
+    expect(await outcome((done) => socket.send('-b-', 1, 1, '7001' as unknown as number, '192.0.2.9', done))).toBe(1)
+    expect(udp.sent).toEqual([{ to: '192.0.2.9:7000', data: 'a' }, { to: '192.0.2.9:7001', data: 'b' }])
+    const bad = (received: string) => expect.objectContaining({ name: 'RangeError', code: 'ERR_SOCKET_BAD_PORT', message: `Port should be > 0 and < 65536. Received ${received}.` })
+    expect(() => socket.send('x')).toThrow(bad('undefined'))
+    expect(() => socket.send('x', () => {})).toThrow(bad('function '))
+    expect(() => socket.send('x', 0, '192.0.2.9')).toThrow(bad('type number (0)'))
+    expect(() => socket.send('x', 70000, '192.0.2.9')).toThrow(bad('type number (70000)'))
+    expect(() => socket.send('x', 'abc' as unknown as number, '192.0.2.9')).toThrow(bad('type string (\'abc\')'))
+    await wait(10)
+    expect(udp.sent).toHaveLength(2)
+  })
+
   it('takes a copy of the message, so the caller may reuse its buffer at once', async () => {
     const { socket, udp } = await bound()
     const buffer = new TextEncoder().encode('first')

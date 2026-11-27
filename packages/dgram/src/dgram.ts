@@ -60,7 +60,20 @@ const sendArgs = (args: unknown[]) => {
     data = data.subarray(offset, offset + length)
   }
   const [port, address] = ranged ? [args[3], args[4]] : [args[1], args[2]]
-  return { data, port: typeof port === 'number' ? port : 0, address: typeof address === 'string' ? address : undefined, callback }
+  return { data, port, address: typeof address === 'string' ? address : undefined, callback }
+}
+
+const received = (value: unknown) => {
+  if (value == null) return `${value}`
+  if (typeof value === 'function') return `function ${value.name}`
+  return `type ${typeof value} (${typeof value === 'string' ? `'${value}'` : String(value)})`
+}
+
+/** Node's check of a send's port: a number or a string of digits, from 1 to 65535. */
+const sendPort = (port: unknown) => {
+  const value = typeof port === 'string' && port.trim() ? Number(port) : port
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0 && value < 65536) return value
+  throw Object.assign(new RangeError(`Port should be > 0 and < 65536. Received ${received(port)}.`), { code: 'ERR_SOCKET_BAD_PORT' })
 }
 
 class Socket extends EventEmitter {
@@ -152,9 +165,10 @@ class Socket extends EventEmitter {
 
   send(...args: unknown[]): void {
     if (this._closed) throw notRunning()
-    const { data, port, address, callback } = sendArgs(args)
-    const bound = this._bound ?? this.bind()._bound!
+    const { data, port: given, address, callback } = sendArgs(args)
     const target = address === undefined && this._remote ? undefined : address ?? (this._type === 'udp6' ? '::1' : '127.0.0.1')
+    const port = target === undefined ? 0 : sendPort(given)
+    const bound = this._bound ?? this.bind()._bound!
     const ip = target === undefined ? undefined : parseIp(target)
     // waits for the bind in the order of the calls; one a failed bind or close() cut off ends silently, as in Node.
     // A send to the connected peer has no lookup to wait for, so as in Node a close() after it does not cut it off:
