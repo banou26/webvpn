@@ -10,12 +10,13 @@ import tcpExample from '../../../../../packages/examples/src/tcp.ts?raw'
 import listenExample from '../../../../../packages/examples/src/listen.ts?raw'
 import udpExample from '../../../../../packages/examples/src/udp.ts?raw'
 import lookupExample from '../../../../../packages/examples/src/lookup.ts?raw'
+import ipTunnelExample from '../../../../../packages/examples/src/ip-tunnel.ts?raw'
 import sessionEndExample from '../../../../../packages/examples/src/session-end.ts?raw'
 import nodeNetExample from '../../../../../packages/examples/src/node-net.ts?raw'
 import providerExample from '../../../../../packages/examples/src/provider.ts?raw'
 import aliasExample from '../../../../../packages/examples/src/vite.config.ts?raw'
 
-`@webvpn/client` opens a session with a relay, and gives a page TCP connections, listening ports, UDP sockets and name lookups as Web Streams. `@webvpn/net` and `@webvpn/dgram` put Node's `net` and `dgram` modules on a session, so code written for Node runs in a page.
+`@webvpn/client` opens a session with a relay, and gives a page TCP connections, listening ports, UDP sockets, name lookups and IP tunnels as Web Streams. `@webvpn/net` and `@webvpn/dgram` put Node's `net` and `dgram` modules on a session, so code written for Node runs in a page.
 
 ## Get the packages
 
@@ -58,7 +59,7 @@ A relay may require a credential. Until the client presents one, the relay answe
 
 `session.authenticate(credential)` presents a credential later, for example a renewed one, and `session.clearAuth()` gives it up. A refused credential leaves the session as it was.
 
-`session.features` holds the bits of the relay's hello: `Feature.LISTEN`, `Feature.DNS`, `Feature.AUTH` and `Feature.AUTH_REQUIRED`. A call that needs a feature the relay does not offer rejects with `UNSUPPORTED`, and the client sends nothing.
+`session.features` holds the bits of the relay's hello: `Feature.LISTEN`, `Feature.DNS`, `Feature.AUTH`, `Feature.AUTH_REQUIRED` and `Feature.IP`. A call that needs a feature the relay does not offer rejects with `UNSUPPORTED`, and the client sends nothing.
 
 ## Open a TCP connection
 
@@ -105,6 +106,22 @@ Over WebTransport, a socket's datagrams travel as WebTransport datagrams until t
 <Code code={lookupExample} lang="ts" />
 
 A name with no records is an answer with no address, not an error. A name outside ASCII goes in its `xn--` form. Lookups need the relay's `DNS` feature, and a query holds at most 512 bytes. The resolver sees the relay's address, not the person's.
+
+## IP tunnels
+
+An IP tunnel carries whole IP packets, for a program that brings its own network stack, such as a virtual machine running in the page. The relay forwards each packet the program sends as a router does, and sends back the packets that arrive for the tunnel's addresses. Only a relay that offers tunnels takes them: its hello sets `Feature.IP`, and on any other relay `session.ipOpen()` rejects with `UNSUPPORTED`. A relay offers them when the program that runs it gives it a [forwarder](/docs/embedding/#ip-tunnels).
+
+`session.ipOpen()` opens a tunnel. The example hands its packets to a network stack in a worker, and sends back the packets the stack gives.
+
+<Code code={ipTunnelExample} lang="ts" />
+
+- `ipv4` and `ipv6` are the addresses the relay gave this end of the tunnel, as text. A tunnel carries at least one of the two families, and the address of a family it does not carry is absent.
+- `mtu` is the largest packet the tunnel carries, at least 1280 bytes.
+- `readable` gives each packet from the relay, one whole IPv4 or IPv6 packet per chunk, with no link header. Each chunk is a `Uint8Array` with a buffer of its own, so it moves to a worker without a copy. The client reads the tunnel only as fast as the page reads `readable`: a page that stops reading makes the relay drop packets.
+- `send(packet)` sends one packet and never waits. It returns `false` when it dropped the packet: an empty one, one longer than `mtu`, one on a tunnel that stopped, or one that found the short queue toward the relay full. A dropped packet is lost, as on a busy link, and the protocols on top send again as they do on any network.
+- `close()` closes the tunnel, and `readable` ends. Cancelling `readable` closes the tunnel too. `closed` resolves with who stopped it: the page, the relay, or the end of the session.
+
+A tunnel has two ends and nothing between them, so it has no gateway address. A stack that wants one makes one up, and sends every packet into the tunnel. The client does not look into a packet. The relay drops, and says nothing about, a packet it does not forward, such as one whose source is not the tunnel's address or whose destination its rules refuse. Packets may be dropped on the way, as on any link, and the tunnel sends nothing again.
 
 ## When the session ends
 

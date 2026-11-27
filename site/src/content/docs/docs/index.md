@@ -11,6 +11,7 @@ A web page can fetch and open WebSockets, but it cannot dial a TCP port, send a 
 - **Use UDP sockets:** bind one, send and receive datagrams, and connect it to a peer.
 - **Listen on a port.** Other computers connect to the relay's address on that port, and each connection arrives in the app.
 - **Look names up.** The relay asks its DNS resolver, so the resolver sees the relay and not the person.
+- **Carry IP packets** through a tunnel, for a program that brings its own network stack, on a relay that offers tunnels.
 
 ## The parts
 
