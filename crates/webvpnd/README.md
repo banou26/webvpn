@@ -32,3 +32,12 @@ level (`info` by default).
 | `WEBVPN_MIN_BIND_PORT` | `1024` | The lowest port a client may bind. Port 0, any free port, always passes. |
 | `WEBVPN_CREDENTIALS` | none | When set, a client must present one of these credentials before it opens a socket. Unset, the relay is open to every client. |
 | `WEBVPN_DRAIN_SECONDS` | `5` | On SIGTERM or SIGINT the relay takes no new session and tells the open ones it is stopping. They keep their sockets this long, then the relay closes them and the program exits with code 0. |
+
+## On macOS
+
+The relay builds, serves and passes its tests on macOS too. A client can see these differences there:
+
+- A UDP socket bound to one address, not to `0.0.0.0` or `::`, comes out of a disconnect, or of a connect while it already has a peer, on another address, since macOS puts the unspecified address back. The relay answers the request, then ends the socket with `Closed` and `ADDRESS_NOT_AVAILABLE`.
+- A connect that fails on a UDP socket that already has a peer leaves the socket with no peer, where Linux keeps the one it had.
+- A TTL of 0 is accepted, where Linux refuses it.
+- `WEBVPN_WATCH_OWN_IPV6` does nothing.
