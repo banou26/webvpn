@@ -37,7 +37,7 @@ level (`info` by default).
 | `WEBVPN_IP_DEVICE` | none | The TUN device IP tunnels go through, which a setup step made for the relay's user (see `ip-tunnel-setup.sh`). Unset, the relay carries no tunnels. Linux only. |
 | `WEBVPN_IP_POOL` | none | The device's IPv4 network, such as `198.18.0.0/28`. Required with `WEBVPN_IP_DEVICE`, refused without it. Linux only. |
 | `WEBVPN_MAX_TUNNEL_PACKETS_PER_SECOND` | `20000` | The packets one IP tunnel takes from its client each second. `0` lifts the ceiling. Linux only. |
-| `WEBVPN_IP_PORTS` | none | The tunnels' public ports, a range written `first-last` such as `20000-29999`, which the setup step maps with the same setting. Each tunnel address holds its block of them (see `ip-tunnel-setup.sh`). Needs an IPv4 address in `WEBVPN_OWN_ADDRESSES`, which tunnels are told as the public one. Unset, tunnels have none. Linux only. |
+| `WEBVPN_IP_PORTS` | none | The tunnels' public ports, a range written `first-last` such as `20000-29999`, which the setup step maps with the same setting. Each tunnel address holds its block of them (see `ip-tunnel-setup.sh`), and a pool with more tunnel addresses than blocks stops the program at start. Needs an IPv4 address in `WEBVPN_OWN_ADDRESSES`, which tunnels are told as the public one. Unset, tunnels have none. Linux only. |
 | `WEBVPN_IP_PORTS_PER_TUNNEL` | `8` | The size of a tunnel address's block of public ports, the same as the setup step's. Linux only. |
 | `WEBVPN_DRAIN_SECONDS` | `5` | On SIGTERM or SIGINT the relay takes no new session and tells the open ones it is stopping. They keep their sockets this long, then the relay closes them and the program exits with code 0. |
 
