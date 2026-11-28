@@ -209,7 +209,7 @@ impl<F: Fn(&str) -> Result<String, VarError>> Vars<F> {
         }
         match (self.get(device)?, self.parsed(pool)?) {
             (Some(device), Some(pool)) => Ok(Some(IpTunnel { device, pool, ports: blocks })),
-            (Some(_), None) => bail!("{device} is set without {pool}: set the device's network, such as 198.18.0.0/16"),
+            (Some(_), None) => bail!("{device} is set without {pool}: set the device's network, such as 198.18.0.0/28"),
             (None, Some(_)) => bail!("{pool} is set without {device}: set both for IP tunnels, or neither"),
             (None, None) if blocks.is_some() => bail!("{ports} is set without {device}"),
             (None, None) => Ok(None),
