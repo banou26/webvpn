@@ -4,7 +4,8 @@
 //! The network: the relay's host routes the pool 198.18.0.0/29 to its TUN device, under `ip-tunnel-setup.sh`, and
 //! reaches "the internet" at 11.0.0.0/24 by a veth pair, its default route, and at 12.0.0.0/24 by a second one. The
 //! peer, at 11.0.0.2 and 12.0.0.2, answers ICMP echoes, answers a UDP datagram on port 7001 with the source address it
-//! saw, writes what reaches UDP port 7002 to a file, accepts TCP on port 7003, and has nothing on UDP port 7004.
+//! saw, writes what reaches UDP port 7002 to a file, accepts TCP on port 7003, and has nothing on UDP port 7004. It
+//! is reached at the private address 10.0.0.2 too. The setup keeps at most 8 connections for one tunnel address.
 #![cfg(target_os = "linux")]
 
 use std::net::{IpAddr, Ipv4Addr};
@@ -12,7 +13,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout, Instant};
@@ -35,6 +36,10 @@ const OUTSIDE: Ipv4Addr = Ipv4Addr::new(11, 0, 0, 1);
 /// The peer and the relay's host on the second interface, which the default route does not take.
 const PEER_2: Ipv4Addr = Ipv4Addr::new(12, 0, 0, 2);
 const OUTSIDE_2: Ipv4Addr = Ipv4Addr::new(12, 0, 0, 1);
+/// A private address outside the pool that the peer holds.
+const PRIVATE: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
+/// The connections the setup keeps for one tunnel address, from `WEBVPN_IP_FLOWS_PER_ADDRESS` in tests/ip-tunnel.sh.
+const FLOWS_PER_ADDRESS: u16 = 8;
 /// The TUN device's own address, the pool's first host.
 const DEVICE: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 1);
 const POOL: [Ipv4Addr; 5] = [
@@ -455,5 +460,43 @@ async fn tunnels_reach_a_real_network_and_take_only_answers() {
     println!(
         "ok 8: a datagram the peer sends unasked does not arrive, and the relay counts the one that passed the host"
     );
+
+    // the peer is there, by the host's own route: only the host's rules keep the tunnel's echo from its reply
+    let host = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await.unwrap();
+    host.send_to(b"who", (PRIVATE, UDP_WHO)).await.unwrap();
+    within(host.recv(&mut [0; 64])).await.expect("the peer is reached at its private address");
+    let before = dropped("refused").await;
+    later.send(&whole(held, PRIVATE, ICMP, &icmp_echo(0x1010, 1, b"private"))).await;
+    later.quiet("an echo reply from a reserved destination").await;
+    assert_eq!(dropped("refused").await, before, "the relay lets private targets through: the host's rules drop it");
+    println!("ok 10: a private destination outside the pool, which the peer answers, is not reached");
     session.close(later).await;
+
+    let sent_from = [me, them, held];
+    let mut fresh = loop {
+        let tunnel = session.tunnel().await;
+        if !sent_from.contains(&tunnel.address) {
+            break tunnel;
+        }
+        session.close(tunnel).await;
+    };
+    let address = fresh.address;
+    for port in 41000..41000 + FLOWS_PER_ADDRESS {
+        fresh.send(&udp_packet((address, port), (PEER, UDP_WHO), b"who")).await;
+        let answer = |p: &Packet| from_peer(p, UDP) && p.ports() == (UDP_WHO, port);
+        fresh.expect("an answer on a flow under the ceiling", answer).await;
+    }
+    for port in 41000 + FLOWS_PER_ADDRESS..41000 + FLOWS_PER_ADDRESS + 2 {
+        fresh.send(&udp_packet((address, port), (PEER, UDP_WHO), b"who")).await;
+    }
+    fresh.quiet("an answer on a flow past the ceiling").await;
+    println!("ok 11: the first {FLOWS_PER_ADDRESS} flows of an address get their answers, the ones past them do not");
+
+    let before = dropped("refused").await;
+    fresh.send(&whole(address, OUTSIDE, ICMP, &icmp_echo(0x1212, 1, b"host"))).await;
+    fresh.send(&whole(address, OUTSIDE_2, TCP, &tcp((address, 40012), (OUTSIDE_2, HTTP_PORT), 1000, 0x02))).await;
+    fresh.quiet("an answer from the relay's host").await;
+    assert_eq!(dropped("refused").await, before, "the relay sends them on: the host's rules drop them");
+    println!("ok 12: an echo request and a TCP SYN to the host's own addresses get no answer");
+    session.close(fresh).await;
 }

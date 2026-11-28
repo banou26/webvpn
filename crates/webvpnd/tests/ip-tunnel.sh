@@ -9,6 +9,12 @@
 # and NAT. From the repository's root:
 #
 #   sh crates/webvpnd/tests/ip-tunnel.sh
+#
+# When a check fails, the script prints the relay's counters, the connections the kernel tracks (with conntrack, when
+# it is installed), the rules with their counters, the neighbours and the peer's sockets. With WEBVPN_TEST_CAPTURE set
+# to a directory, it also captures, with tcpdump, every interface the tunnels' packets cross, into one file each there:
+#
+#   WEBVPN_TEST_CAPTURE=target/ip-tunnel-capture sh crates/webvpnd/tests/ip-tunnel.sh
 
 set -eu
 
@@ -27,6 +33,12 @@ if [ "${WEBVPN_TEST_INSIDE:-}" != 1 ]; then
 	[ -x "$test" ] || { echo "the ip_tunnel test did not build" >&2; exit 1; }
 	rm -rf "$work"
 	mkdir -p "$work"
+	if [ -n "${WEBVPN_TEST_CAPTURE:-}" ]; then
+		command -v tcpdump >/dev/null || { echo "a capture needs tcpdump" >&2; exit 1; }
+		mkdir -p "$WEBVPN_TEST_CAPTURE"
+		WEBVPN_TEST_CAPTURE=$(cd "$WEBVPN_TEST_CAPTURE" && pwd)
+		export WEBVPN_TEST_CAPTURE
+	fi
 	status=0
 	WEBVPN_TEST_INSIDE=1 WEBVPN_TEST_BINARY=$test unshare --map-auto --map-root-user --net --mount --pid --fork \
 		--mount-proc --kill-child sh "$0" || status=$?
@@ -36,8 +48,29 @@ fi
 
 peer=
 relay=
+captures=
+# What the host held when a check failed: the relay's counters, the connections the kernel tracks, the rules with
+# their counters, the neighbours and the peer's sockets.
+evidence() {
+	echo "--- the relay's counters"
+	# the sleep keeps the request's side open: the relay drops a connection whose client closed its half
+	{ printf 'GET /metrics HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n' && sleep 1; } |
+		socat - TCP:127.0.0.1:8080 2>&1 | grep '^webvpn_' || true
+	echo "--- the connections the host tracks"
+	conntrack -L 2>&1 || true
+	echo "--- the host's rules"
+	nft list ruleset 2>&1 || true
+	echo "--- the neighbours of the host, then of the peer"
+	ip neigh 2>&1 || true
+	[ -z "$peer" ] || on_peer ip neigh 2>&1 || true
+	echo "--- the peer's sockets"
+	[ -z "$peer" ] || on_peer ss -uatn 2>&1 || true
+}
 finish() {
 	status=$?
+	[ "$status" = 0 ] || evidence >&2
+	[ -z "$captures" ] || kill $captures 2>/dev/null || true
+	[ -z "$captures" ] || wait $captures 2>/dev/null || true
 	[ -z "$relay" ] || kill "$relay" 2>/dev/null || true
 	sh "$setup" down || status=1
 	if ip link show dev webvpn0 >/dev/null 2>&1 || nft list table inet webvpn_webvpn0 >/dev/null 2>&1; then
@@ -77,6 +110,8 @@ on_peer ip address add 12.0.0.2/24 dev peer1
 on_peer ip link set peer1 up
 # so that the peer can send to a tunnel's address straight, which the setup's rules must drop
 on_peer ip route add 198.18.0.0/29 via 11.0.0.1
+# a private address the peer answers on, which only the setup's reserved destinations keep tunnels from
+on_peer ip address add 10.0.0.2/32 dev lo
 
 : >"$work/sink"
 # shellcheck disable=SC2016
@@ -86,7 +121,27 @@ on_peer socat TCP-LISTEN:7003,fork,reuseaddr SYSTEM:true 2>/dev/null &
 
 # The relay runs as user 1 of the namespace, which owns the device. Its binary is copied to a directory that user
 # can read, on a file system of this namespace only.
-WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=198.18.0.0/29 WEBVPN_IP_USER=1 sh "$setup" up
+WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=198.18.0.0/29 WEBVPN_IP_USER=1 WEBVPN_IP_FLOWS_PER_ADDRESS=8 sh "$setup" up
+
+if [ -n "${WEBVPN_TEST_CAPTURE:-}" ]; then
+	for at in host:webvpn0 host:out0 host:out1 peer:peer0 peer:peer1; do
+		device=${at#*:}
+		log=$work/$device.capture
+		if [ "${at%:*}" = peer ]; then
+			on_peer tcpdump -Z root -U -n -i "$device" -w "$WEBVPN_TEST_CAPTURE/$device.pcap" 2>"$log" &
+		else
+			tcpdump -Z root -U -n -i "$device" -w "$WEBVPN_TEST_CAPTURE/$device.pcap" 2>"$log" &
+		fi
+		captures="$captures $!"
+		tries=0
+		until grep -q listening "$log" 2>/dev/null; do
+			tries=$((tries + 1))
+			[ "$tries" -lt 50 ] || { echo "the capture on $device did not start" >&2; exit 1; }
+			sleep 0.1
+		done
+	done
+fi
+
 mkdir -p "$work/run"
 mount -t tmpfs tmpfs "$work/run"
 cp "$root/target/debug/webvpnd" "$work/run/webvpnd"
