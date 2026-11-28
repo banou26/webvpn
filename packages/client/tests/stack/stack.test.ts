@@ -551,6 +551,24 @@ describe('the tunnel ending', () => {
     expect(await outcome(client.udpBind(ANY))).toMatchObject({ message: 'the tunnel closed' })
   })
 
+  it('ends what waits on it: a connect, a lookup, a write that waits for room and a UDP read', async () => {
+    const { client, site, pipe, clientTunnel } = await internet({ client: { tcpSendBuffer: 16 * 1024 } })
+    const { socket } = await connect(client, site)
+    pipe.drop = () => true
+    // what is still pending a second later, as nothing else ends it that soon
+    const settled = <T>(promise: Promise<T>) => Promise.race([outcome(promise), wait(1000).then(() => 'pending')])
+    const write = settled(socket.writable.getWriter().write(pattern(1024 * 1024)))
+    const read = settled((await client.udpBind(ANY)).readable.getReader().read())
+    const connecting = settled(client.tcpConnect(at(SITE, 80)))
+    const lookup = settled(client.lookup(dnsQuery('example.test', 'A')))
+    await wait(100)
+    clientTunnel.end({ by: 'relay', code: ErrorCode.CAPACITY })
+    expect(await write).toMatchObject({ message: 'the tunnel closed' })
+    expect(await read).toEqual({ done: true, value: undefined })
+    expect(await connecting).toMatchObject({ message: 'the tunnel closed' })
+    expect(await lookup).toMatchObject({ message: 'the tunnel closed' })
+  })
+
   it('close() closes the tunnel, and so every socket', async () => {
     const { client, site } = await internet()
     const { socket } = await connect(client, site)
