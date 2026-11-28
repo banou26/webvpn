@@ -14,6 +14,8 @@ const QUEUED_PACKETS: usize = 512;
 // a socket the page let go of keeps its connection until it ends in order, at most this long
 const RELEASED_MS: i64 = 60_000;
 const KEEP_ALIVE_DEFAULT_SECONDS: u64 = 7200;
+// a connection a listener took that the peer does not finish opening gives its place in the backlog back this soon
+const HANDSHAKE_MS: u64 = 10_000;
 const UDP_BYTES_PER_SLOT: usize = 256;
 const UDP_MIN_SLOTS: usize = 16;
 const UNSEEN: (u8, usize, usize) = (u8::MAX, 0, 0);
@@ -286,6 +288,8 @@ impl Listener {
         let opening = self.waiting.len() - listening + connected.len() + self.accepted.len();
         for _ in listening..self.backlog.saturating_sub(opening) {
             let mut socket = tcp_socket(self.buffers);
+            // counts from the SYN, which a peer sending it again does not move; cleared once the connection opened
+            socket.set_timeout(Some(Duration::from_millis(HANDSHAKE_MS)));
             if socket.listen(self.port).is_ok() {
                 self.waiting.push(sockets.add(socket));
             }
@@ -392,7 +396,8 @@ impl Stack {
 
     /// Listens on `port` of every address of the stack. Up to `backlog` connections may be opening or waiting for
     /// `tcp_accept` at once, each on a socket of its own; one more is refused with a reset. A connection is handed
-    /// over once it is established. Fails with `ADDRESS_IN_USE` when the port has a listener, and with
+    /// over once it is established, and one the peer has not finished opening 10 seconds after its SYN is reset and
+    /// gives its place back. Fails with `ADDRESS_IN_USE` when the port has a listener, and with
     /// `ADDRESS_NOT_AVAILABLE` for port 0.
     pub fn tcp_listen(&mut self, port: u16, backlog: usize, buffers: Buffers) -> Result<u32> {
         if port == 0 {
@@ -750,7 +755,10 @@ impl Stack {
             }
         }
         for (listener_id, handle) in accepted {
-            let state = self.sockets.get::<tcp::Socket>(handle).state();
+            // smoltcp's timeout also ends a connection that is only idle
+            let socket = self.sockets.get_mut::<tcp::Socket>(handle);
+            socket.set_timeout(None);
+            let state = socket.state();
             let tcp = Tcp {
                 handle,
                 error: None,

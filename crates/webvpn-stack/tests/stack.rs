@@ -317,6 +317,51 @@ fn a_listener_refuses_what_its_backlog_has_no_room_for_until_one_is_accepted() {
 }
 
 #[test]
+fn a_connection_nobody_finishes_opening_gives_its_place_in_the_backlog_back() {
+    use std::{cell::Cell, rc::Rc};
+    let answering = Rc::new(Cell::new(false));
+    let flag = answering.clone();
+    // a peer that sends SYNs, never answers the SYN-ACKs and never resets
+    let mut net = Net::with_link(move |toward, packet| match toward {
+        Toward::Site if !flag.get() => Fate::Drop,
+        Toward::Client if packet.get(33).is_some_and(|flags| flags & 0x04 != 0) => Fate::Drop,
+        _ => Fate::After(1),
+    });
+    net.client.tcp_listen(FIRST_PORT, 2, BUFFERS).unwrap();
+    for _ in 0..2 {
+        net.site.tcp_connect(SocketAddr::new(CLIENT.into(), FIRST_PORT), BUFFERS).unwrap();
+    }
+    net.until(11_000, |_| false);
+    answering.set(true);
+    let late = net.site.tcp_connect(SocketAddr::new(CLIENT.into(), FIRST_PORT), BUFFERS).unwrap();
+    assert!(net.until(1000, |net| net.site.tcp_state(late) != Some(State::SynSent)));
+    net.until(10, |_| false);
+    assert_eq!((net.site.tcp_state(late), net.site.tcp_error(late)), (Some(State::Established), None));
+}
+
+#[test]
+fn an_idle_connection_without_keep_alive_lasts() {
+    let mut net = Net::new();
+    let listener = net.client.tcp_listen(FIRST_PORT, 2, BUFFERS).unwrap();
+    let dialed = net.site.tcp_connect(SocketAddr::new(CLIENT.into(), FIRST_PORT), BUFFERS).unwrap();
+    let mut accepted = None;
+    assert!(net.until(1000, |net| {
+        accepted = net.client.tcp_accept(listener);
+        accepted.is_some()
+    }));
+    let accepted = accepted.unwrap();
+    // three hours in steps of a second
+    for _ in 0..10_800 {
+        net.tick();
+        net.now += 999;
+    }
+    let states = (net.client.tcp_state(accepted), net.site.tcp_state(dialed));
+    assert_eq!(states, (Some(State::Established), Some(State::Established)));
+    net.site.tcp_send(dialed, b"late").unwrap();
+    assert!(net.until(100, |net| net.client.tcp_recv(accepted, &mut [0; 4]) == Some(4)));
+}
+
+#[test]
 fn a_released_listener_resets_what_nobody_accepted() {
     let mut net = Net::new();
     let listener = net.client.tcp_listen(FIRST_PORT, 2, BUFFERS).unwrap();
