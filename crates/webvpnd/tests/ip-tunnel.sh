@@ -114,8 +114,6 @@ on_peer ip route add 198.18.0.0/29 via 11.0.0.1
 on_peer ip address add 10.0.0.2/32 dev lo
 
 : >"$work/sink"
-# shellcheck disable=SC2016
-on_peer socat UDP-RECVFROM:7001,fork SYSTEM:'printf %s "$SOCAT_PEERADDR"' 2>/dev/null &
 on_peer socat -u UDP-RECV:7002 OPEN:"$work/sink",append 2>/dev/null &
 on_peer socat TCP-LISTEN:7003,fork,reuseaddr SYSTEM:true 2>/dev/null &
 

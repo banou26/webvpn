@@ -3,12 +3,17 @@
 //!
 //! The network: the relay's host routes the pool 198.18.0.0/29 to its TUN device, under `ip-tunnel-setup.sh`, and
 //! reaches "the internet" at 11.0.0.0/24 by a veth pair, its default route, and at 12.0.0.0/24 by a second one. The
-//! peer, at 11.0.0.2 and 12.0.0.2, answers ICMP echoes, answers a UDP datagram on port 7001 with the source address it
-//! saw, writes what reaches UDP port 7002 to a file, accepts TCP on port 7003, and has nothing on UDP port 7004. It
-//! is reached at the private address 10.0.0.2 too. The setup keeps at most 8 connections for one tunnel address.
+//! peer, at 11.0.0.2 and 12.0.0.2, answers ICMP echoes, writes what reaches UDP port 7002 to a file, accepts TCP on
+//! port 7003, and has nothing on UDP port 7004. It is reached at the private address 10.0.0.2 too. The setup keeps at
+//! most 8 connections for one tunnel address.
+//!
+//! This test is the peer's UDP port 7001 itself, from a socket it makes in the peer's namespace, and answers each
+//! datagram there with the source address it came from. socat's forking responder left a datagram that closely
+//! followed another without an answer, about once in a hundred.
 #![cfg(target_os = "linux")]
 
 use std::net::{IpAddr, Ipv4Addr};
+use std::os::fd::AsRawFd;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -93,6 +98,32 @@ async fn on_peer(script: &str) {
         .stdin(Stdio::null())
         .status();
     assert!(within(status).await.unwrap().success(), "{script} failed on the peer");
+}
+
+/// A UDP socket on `port` in the peer's network namespace. A socket stays in the namespace it was made in, so only
+/// the thread that makes it moves there.
+fn peer_socket(port: u16) -> UdpSocket {
+    let made = std::thread::spawn(move || {
+        let namespace = std::fs::File::open(env("WEBVPN_TEST_PEER_NETNS")).unwrap();
+        // SAFETY: `namespace` is an open file, and the call moves this thread only.
+        let moved = unsafe { libc::setns(namespace.as_raw_fd(), libc::CLONE_NEWNET) };
+        assert_eq!(moved, 0, "the test runs as root of both namespaces");
+        let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).unwrap();
+        socket.set_nonblocking(true).unwrap();
+        socket
+    });
+    UdpSocket::from_std(made.join().unwrap()).unwrap()
+}
+
+/// Answers each datagram on the peer's [`UDP_WHO`] with the source address it came from.
+fn answer_who() {
+    let socket = peer_socket(UDP_WHO);
+    tokio::spawn(async move {
+        let mut buf = [0; 64];
+        while let Ok((_, from)) = socket.recv_from(&mut buf).await {
+            let _ = socket.send_to(from.ip().to_string().as_bytes(), from).await;
+        }
+    });
 }
 
 /// A session with the relay, over WebTransport on its self-signed certificate.
@@ -352,6 +383,7 @@ fn from_peer(packet: &Packet, protocol: u8) -> bool {
 #[tokio::test]
 #[ignore = "needs the network tests/ip-tunnel.sh builds"]
 async fn tunnels_reach_a_real_network_and_take_only_answers() {
+    answer_who();
     let mut session = Session::open().await;
     let mut first = session.tunnel().await;
     let me = first.address;
