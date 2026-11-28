@@ -243,6 +243,29 @@ describe('listening over a tunnel', () => {
     expect(await dialed.readable.getReader().read()).toEqual({ done: true, value: undefined })
     expect(await outcome(site.tcpConnect(listener.local))).toMatchObject({ code: ErrorCode.CONNECTION_REFUSED })
   })
+
+  it('refuses what its backlog has no room for while nobody takes a connection, until one is taken', async () => {
+    const { client, site } = await internet({ client: { backlog: 2 } })
+    const listener = await client.tcpListen(ANY)
+    await site.tcpConnect(listener.local)
+    await site.tcpConnect(listener.local)
+    expect(await outcome(site.tcpConnect(listener.local))).toMatchObject({ code: ErrorCode.CONNECTION_REFUSED })
+    await accept(listener)
+    await site.tcpConnect(listener.local)
+  })
+
+  it('closes a connection that came after its connections were cancelled during a read, once it stops', async () => {
+    const { client, site } = await internet()
+    const listener = await client.tcpListen(ANY)
+    const reader = listener.connections.getReader()
+    const read = reader.read()
+    await reader.cancel()
+    expect(await read).toEqual({ done: true, value: undefined })
+    const dialed = await site.tcpConnect(listener.local)
+    await wait(50)
+    await listener.close()
+    expect(await dialed.readable.getReader().read()).toEqual({ done: true, value: undefined })
+  })
 })
 
 describe('UDP over a tunnel', () => {
