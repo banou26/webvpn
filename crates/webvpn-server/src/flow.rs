@@ -54,7 +54,8 @@ struct Entry {
     seen: Instant,
     answered: bool,
     closing: bool,
-    /// Whether the tunnel sent a packet of it: a full table pushes out the flows only their peers sent on first.
+    /// Whether the tunnel sent a packet of it other than a RST or an ICMP error: a full table pushes out first the
+    /// flows only their peers sent on or that the tunnel only refused.
     sent: bool,
 }
 
@@ -104,13 +105,15 @@ impl Flows {
 
     /// Records or refreshes the flow of `sent`, a packet from the client that passed every check. A fragment after the
     /// first makes no flow. A new flow that finds the table full first removes the flows past their life and, if it is
-    /// still full, an eighth of the table at once: first the flows only their peers sent on, then the ones nearest the
-    /// end of their life.
+    /// still full, an eighth of the table at once: first the flows only their peers sent on or that the tunnel only
+    /// refused, then the ones silent longest, an open TCP connection last.
     pub(crate) fn sent(&mut self, sent: &Header, now: Instant) {
         let Some(Names::Flow(flow)) = names(sent, true) else { return };
         let flags = tcp_flags(sent);
         let opens = flow.protocol == TCP && flags & (TCP_SYN | TCP_ACK) == TCP_SYN;
-        self.begin(flow, opens, flags, now).sent = true;
+        // a RST or an ICMP error is the stack refusing a flow, not using it, and a flow it used before stays used
+        let refused = flags & TCP_RST != 0 || is_error(sent);
+        self.begin(flow, opens, flags, now).sent |= !refused;
     }
 
     /// Records `flow`, or refreshes it, starts it over when `opens` or when it is past its life, and gives its entry.
@@ -193,17 +196,20 @@ impl Flows {
     }
 
     /// Removes the flows past their life and, if the table is still full, more until an eighth of it is free: first
-    /// the flows only their peers sent on, since the next packet to a public port begins its flow again, then the ones
-    /// nearest the end of their life, so that short flows go before an open TCP connection. A sweep costs a pass over
-    /// the table, so freeing an eighth at once keeps a tunnel that opens a new flow with every packet at a few steps a
+    /// the flows only their peers sent on or that the tunnel only refused, since the next packet to a public port
+    /// begins its flow again, then the ones silent longest, an open TCP connection last. A sweep costs a pass over the
+    /// table, so freeing an eighth at once keeps a tunnel that opens a new flow with every packet at a few steps a
     /// packet on average.
     fn make_room(&mut self, now: Instant) {
         self.flows.retain(|flow, entry| entry.until(flow.protocol) > now);
         let keep = self.capacity - (self.capacity / 8).max(1);
         if self.flows.len() > keep {
             let pushed = self.flows.len() - keep;
-            let mut by_rank: Vec<_> =
-                self.flows.iter().map(|(flow, entry)| ((entry.sent, entry.until(flow.protocol)), *flow)).collect();
+            let mut by_rank: Vec<_> = self
+                .flows
+                .iter()
+                .map(|(flow, entry)| ((entry.sent, entry.life(flow.protocol) == TCP_OPEN_LIFE, entry.seen), *flow))
+                .collect();
             by_rank.select_nth_unstable_by_key(pushed - 1, |&(rank, _)| rank);
             for (_, flow) in &by_rank[..pushed] {
                 self.flows.remove(flow);
@@ -622,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn a_full_table_pushes_out_the_flows_nearest_the_end_of_their_life_not_an_open_tcp_connection() {
+    fn a_full_table_pushes_out_the_flows_silent_longest_not_an_open_tcp_connection() {
         let mut table = Table::new(8);
         open_tcp(&mut table);
         // the tunnel's own short flows, such as DNS queries, each newer than the connection's last packet
@@ -630,7 +636,7 @@ mod tests {
             table.send_at(MINUTE + u32::from(port) * MS, &up(UDP, &ports(40001, port, 0)));
         }
         assert_eq!(table.admit_at(2 * MINUTE, &down(TCP, &ports(443, 40000, TCP_ACK))), Ok(()));
-        assert_eq!(table.admit_at(2 * MINUTE, &down(UDP, &ports(1, 40001, 0))), UNASKED, "flow 1 was nearest its end");
+        assert_eq!(table.admit_at(2 * MINUTE, &down(UDP, &ports(1, 40001, 0))), UNASKED, "flow 1 was silent longest");
     }
 
     #[test]
@@ -662,6 +668,41 @@ mod tests {
         }
         assert_eq!(table.admit_at(2 * MINUTE, &down(TCP, &ports(443, 40000, TCP_ACK))), Ok(()));
         assert_eq!(table.admit_at(2 * MINUTE, &down(UDP, &ports(53, 40001, 0))), Ok(()));
+    }
+
+    #[test]
+    fn a_full_table_pushes_out_the_flows_the_tunnel_sent_only_errors_on_before_its_own_flows() {
+        let mut table = Table::public(8, 30000, 8);
+        open_tcp(&mut table);
+        table.send(&up(UDP, &ports(40001, 53, 0)));
+        // a stack answers a datagram to a port nothing listens on with port unreachable, here from many addresses
+        for host in 1..=8 {
+            let at = MINUTE + u32::from(host) * MS;
+            let from = Ipv4Addr::new(198, 51, 100, host);
+            let datagram = v4(from, CLIENT_V4, UDP, 0, &[], &ports(5000, 30000, 0));
+            assert_eq!(table.admit_at(at, &datagram), Ok(()));
+            table.send_at(at, &v4(CLIENT_V4, from, ICMP, 0, &[], &icmp(3, 0, &datagram[..28])));
+        }
+        assert_eq!(table.admit_at(2 * MINUTE, &down(TCP, &ports(443, 40000, TCP_ACK))), Ok(()));
+        assert_eq!(table.admit_at(2 * MINUTE, &down(UDP, &ports(53, 40001, 0))), Ok(()));
+    }
+
+    #[test]
+    fn a_full_table_keeps_a_short_flow_active_a_moment_ago_over_quieter_udp_flows() {
+        let at = Duration::from_secs(10);
+        let gre = (up(GRE, &[0; 8]), down(GRE, &[1; 8]));
+        let syn = (up(TCP, &ports(40000, 443, TCP_SYN)), down(TCP, &ports(443, 40000, TCP_SYN | TCP_ACK)));
+        for (sent, answer) in [gre, syn] {
+            let mut table = Table::new(8);
+            for port in 1..=7 {
+                table.send_at(u32::from(port) * MS, &up(UDP, &ports(40001, port, 0)));
+            }
+            table.send_at(at, &sent);
+            table.send_at(at + MS, &up(UDP, &ports(40001, 8, 0)));
+            assert_eq!(table.admit_at(at + 100 * MS, &answer), Ok(()));
+            let first = down(UDP, &ports(1, 40001, 0));
+            assert_eq!(table.admit_at(at + 100 * MS, &first), UNASKED, "flow 1 was silent longest");
+        }
     }
 
     #[test]
