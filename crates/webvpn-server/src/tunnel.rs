@@ -850,6 +850,8 @@ mod tests {
         assert_eq!(harness.control.next().await, Some(closed));
         harness.forwarder.holds(0).await;
         harness.permits(0).await;
+        // no half close: the relay's side ended with the tunnel
+        assert_eq!(read_frame(&mut tunnel.recv).await, None);
     }
 
     #[tokio::test]

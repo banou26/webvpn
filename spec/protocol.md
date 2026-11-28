@@ -234,6 +234,10 @@ the client's side does not. Then each side repeats:
 A packet is one whole IPv4 or IPv6 packet, with no link header in front of it. A tunnel has two ends and nothing
 between them: there is no gateway address to learn, and a client whose stack wants one makes one up.
 
+The stream lasts as long as the tunnel, and has no half close. A client that finishes or resets its side ends the
+tunnel, which the relay tells with `Closed`. The relay ends its side only once the tunnel ended, and after `IpClose`
+ends it as after `TcpClose`: over WebTransport with a reset of code 0, over the mux with `FIN`.
+
 - **From the client.** The relay forwards a packet as a router does. It drops, and says nothing about, a packet that
   is not IPv4 or IPv6, whose header is cut short, whose own length is not `length`, that is longer than `mtu`, whose
   source is not an address the relay gave this tunnel, that is an ICMP error that does not quote a packet sent to that
@@ -327,7 +331,7 @@ For a client without WebTransport, one WebSocket carries the same streams. Every
 - A client's `RESET` ends both sides of the stream.
 - A UDP socket has one stream toward the client, and its datagrams toward the relay travel as `DATAGRAM` frames. A
   `DATAGRAM` frame's stream is 0.
-- An IP tunnel's stream carries packets both ways, as a TCP socket's carries bytes.
+- An IP tunnel's stream carries packets both ways, and has no half close: the client's `FIN` ends the tunnel.
 - A receiver ignores a message shorter than five bytes and a kind it does not know.
 
 ## Limits
