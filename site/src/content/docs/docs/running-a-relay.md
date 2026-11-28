@@ -43,6 +43,8 @@ Both carriers bind `WEBVPN_ADDRESS`, `0.0.0.0` by default. A port set to `0` is 
 
 A WebTransport or HTTP port that cannot be taken stops the program at start. A WebSocket port that cannot be taken is logged as an error, and the relay serves on WebTransport alone.
 
+The relay asks the system for a receive buffer of 8 MiB on its WebTransport socket, where the packets of every client wait until it reads them. Linux gives a program no more than `net.core.rmem_max`, about 208 KiB on many hosts, and a client whose own network stack rides an IP tunnel sends in bursts that such a buffer loses. Where the relay carries IP tunnels, raise it: `sysctl -w net.core.rmem_max=8388608`.
+
 ## The certificate
 
 Both carriers serve the same certificate.
