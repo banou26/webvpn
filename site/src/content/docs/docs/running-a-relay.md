@@ -175,6 +175,7 @@ It takes `WEBVPN_IP_DEVICE` (`webvpn0` by default), `WEBVPN_IP_POOL`, `WEBVPN_IP
    - IPv6 packets from the device dropped, until tunnels have IPv6 addresses;
    - packets from the device to private, loopback, link-local, shared, multicast and reserved addresses dropped, the same list as the relay's own rule, as a second layer under it;
    - a ceiling on the connections the kernel tracks for one tunnel address, `WEBVPN_IP_FLOWS_PER_ADDRESS`, past which a new one is dropped;
+   - packets from the device that connection tracking calls invalid dropped, such as a TCP segment outside its connection's window: no address translation applies to them, and they would leave with the network's own address as their source;
    - every other packet from the device accepted;
    - packets toward the device accepted only when they belong to, or relate to, a connection that began from the device, or with `WEBVPN_IP_PORTS`, a new connection to a public port that the rule below sent there, which counts toward `WEBVPN_IP_FLOWS_PER_ADDRESS` as the tunnel's own connections do; every other packet toward the device dropped;
    - with `WEBVPN_IP_PORTS`, a TCP or UDP packet that does not come from the device, to one of the host's own addresses on a public port, sent to the tunnel address that holds the port, on the same port;
