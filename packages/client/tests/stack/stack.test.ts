@@ -411,6 +411,13 @@ describe('listening over a tunnel', () => {
     await site.tcpConnect(listener.local)
   })
 
+  it('holds 8 connections nobody took by default and refuses a 9th', async () => {
+    const { client, site } = await internet()
+    const listener = await client.tcpListen(ANY)
+    for (let count = 0; count < 8; count++) await site.tcpConnect(listener.local)
+    expect(await outcome(site.tcpConnect(listener.local))).toMatchObject({ code: ErrorCode.CONNECTION_REFUSED })
+  })
+
   it('closes a connection that came after its connections were cancelled during a read, once it stops', async () => {
     const { client, site } = await internet()
     const listener = await client.tcpListen(ANY)
