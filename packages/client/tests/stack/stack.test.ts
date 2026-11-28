@@ -11,6 +11,7 @@ import {
   at,
   CLIENT,
   CLIENT_PUBLIC,
+  CLIENT_V6,
   dnsAnswer,
   fakeTunnel,
   FIRST_PORT,
@@ -18,6 +19,7 @@ import {
   pattern,
   readAll,
   SITE,
+  SITE_V6,
   udpPacket,
   unreachable,
 } from './internet'
@@ -96,9 +98,23 @@ describe('TCP over a tunnel', () => {
     expect(count()).toBe(1)
   })
 
+  it('connects and carries bytes over IPv6, and a reset from the peer reads as a reset', async () => {
+    const { client, site } = await internet()
+    const listener = await site.tcpListen(at('::', 80))
+    const socket = await client.tcpConnect(at(SITE_V6, 80))
+    const peer = await accept(listener)
+    expect(named(socket.remote)).toBe(`${SITE_V6}:80`)
+    expect(named(socket.local)).toBe(`${CLIENT_V6}:${socket.local.port}`)
+    expect(named(peer.remote)).toBe(named(socket.local))
+    await socket.writable.getWriter().write(bytes('over IPv6'))
+    expect(text((await peer.readable.getReader().read()).value!)).toBe('over IPv6')
+    const read = outcome(socket.readable.getReader().read())
+    await peer.reset()
+    expect(await read).toMatchObject({ code: ErrorCode.CONNECTION_RESET })
+  })
+
   it('connects to a name by its first AAAA record on a tunnel without IPv4', async () => {
-    const SITE_V6 = '2001:db8::1'
-    const client = fakeTunnel({ id: 1, ipv6: 'fd00::2', mtu: 1500, firstPort: FIRST_PORT, ports: 0 }, (packet) => {
+    const client = fakeTunnel({ id: 1, ipv6: CLIENT_V6, mtu: 1500, firstPort: FIRST_PORT, ports: 0 }, (packet) => {
       site.deliver(packet)
       return true
     })
@@ -123,7 +139,7 @@ describe('TCP over a tunnel', () => {
     const listener = await siteStack.tcpListen(at('::', 443))
     const socket = await clientStack.tcpConnect({ name: 'example.test', port: 443 })
     expect(named(socket.remote)).toBe(`${SITE_V6}:443`)
-    expect(named((await accept(listener)).remote)).toBe(`fd00::2:${socket.local.port}`)
+    expect(named((await accept(listener)).remote)).toBe(`${CLIENT_V6}:${socket.local.port}`)
     expect(types).toEqual([28])
   })
 
@@ -374,6 +390,16 @@ describe('UDP over a tunnel', () => {
     const stranger = await site.udpBind(ANY)
     await stranger.writable.getWriter().write({ remote: socket.local, data: bytes('unasked') })
     expect(text((await next(socket)).data)).toBe('unasked')
+  })
+
+  it('carries datagrams over IPv6', async () => {
+    const { client, site } = await internet()
+    const seen = await echo(site)
+    const socket = await client.udpBind(at('::', 0))
+    await socket.writable.getWriter().write({ remote: at(SITE_V6, 7), data: bytes('ping') })
+    const { remote, data } = await next(socket)
+    expect([named(remote), text(data)]).toEqual([`${SITE_V6}:7`, 'ping'])
+    expect(seen).toEqual([`${CLIENT_V6}:${socket.local.port}`])
   })
 
   it('binds a private port once every public one is taken, and says so in its address', async () => {
