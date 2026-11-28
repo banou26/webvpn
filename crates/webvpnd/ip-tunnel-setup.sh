@@ -6,7 +6,8 @@
 #   ip-tunnel-setup.sh up      makes the device and its rules
 #   ip-tunnel-setup.sh down    removes them
 #
-# Both are safe to run again. Set with variables:
+# Both are safe to run again. Run down only with the relay stopped: a relay whose device went away refuses every new
+# tunnel until it restarts, even once up made the device again. Set with variables:
 #
 #   WEBVPN_IP_DEVICE   the TUN device's name, as the relay is given it. Default: webvpn0
 #   WEBVPN_IP_POOL     the device's IPv4 network, as the relay is given it, such as 198.18.0.0/16. Required for up.

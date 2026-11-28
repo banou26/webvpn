@@ -182,7 +182,7 @@ It takes `WEBVPN_IP_DEVICE` (`webvpn0` by default), `WEBVPN_IP_POOL`, `WEBVPN_IP
    - nothing from the device accepted for the host itself;
    - the network's addresses translated to the host's where packets leave by any other interface.
 
-`down` removes that table and the device, and leaves forwarding on, since other things on the host may need it. `up` refuses a range of public ports that overlaps the host's local port range (`/proc/sys/net/ipv4/ip_local_port_range`), and then changes nothing.
+`down` removes that table and the device, and leaves forwarding on, since other things on the host may need it. Run it only with the relay stopped: a relay whose device is removed ends its tunnels, logs `the TUN device failed`, and refuses new ones until it restarts, even once `up` made the device again. `up` refuses a range of public ports that overlaps the host's local port range (`/proc/sys/net/ipv4/ip_local_port_range`), and then changes nothing.
 
 The script needs the right to change the network (`CAP_NET_ADMIN`) and `/dev/net/tun`, and to turn forwarding on, the right to write the system's settings. On a host whose forwarding is already on, as on a Kubernetes node, a container with `CAP_NET_ADMIN` alone and `/dev/net/tun` mounted can run it. The relay's own container then needs only `/dev/net/tun` mounted and no capability.
 
