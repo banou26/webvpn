@@ -208,6 +208,13 @@ for set in flows inbound; do
 done
 echo "ok: each count's set holds twice the tunnel addresses"
 
+if ! ip link show dev webvpn0 | grep -q ' qlen 4096$'; then
+	ip link show dev webvpn0 >&2
+	echo "the device queues too few packets" >&2
+	exit 1
+fi
+echo "ok: the device queues 4096 packets toward the relay"
+
 if [ -n "${WEBVPN_TEST_CAPTURE:-}" ]; then
 	for at in host:webvpn0 host:out0 host:out1 peer:peer0 peer:peer1; do
 		device=${at#*:}

@@ -105,7 +105,10 @@ a lower ceiling or no public ports, or raise nf_conntrack_max"
 	ip -4 -o address show dev "$device" | while read -r _ _ _ held _; do
 		[ "$held" = "$address/$prefix" ] || ip address delete "$held" dev "$device"
 	done
-	ip link set dev "$device" mtu "$mtu" up
+	# Every tunnel's packets from the internet wait in the device's queue until the relay reads them. The kernel's
+	# 500 lost the bursts servers send toward a busy tunnel: up to 460 packets in 16 s of downloads (measured
+	# 2026-11-28), which the relay never sees to count.
+	ip link set dev "$device" mtu "$mtu" txqueuelen 4096 up
 	# only when it is off: where it is on already, the step then needs no more than the right to change the network
 	[ "$(cat /proc/sys/net/ipv4/ip_forward)" = 1 ] || echo 1 >/proc/sys/net/ipv4/ip_forward
 
