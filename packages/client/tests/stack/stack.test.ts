@@ -2,7 +2,7 @@ import type { TcpListener, TcpSocket, UdpSocket } from '../../src'
 import type { Stack } from '../../src/stack'
 import type { Pipe } from './internet'
 
-import { describe, expect, it, vi } from 'vite-plus/test'
+import { afterEach, describe, expect, it, vi } from 'vite-plus/test'
 
 import { formatIp } from '../../src/address'
 import { dnsAddresses, dnsQuery } from '../../src/dns'
@@ -705,5 +705,78 @@ describe('the tunnel ending', () => {
     } finally {
       vi.restoreAllMocks()
     }
+  })
+
+  describe('a trap in a close', () => {
+    // what is still pending half a second later, as nothing else ends it that soon
+    const settled = <T>(promise: Promise<T>) => Promise.race([outcome(promise), wait(500).then(() => 'pending')])
+
+    /** Makes the module of each stack opened from now on trap once, at the next call of the export it is given. */
+    const trapping = () => {
+      const instantiate = WebAssembly.instantiate.bind(WebAssembly)
+      let next: string | undefined
+      vi.spyOn(WebAssembly, 'instantiate').mockImplementation((async (module: WebAssembly.Module) => {
+        const { exports } = await instantiate(module)
+        return {
+          exports: Object.fromEntries(Object.entries(exports).map(([name, value]) => [
+            name,
+            typeof value !== 'function' ? value : (...args: number[]) => {
+              if (name !== next) return value(...args)
+              next = undefined
+              throw new WebAssembly.RuntimeError('unreachable')
+            },
+          ])),
+        }
+      }) as never)
+      return (name: string) => { next = name }
+    }
+
+    const lone = () => openStack(fakeTunnel(
+      { id: 1, ipv4: CLIENT, mtu: 1500, publicIpv4: CLIENT_PUBLIC, firstPort: FIRST_PORT, ports: 8 },
+      () => true,
+    ).tunnel)
+
+    afterEach(() => {
+      vi.restoreAllMocks()
+    })
+
+    for (const name of ['tcp_accept', 'stack_release']) {
+      it(`ends a listener's waiting read and its closed when ${name} traps`, async () => {
+        const trap = trapping()
+        const listener = await (await lone()).tcpListen(ANY)
+        const read = listener.connections.getReader().read()
+        await wait(20)
+        trap(name)
+        expect(await settled(listener.close())).toMatchObject({ message: 'the stack failed' })
+        expect(await settled(read)).toEqual({ done: true, value: undefined })
+        expect(await settled(listener.closed)).toEqual({ by: 'client' })
+      })
+    }
+
+    it('ends a UDP socket\'s waiting read and its closed when stack_release traps', async () => {
+      const trap = trapping()
+      const udp = await (await lone()).udpBind(ANY)
+      const read = udp.readable.getReader().read()
+      await wait(20)
+      trap('stack_release')
+      expect(await settled(udp.close())).toMatchObject({ message: 'the stack failed' })
+      expect(await settled(read)).toEqual({ done: true, value: undefined })
+      expect(await settled(udp.closed)).toEqual({ by: 'client' })
+    })
+
+    it('ends a TCP socket\'s waiting read and write when stack_release traps', async () => {
+      const trap = trapping()
+      const { client, site } = await internet()
+      const { socket } = await connect(client, site)
+      const read = socket.readable.getReader().read()
+      // the peer never reads, so the write waits for room once both buffers are full
+      const write = socket.writable.getWriter().write(new Uint8Array(4 * 1024 * 1024))
+      await wait(300)
+      expect(await settled(write)).toBe('pending')
+      trap('stack_release')
+      expect(await settled(socket.close())).toMatchObject({ message: 'the stack failed' })
+      expect(await settled(read)).toEqual({ done: true, value: undefined })
+      expect(await settled(write)).toMatchObject({ message: 'the stack failed' })
+    })
   })
 })
