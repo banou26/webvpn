@@ -121,9 +121,11 @@ a lower ceiling or no public ports, or raise nf_conntrack_max"
 		}
 	}
 
+	# room for two elements a key: an element whose count fell to 0 takes room until the kernel frees it, and a full set
+	# lets a new connection pass uncounted
 	set flows {
 		type ipv4_addr
-		size $addresses
+		size $((2 * addresses))
 		flags dynamic
 	}
 
@@ -236,9 +238,10 @@ pool smaller or the range larger, so that every address holds a block"
 		elements = {${elements%,} }
 	}
 
+	# as flows: twice the keys
 	set inbound {
 		type ipv4_addr
-		size $holders
+		size $((2 * holders))
 		flags dynamic
 	}
 "

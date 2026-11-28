@@ -197,6 +197,17 @@ WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=13.0.0.0/29 WEBVPN_IP_USER=1 WEBVPN_IP_F
 	{ echo "running up again with the same values loaded the table again" >&2; exit 1; }
 echo "ok: running up again with the same values keeps the table"
 
+# A full set lets a new connection pass uncounted, and an element whose count fell to 0 takes room until the kernel
+# frees it. The pool has 5 tunnel addresses, and each holds public ports.
+for set in flows inbound; do
+	nft list set inet webvpn_webvpn0 "$set" | grep -qw 'size 10' || {
+		nft list set inet webvpn_webvpn0 "$set" >&2
+		echo "the $set set holds less than twice the pool's tunnel addresses" >&2
+		exit 1
+	}
+done
+echo "ok: each count's set holds twice the tunnel addresses"
+
 if [ -n "${WEBVPN_TEST_CAPTURE:-}" ]; then
 	for at in host:webvpn0 host:out0 host:out1 peer:peer0 peer:peer1; do
 		device=${at#*:}
