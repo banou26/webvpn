@@ -18,14 +18,17 @@
 #                      device with no owner is open to every local user.
 #   WEBVPN_IP_MTU      the device's MTU, at least 1280. Default: 1500
 #   WEBVPN_IP_FLOWS_PER_ADDRESS
-#                      the connections the kernel tracks that one tunnel address opens, past which a new one is
+#                      the open connections the kernel tracks that one tunnel address opens, past which a new one is
 #                      dropped, and apart from those, the connections to its public ports. Default: 4096. The relay
 #                      keeps at most 3584 flows a tunnel and forgets flows past that, so an answer on a forgotten
 #                      flow never reaches the client anyway: the default sits a little above, so that the relay's own
 #                      bound acts first. Those connections outlast their tunnel, so the pool's tunnel addresses times
-#                      this, plus the addresses that hold public ports times it, is what the tunnels can take of the
-#                      kernel's table, which every program on the node shares: up refuses more than half of
-#                      nf_conntrack_max.
+#                      this, plus the addresses that hold public ports times it, is what the tunnels' open connections
+#                      can take of the kernel's table, which every program on the node shares: up refuses more than
+#                      half of nf_conntrack_max. A TCP connection stops counting once it closes. The kernel keeps it
+#                      for the node's TIME_WAIT timeout (nf_conntrack_tcp_timeout_time_wait, 2 minutes by default), as
+#                      it keeps every closed connection on the node. So an address that opens and closes connections
+#                      fast holds more.
 #   WEBVPN_IP_PORTS    the tunnels' public ports, as the relay is given them: a range written first-last, such as
 #                      20000-29999. Unset, tunnels have none. The pool's k-th tunnel address, from 0 at the pool's
 #                      second host address, holds the ports first + k * size to first + (k + 1) * size - 1, and up
@@ -77,9 +80,9 @@ up() {
 table inet ${table}_probe { ct timeout probe { protocol tcp; l3proto ip; }; }
 delete table inet ${table}_probe
 EOF
-	# The kernel keeps a tunnel's connections past the tunnel, so each address may hold its ceiling of them, and each
-	# address that holds public ports that many again: that is what the tunnels can take of a table every program on
-	# the node shares, and half of it stays for the others.
+	# The kernel keeps a tunnel's connections past the tunnel, so each address may hold its ceiling of open ones, and
+	# each address that holds public ports that many again: that is what the tunnels can take of a table every program
+	# on the node shares, and half of it stays for the others.
 	max=$(cat /proc/sys/net/netfilter/nf_conntrack_max)
 	[ $(((addresses + holders) * flows)) -le $((max / 2)) ] ||
 		fail "the pool's $addresses tunnel addresses, plus the $holders that hold public ports, times \
@@ -116,7 +119,8 @@ table inet $table {
 
 	# as long as the relay keeps a quiet open TCP flow (TCP_OPEN_LIFE in crates/webvpn-server/src/flow.rs), where the
 	# node's default is 5 days: a closed tunnel's connections count toward the ceilings of the next tunnel at its
-	# address. The other states keep the node's timeouts.
+	# address. The other states keep the node's timeouts, time_wait above all: the masquerade picks a port only clear
+	# of the tracked connections, so a shorter one lets it reuse a 4-tuple that a server still holds in TIME_WAIT.
 	ct timeout tunnel {
 		protocol tcp
 		l3proto ip
