@@ -32,16 +32,23 @@ export const tcpListener = (context: Context, { socket, local }: Opened): TcpLis
   let finish!: (by: ClosedBy) => void
   const closed = new Promise<ClosedBy>((resolve) => { finish = resolve })
   const waiting: TcpSocket[] = []
+  let cancelled = false
   let wake: (() => void) | undefined
 
-  // a connection is handed out only as the reader reads, so the ones it never took are still here for stop to close
+  // a connection is handed out only as the reader reads, so the ones it never took are still here for stop to close;
+  // a cancelled stream takes none, since its enqueue would throw and the connection would be lost
   const connections = new ReadableStream<TcpSocket>({
     pull: async (controller) => {
       while (!waiting.length) {
         if (done) return controller.close()
         await new Promise<void>((resolve) => { wake = resolve })
+        if (cancelled) return
       }
       controller.enqueue(waiting.shift()!)
+    },
+    cancel: () => {
+      cancelled = true
+      wake?.()
     },
   }, { highWaterMark: 0 })
 
