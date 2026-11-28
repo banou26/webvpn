@@ -46,12 +46,13 @@ export type StackOptions = {
  *
  * What differs from a session: `tcpListen` takes one of the tunnel's public ports (port 0 takes a free one, another
  * port must be one of them, or it rejects with `ADDRESS_NOT_AVAILABLE`), rejects with `UNSUPPORTED` on a tunnel with
- * none, and names the relay's public address, which a peer dials. `udpBind` on port 0 takes a free public port while
- * the tunnel has one, and a private port otherwise, which only answers reach; its local address says which. A name
- * is looked up by the resolver in `StackOptions`, through the tunnel, and a connect by name takes its first A record,
- * or its first AAAA record on a tunnel without IPv4. Each socket's buffers are fixed when it is made, and the options
- * that cannot change them (`sendBufferSize`, `recvBufferSize`, broadcast and multicast) reject with `UNSUPPORTED`. A
- * UDP datagram must fit the tunnel's MTU, since the stack does not fragment.
+ * none, and names the relay's public address, which a peer dials. Its listener holds at most `backlog` connections that
+ * open or wait to be taken, and refuses one more with a reset. `udpBind` on port 0 takes a free public port while the
+ * tunnel has one, and a private port otherwise, which only answers reach; its local address says which. A name is
+ * looked up by the resolver in `StackOptions`, through the tunnel, and a connect by name takes its first A record, or
+ * its first AAAA record on a tunnel without IPv4. Each socket's buffers are fixed when it is made, and the options that
+ * cannot change them (`sendBufferSize`, `recvBufferSize`, broadcast and multicast) reject with `UNSUPPORTED`. A UDP
+ * datagram must fit the tunnel's MTU, since the stack does not fragment.
  *
  * The stack owns the tunnel: it reads every packet from `tunnel.readable` and sends with `tunnel.send`, whose dropped
  * packets its TCP treats as loss on the path. When the tunnel ends, whoever ended it, every socket ends as a
