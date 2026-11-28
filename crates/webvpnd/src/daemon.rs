@@ -66,9 +66,10 @@ impl Daemon {
                 Certificate::self_signed(settings.address)?
             }
         };
-        let bind = ServerConfig::builder().with_bind_address((settings.address, settings.webtransport_port).into());
-        let endpoint = Endpoint::server(webtransport::server_config(bind, identity))
-            .with_context(|| format!("WebTransport could not take udp/{}", settings.webtransport_port))?;
+        let taken = || format!("WebTransport could not take udp/{}", settings.webtransport_port);
+        let address = (settings.address, settings.webtransport_port).into();
+        let bind = ServerConfig::builder().with_bind_socket(webtransport::bind_socket(address).with_context(taken)?);
+        let endpoint = Endpoint::server(webtransport::server_config(bind, identity)).with_context(taken)?;
         let endpoint = Arc::new(endpoint);
         let webtransport_port = endpoint.local_addr()?.port();
 

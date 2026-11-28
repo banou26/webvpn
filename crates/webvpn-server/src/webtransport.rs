@@ -7,7 +7,7 @@
 //! The types these take come from [`wtransport`], at the version this crate pins, which is re-exported here so a
 //! program needs no dependency of its own on it.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -59,6 +59,25 @@ pub fn server_config(bind: ServerConfigBuilder<WantsIdentity>, identity: Identit
         // inside the idle timeout, quinn's 30 s or the client's own when shorter, so a quiet session stays open
         .keep_alive_interval(Some(Duration::from_secs(5)));
     bind.with_custom_transport(identity, transport).build()
+}
+
+/// The receive buffer the relay asks for its WebTransport socket. The packets of every session's client wait there
+/// until the endpoint reads them, and with IP tunnels they come in bursts, since a page's stack acknowledges each chunk
+/// the browser hands it at once: at the kernel's default of 224 KiB the socket dropped 1700 to 2500 datagrams in 16 s
+/// of downloads at a 20 ms round trip, and none at 8 MiB (measured 2026-11-28). The system caps it at
+/// `net.core.rmem_max`, which on many hosts leaves the default: raise that sysctl where the relay runs.
+const RECEIVE_BUFFER: usize = 8 * 1024 * 1024;
+
+/// A UDP socket bound on `address` for an endpoint, as `ServerConfig::builder().with_bind_socket` takes it, with a
+/// receive buffer of 8 MiB as far as the system allows. An IPv6 address keeps the system's dual-stack default, as
+/// `with_bind_address` does.
+pub fn bind_socket(address: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(Domain::for_address(address), Type::DGRAM, Some(Protocol::UDP))?;
+    // a system that refuses the size keeps its own, as one that caps it does
+    let _ = socket.set_recv_buffer_size(RECEIVE_BUFFER);
+    socket.bind(&address.into())?;
+    Ok(socket.into())
 }
 
 /// One client's WebTransport session, as a [`Transport`] for [`Relay::serve`].
@@ -399,6 +418,17 @@ mod tests {
             }
         })
         .await
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_socket_takes_a_receive_buffer_of_8_mib_as_far_as_the_system_allows() {
+        let read = |name: &str| std::fs::read_to_string(format!("/proc/sys/net/core/{name}")).unwrap();
+        let max: usize = read("rmem_max").trim().parse().unwrap();
+        let socket = bind_socket(loopback()).unwrap();
+        // Linux keeps twice what it is given, for its own bookkeeping
+        let got = socket2::SockRef::from(&socket).recv_buffer_size().unwrap();
+        assert_eq!(got, 2 * max.min(RECEIVE_BUFFER), "rmem_max {max}, rmem_default {}", read("rmem_default").trim());
     }
 
     #[tokio::test]
