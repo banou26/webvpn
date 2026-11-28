@@ -80,7 +80,7 @@ pub struct TunnelEnd {
     pub ports: u16,
     /// The packets that arrive for those addresses, each one whole packet of at most the `mtu`. The forwarder sends
     /// with `try_send` and drops a packet the channel has no room for, so a slow client never holds it, and counts it
-    /// in [`Forwarder::dropped`].
+    /// in [`Forwarder::dropped`]. The channel holds [`FORWARDER_CHANNEL`] packets.
     pub packets: mpsc::Receiver<Vec<u8>>,
 }
 
@@ -88,6 +88,14 @@ pub struct TunnelEnd {
 /// is, so that what flows through the tunnel learns of a slow client from loss within a few dozen milliseconds:
 /// about 44 packets of 1500 bytes, 50 ms at 10 Mbit/s.
 const QUEUE_BYTES: usize = 64 * 1024;
+
+/// The packets a forwarder's channel for one tunnel holds, as [`TunnelEnd::packets`] asks. Bursts reach it faster
+/// than the tunnel's task takes them, one a turn: the browser hands the page the tunnel's stream up to 256 KiB at a
+/// time, the page's stack answers with that many acknowledgements at once, and servers answer those with bursts of
+/// several hundred packets. At 256 the channel lost 100 to 340 packets in each 4 s measure of 2 to 8 downloads over
+/// WebTransport, and the connections' windows stayed at about 500 KB together (measured 2026-11-28); this holds 8
+/// windows of 512 KiB. A waiting packet is its own allocation, so the memory follows what waits.
+pub const FORWARDER_CHANNEL: usize = 4096;
 
 /// Runs a tunnel a client asked for. `requests` yields its `IpOpen` first.
 pub(crate) async fn open<T: Transport, S: Session>(
@@ -845,8 +853,8 @@ mod tests {
         tunnel.send(&udp_from(0)).await;
         harness.forwarder.sent(1).await;
         // all handed over before the tunnel's task runs again, more than its channel holds
-        const SENT: u16 = 1100;
-        let taken = (0..SENT).filter(|&index| harness.forwarder.deliver(0, toward_client(0, index, 100))).count();
+        const SENT: u16 = FORWARDER_CHANNEL as u16 + 100;
+        let taken = (0..SENT).filter(|&index| harness.forwarder.deliver(0, toward_client(0, index, 60))).count();
         let full = u64::from(SENT) - taken as u64;
         assert!(full > 0);
         let line = format!(r#"webvpn_ip_dropped_total{{reason="forwarder_full"}} {full}"#);
@@ -856,6 +864,25 @@ mod tests {
         let accounted = || [Counter::IpPacketsDown, Counter::IpDroppedQueueFull].map(|of| harness.count(of));
         eventually(|| accounted().iter().sum::<u64>() + full == u64::from(SENT)).await;
         reading.abort();
+    }
+
+    #[tokio::test]
+    async fn a_burst_of_eight_full_windows_fits_the_forwarder_s_channel_and_reaches_the_client_whole() {
+        let mut harness = tunnelling(1).await;
+        let mut tunnel = harness.open(1, 0).await;
+        tunnel.send(&udp_from(0)).await;
+        harness.forwarder.sent(1).await;
+        // what 8 connections whose stack offers 512 KiB each may have in flight, all before the relay takes any
+        let burst = (8 * 512 * 1024 / 1400) as u16;
+        for index in 0..burst {
+            let taken = harness.forwarder.deliver(0, toward_client(0, index, 1400));
+            assert!(taken, "packet {index} found the channel full");
+        }
+        for index in 0..burst {
+            let packet = tunnel.next().await;
+            assert_eq!(u16::from_be_bytes([packet[28], packet[29]]), index);
+        }
+        assert_eq!(harness.count(Counter::IpDroppedQueueFull), 0);
     }
 
     #[tokio::test]

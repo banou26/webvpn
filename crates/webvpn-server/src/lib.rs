@@ -38,4 +38,4 @@ pub use policy::{
 pub use relay::{Config, Relay};
 pub use session::UdpCarrier;
 pub use transport::{SendHalf, Transport};
-pub use tunnel::{Forwarder, TunnelEnd};
+pub use tunnel::{Forwarder, TunnelEnd, FORWARDER_CHANNEL};

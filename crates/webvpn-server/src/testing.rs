@@ -12,7 +12,7 @@ use webvpn_proto::{ClientPacket, ErrorCode, RelayPacket};
 
 use crate::policy::Refusal;
 use crate::transport::{SendHalf, Transport};
-use crate::tunnel::{Forwarder, TunnelEnd};
+use crate::tunnel::{Forwarder, TunnelEnd, FORWARDER_CHANNEL};
 
 /// How long a client waits on the relay before the test fails.
 pub(crate) const WAIT: Duration = Duration::from_secs(5);
@@ -248,8 +248,6 @@ impl Control {
     }
 }
 
-/// The packets each tunnel's channel holds before the forwarder drops one.
-const FORWARDER_CHANNEL: usize = 1024;
 /// The first public port a [`TestForwarder`] gives.
 pub(crate) const PUBLIC_PORTS: u16 = 30000;
 

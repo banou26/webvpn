@@ -16,13 +16,10 @@ use tokio::sync::mpsc;
 use webvpn_proto::ErrorCode;
 
 use crate::policy::Refusal;
-use crate::tunnel::{Forwarder, TunnelEnd};
+use crate::tunnel::{Forwarder, TunnelEnd, FORWARDER_CHANNEL};
 
 /// How long the device's reader waits on it before it checks whether the forwarder was dropped.
 const POLL_MS: libc::c_int = 1000;
-
-/// The packets each tunnel's channel holds before the forwarder drops one.
-const CHANNEL: usize = 256;
 
 /// The largest packet read from the device. A packet over the `mtu` reaches the relay, which drops and counts it.
 const READ_BYTES: usize = 65535;
@@ -252,7 +249,7 @@ impl Forwarder for TunForwarder {
         // the walk gives only the network's host addresses from the second on
         let k = u32::from(ipv4) - u32::from(walk.pool.network) - 2;
         let (first_port, ports) = self.shared.ports.map_or((0, 0), |blocks| blocks.block(k));
-        let (sender, packets) = mpsc::channel(CHANNEL);
+        let (sender, packets) = mpsc::channel(FORWARDER_CHANNEL);
         ends.insert(ipv4, sender);
         Ok(TunnelEnd { ipv4: Some(ipv4), ipv6: None, first_port, ports, packets })
     }
