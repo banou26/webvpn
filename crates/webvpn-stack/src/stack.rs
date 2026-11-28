@@ -118,6 +118,8 @@ impl Device for Link {
 struct Tcp {
     handle: SocketHandle,
     error: Option<ErrorCode>,
+    /// Set by the first poll after the connect: a call has no time of its own, and the last poll may be long past
+    /// on an idle stack.
     connect_by: Option<Instant>,
     /// The state the last poll left the socket in.
     state: tcp::State,
@@ -125,6 +127,8 @@ struct Tcp {
     reset: bool,
     /// The page closed or aborted it, so a connect that ends was not refused.
     ended_here: bool,
+    released: bool,
+    /// Set by the first poll after the release, as `connect_by` is.
     released_at: Option<Instant>,
 }
 
@@ -374,14 +378,14 @@ impl Stack {
             .connect(self.interface.context(), endpoint(remote), port)
             .map_err(|_| ErrorCode::NETWORK_UNREACHABLE)?;
         let handle = self.sockets.add(socket);
-        let connect_by = self.now + Duration::from_millis(u64::from(self.config.connect_timeout_ms));
         Ok(self.insert(Kind::Tcp(Tcp {
             handle,
             error: None,
-            connect_by: Some(connect_by),
+            connect_by: None,
             state: tcp::State::SynSent,
             reset: false,
             ended_here: false,
+            released: false,
             released_at: None,
         })))
     }
@@ -552,11 +556,10 @@ impl Stack {
     /// end as `tcp_close` or `tcp_abort` ended it, the peer's bytes dropped meanwhile, and is reset if it has not
     /// ended a minute later.
     pub fn release(&mut self, id: u32) {
-        let now = self.now;
         let Some(Entry { kind, seen }) = self.entries.remove(&id) else { return };
         match kind {
             Kind::Tcp(mut tcp) => {
-                tcp.released_at.get_or_insert(now);
+                tcp.released = true;
                 self.entries.insert(id, Entry { kind: Kind::Tcp(tcp), seen });
             }
             Kind::Listener(listener) => {
@@ -584,7 +587,8 @@ impl Stack {
             state,
             reset: false,
             ended_here: true,
-            released_at: Some(self.now),
+            released: true,
+            released_at: None,
         };
         self.insert(Kind::Tcp(tcp));
     }
@@ -619,7 +623,7 @@ impl Stack {
 
     fn tcp(&self, id: u32) -> Option<&Tcp> {
         match &self.entry(id)?.kind {
-            Kind::Tcp(tcp) if tcp.released_at.is_none() => Some(tcp),
+            Kind::Tcp(tcp) if !tcp.released => Some(tcp),
             _ => None,
         }
     }
@@ -719,16 +723,18 @@ impl Stack {
 
     fn maintain(&mut self) {
         let now = self.now;
+        let connect_by = now + Duration::from_millis(u64::from(self.config.connect_timeout_ms));
         let mut accepted = Vec::new();
         for (&id, entry) in self.entries.iter_mut() {
             match &mut entry.kind {
                 Kind::Tcp(tcp) => {
                     let socket = self.sockets.get_mut::<tcp::Socket>(tcp.handle);
-                    if socket.state() == tcp::State::SynSent && tcp.connect_by.is_some_and(|by| now >= by) {
+                    if socket.state() == tcp::State::SynSent && now >= *tcp.connect_by.get_or_insert(connect_by) {
                         tcp.error = Some(ErrorCode::TIMED_OUT);
                         socket.abort();
                     }
-                    if let Some(released_at) = tcp.released_at {
+                    if tcp.released {
+                        let released_at = *tcp.released_at.get_or_insert(now);
                         while socket.can_recv() && socket.recv(|bytes| (bytes.len(), ())).is_ok() {}
                         if (now - released_at).total_millis() as i64 >= RELEASED_MS {
                             socket.abort();
@@ -752,6 +758,7 @@ impl Stack {
                 state,
                 reset: false,
                 ended_here: false,
+                released: false,
                 released_at: None,
             };
             let id = self.insert(Kind::Tcp(tcp));
@@ -777,7 +784,7 @@ impl Stack {
                     }
                     tcp.state = state;
                     tcp.reset = false;
-                    if tcp.released_at.is_some() {
+                    if tcp.released {
                         if state == tcp::State::Closed {
                             self.sockets.remove(tcp.handle);
                             gone.push(id);

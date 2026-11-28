@@ -188,6 +188,17 @@ fn a_connect_with_no_answer_times_out_at_its_limit() {
 }
 
 #[test]
+fn a_connect_after_an_idle_spell_counts_its_limit_from_then() {
+    let mut net = Net::new();
+    net.site.tcp_listen(80, 1, BUFFERS).unwrap();
+    net.tick();
+    // an idle stack is not polled, here for longer than the connect's limit
+    net.now += 15_000;
+    let client = net.client.tcp_connect(SocketAddr::new(SITE.into(), 80), BUFFERS).unwrap();
+    assert!(net.established(client), "{:?}", net.client.tcp_error(client));
+}
+
+#[test]
 fn a_connect_closing_on_its_own_is_neither_refused_nor_reset() {
     let mut net = Net::with_link(|_, _| Fate::Drop);
     let client = net.client.tcp_connect(SocketAddr::new(SITE.into(), 80), BUFFERS).unwrap();
@@ -351,6 +362,18 @@ fn a_released_connection_still_sends_what_it_held_and_ends() {
         net.site.tcp_state(site) == Some(State::Closed)
     }), "the client drains what comes, more than its window");
     assert_eq!(net.site.tcp_error(site), None);
+}
+
+#[test]
+fn a_connection_released_after_an_idle_spell_still_ends_in_order() {
+    let mut net = Net::new();
+    let (client, site) = net.connect(80);
+    // an idle stack is not polled, here for longer than a released connection is given to end
+    net.now += 120_000;
+    net.client.tcp_close(client);
+    net.client.release(client);
+    assert!(net.until(1000, |net| net.site.tcp_recv(site, &mut [0; 16]).is_none()));
+    assert_eq!(net.site.tcp_error(site), None, "the peer reads the end, not a reset");
 }
 
 #[test]
