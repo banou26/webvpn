@@ -185,6 +185,10 @@ async fn run<T: Transport, S: Session>(
                 Ok(reservation) => drop(queue.send((packet, reservation))),
                 Err(_) => metrics.count(Counter::IpDroppedQueueFull),
             }
+            // The writer runs in this task too: without a turn here it would see none of a burst the forwarder already
+            // holds until up to a scheduler budget of it (128 packets) had come through, so the queue would drop a fast
+            // client's packets as if it were slow.
+            tokio::task::yield_now().await;
         }
     });
 
@@ -824,6 +828,25 @@ mod tests {
         // and only that packet is metered and counted yet
         eventually(|| harness.policy.metered()[1] == 1400).await;
         assert_eq!(harness.count(Counter::BytesDown), 1400);
+    }
+
+    #[tokio::test]
+    async fn a_burst_the_stream_has_room_for_is_written_whole_though_it_is_more_than_the_queue_holds() {
+        let mut harness = tunnelling(1).await;
+        let mut tunnel = harness.open(1, 0).await;
+        tunnel.send(&udp_from(0)).await;
+        harness.forwarder.sent(1).await;
+        // past what the queue holds, within what the queue and the stream's buffer hold together, all in the
+        // forwarder's channel before the relay sees the first of it
+        let burst = (QUEUE_BYTES / 1400 + 14) as u16;
+        for index in 0..burst {
+            assert!(harness.forwarder.deliver(0, toward_client(0, index, 1400)));
+        }
+        for index in 0..burst {
+            let packet = tunnel.next().await;
+            assert_eq!(u16::from_be_bytes([packet[28], packet[29]]), index);
+        }
+        assert_eq!(harness.count(Counter::IpDroppedQueueFull), 0);
     }
 
     #[tokio::test]
