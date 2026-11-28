@@ -42,9 +42,9 @@ export type IpTunnel = {
   /** The first of the tunnel's public ports. Meaningless when `ports` is 0. */
   firstPort: number,
   /**
-   * How many public ports the tunnel holds, from `firstPort` on: a TCP or UDP packet anyone sends to the public
-   * address on one of them reaches this end's address on the same port. 0 when the relay gave none, and the tunnel
-   * is then reached only by answers to what it sent.
+   * How many public ports the tunnel holds, from `firstPort` on: a TCP or UDP packet anyone outside the relay sends to
+   * the public address on one of them reaches this end's address on the same port. 0 when the relay gave none, and the
+   * tunnel is then reached only by answers to what it sent.
    */
   ports: number,
   readable: ReadableStream<Uint8Array>,
