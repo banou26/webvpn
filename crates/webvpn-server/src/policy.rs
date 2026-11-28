@@ -135,8 +135,10 @@ pub trait Session: Send + Sync + 'static {
     /// or refuses them itself.
     fn check_egress(&self, proto: Proto, target: SocketAddr) -> Result<(), Refusal>;
 
-    /// Whether the session may bind `local`, for a UDP socket or a listener. Port 0 asks for any free port. It has no
-    /// default, so a policy that wraps another one forwards it or decides itself.
+    /// Whether the session may bind `local`, for a UDP socket or a listener. Port 0 asks for any free port. An IP
+    /// tunnel's public ports are asked about too, each one in TCP and in UDP at the relay's public address, and the
+    /// tunnel has none unless every answer is `Ok`. It has no default, so a policy that wraps another one forwards it
+    /// or decides itself.
     fn check_bind(&self, proto: Proto, local: SocketAddr) -> Result<(), Refusal>;
 
     /// `bytes` are about to be relayed. The future resolves when they may move, so a policy that paces waits here

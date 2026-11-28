@@ -1,4 +1,4 @@
-//! The flows an IP tunnel sent, and which packets toward its client answer one of them.
+//! The flows an IP tunnel holds, and which packets toward its client answer one of them or begin one on a public port.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -81,9 +81,13 @@ enum Names {
     Peer(u8, IpAddr),
 }
 
-/// The flows one tunnel sent, at most a bound of them, and the check that a packet toward its client answers one.
+/// The flows one tunnel holds, at most a bound of them, and the check that a packet toward its client answers one or
+/// begins one on a public port.
 pub(crate) struct Flows {
     capacity: usize,
+    /// The tunnel's public ports: `ports` of them from `first_port` on.
+    first_port: u16,
+    ports: u16,
     flows: HashMap<Flow, Entry>,
     /// For each protocol and peer with a flow in `flows`, the latest any of those flows lives until, or later: a flow
     /// past a FIN keeps the life it had until the table is next swept.
@@ -91,8 +95,9 @@ pub(crate) struct Flows {
 }
 
 impl Flows {
-    pub(crate) fn new(capacity: usize) -> Self {
-        Self { capacity, flows: HashMap::new(), peers: HashMap::new() }
+    /// A table of at most `capacity` flows, for a tunnel whose public ports are `ports` ports from `first_port` on.
+    pub(crate) fn new(capacity: usize, first_port: u16, ports: u16) -> Self {
+        Self { capacity, first_port, ports, flows: HashMap::new(), peers: HashMap::new() }
     }
 
     /// Records or refreshes the flow of `sent`, a packet from the client that passed every check. A fragment after the
@@ -100,12 +105,17 @@ impl Flows {
     /// still full, the flows that were silent longest, an eighth of the table at once.
     pub(crate) fn sent(&mut self, sent: &Header, now: Instant) {
         let Some(Names::Flow(flow)) = names(sent, true) else { return };
+        let flags = tcp_flags(sent);
+        let opens = flow.protocol == TCP && flags & (TCP_SYN | TCP_ACK) == TCP_SYN;
+        self.begin(flow, opens, flags, now);
+    }
+
+    /// Records `flow`, or refreshes it, and starts it over when `opens` or when it is past its life.
+    fn begin(&mut self, flow: Flow, opens: bool, flags: u8, now: Instant) {
         if !self.flows.contains_key(&flow) && self.flows.len() >= self.capacity {
             self.make_room(now);
         }
-        let flags = tcp_flags(sent);
         let entry = self.flows.entry(flow).or_insert(Entry::new(now));
-        let opens = flow.protocol == TCP && flags & (TCP_SYN | TCP_ACK) == TCP_SYN;
         if opens || entry.until(flow.protocol) <= now {
             *entry = Entry::new(now);
         }
@@ -113,8 +123,10 @@ impl Flows {
     }
 
     /// Whether `packet`, from the forwarder, may reach the client of the tunnel given `ipv4` and `ipv6`: a whole packet
-    /// to one of those addresses that answers a flow the tunnel sent, or an ICMP error about a packet of one. An
-    /// answer refreshes its flow; an error does not.
+    /// to one of those addresses that answers a flow the tunnel holds, or an ICMP error about a packet of one, or a TCP
+    /// or UDP packet to one of the public ports, which begins a flow as a packet from the client does. An answer
+    /// refreshes its flow; an error does not. A fragment after the first passes as an answer does, so a datagram to a
+    /// public port in fragments passes when its first fragment comes first.
     pub(crate) fn admit(
         &mut self,
         packet: &[u8],
@@ -141,7 +153,13 @@ impl Flows {
                         touch(&mut self.peers, flow, entry, tcp_flags(&header), now);
                         true
                     }
-                    _ => false,
+                    _ => match flow.ids {
+                        Ids::Ports { tunnel, .. } if self.is_public(tunnel) => {
+                            self.begin(flow, true, tcp_flags(&header), now);
+                            true
+                        }
+                        _ => false,
+                    },
                 },
             }
         };
@@ -160,6 +178,10 @@ impl Flows {
             Some(Names::Peer(protocol, peer)) => self.peer_alive(protocol, peer, now),
             None => false,
         }
+    }
+
+    fn is_public(&self, port: u16) -> bool {
+        u32::from(port).wrapping_sub(u32::from(self.first_port)) < u32::from(self.ports)
     }
 
     fn peer_alive(&self, protocol: u8, peer: IpAddr, now: Instant) -> bool {
@@ -300,7 +322,12 @@ mod tests {
 
     impl Table {
         fn new(capacity: usize) -> Self {
-            Self { flows: Flows::new(capacity), start: Instant::now() }
+            Self::public(capacity, 0, 0)
+        }
+
+        /// A table for a tunnel with `ports` public ports from `first_port` on.
+        fn public(capacity: usize, first_port: u16, ports: u16) -> Self {
+            Self { flows: Flows::new(capacity, first_port, ports), start: Instant::now() }
         }
 
         fn send_at(&mut self, at: Duration, packet: &[u8]) {
@@ -589,6 +616,53 @@ mod tests {
         let later = |source| v4(source, CLIENT_V4, UDP, MORE_FRAGMENTS | 1, &[], &[0; 8]);
         assert_eq!(table.admit_at(MINUTE, &later(PEER_V4)), UNASKED);
         assert_eq!(table.admit_at(MINUTE, &later(OTHER_V4)), Ok(()));
+    }
+
+    #[test]
+    fn a_tcp_or_udp_packet_to_a_public_port_passes_and_begins_a_flow() {
+        for protocol in [TCP, UDP] {
+            let mut table = Table::public(MAX_FLOWS, 30000, 8);
+            let syn = down(protocol, &ports(50000, 30007, TCP_SYN));
+            assert_eq!(table.admit(&syn), Ok(()), "{protocol}");
+            // the tunnel's answer and the peer's next packet belong to the flow it began
+            table.send(&up(protocol, &ports(30007, 50000, TCP_SYN | TCP_ACK)));
+            assert_eq!(table.admit(&down(protocol, &ports(50000, 30007, TCP_ACK))), Ok(()), "{protocol}");
+            let error = v4(ROUTER_V4, CLIENT_V4, ICMP, 0, &[], &icmp(3, 0, &up(protocol, &ports(30007, 50000, 0))));
+            assert_eq!(table.admit(&error), Ok(()), "{protocol}: an error about the tunnel's answer");
+            assert_eq!(table.flows.len(), 1);
+            for outside in [29999, 30008] {
+                let unasked = down(protocol, &ports(50000, outside, TCP_SYN));
+                assert_eq!(table.admit(&unasked), UNASKED, "{protocol} {outside}");
+            }
+        }
+    }
+
+    #[test]
+    fn only_tcp_and_udp_begin_a_flow_on_a_public_port_and_a_tunnel_without_ports_takes_answers_only() {
+        let mut table = Table::public(MAX_FLOWS, 30000, 8);
+        assert_eq!(table.admit(&down(GRE, &ports(50000, 30000, 0))), UNASKED);
+        let quoted = down(UDP, &ports(30000, 50000, 0));
+        assert_eq!(table.admit(&v4(ROUTER_V4, CLIENT_V4, ICMP, 0, &[], &icmp(3, 0, &quoted))), UNASKED);
+        assert_eq!(table.flows.len(), 0);
+
+        let mut none = Table::new(MAX_FLOWS);
+        for port in [0, 1, 30000, u16::MAX] {
+            assert_eq!(none.admit(&down(UDP, &ports(50000, port, 0))), UNASKED, "port {port}");
+        }
+        // the last ports of the port space are public too
+        let mut last = Table::public(MAX_FLOWS, u16::MAX - 7, 8);
+        assert_eq!(last.admit(&down(UDP, &ports(50000, u16::MAX, 0))), Ok(()));
+        assert_eq!(last.admit(&down(UDP, &ports(50000, 0, 0))), UNASKED);
+    }
+
+    #[test]
+    fn a_datagram_in_fragments_to_a_public_port_passes_when_its_first_fragment_comes_first() {
+        let mut table = Table::public(MAX_FLOWS, 30000, 8);
+        let later = v4(PEER_V4, CLIENT_V4, UDP, 1, &[], &[0; 8]);
+        assert_eq!(table.admit(&later), UNASKED, "a later fragment alone begins nothing");
+        let first = v4(PEER_V4, CLIENT_V4, UDP, MORE_FRAGMENTS, &[], &ports(50000, 30001, 0));
+        assert_eq!(table.admit(&first), Ok(()));
+        assert_eq!(table.admit(&later), Ok(()));
     }
 
     #[test]

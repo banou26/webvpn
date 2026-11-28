@@ -148,7 +148,8 @@ impl Daemon {
 #[cfg(target_os = "linux")]
 fn forwarder(settings: &Settings) -> Result<Option<Arc<dyn Forwarder>>> {
     let Some(tunnel) = &settings.ip_tunnel else { return Ok(None) };
-    let forwarder = TunForwarder::open(&tunnel.device, tunnel.pool).context("IP tunnels could not start")?;
+    let forwarder =
+        TunForwarder::open(&tunnel.device, tunnel.pool, tunnel.ports).context("IP tunnels could not start")?;
     info!("IP tunnels go through the TUN device {}", tunnel.device);
     Ok(Some(Arc::new(forwarder)))
 }

@@ -64,6 +64,32 @@ impl Ipv4Pool {
     }
 }
 
+/// The public ports a [`TunForwarder`] gives its tunnels: the ports from `first` to `last`, in blocks of `per_tunnel`.
+///
+/// The k-th tunnel address of the network, counting from 0 at the network's second host address (the device holds
+/// the first), holds the k-th block: the ports from `first + k * per_tunnel` to `first + (k + 1) * per_tunnel - 1`.
+/// An address whose block would pass `last` holds none, and so does every address when `per_tunnel` is 0. The setup
+/// step maps the same blocks on the node, so a TCP or UDP packet to one of the node's own addresses on a port of a
+/// block reaches the address that holds it, on the same port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortBlocks {
+    pub first: u16,
+    pub last: u16,
+    pub per_tunnel: u16,
+}
+
+impl PortBlocks {
+    /// The block of the k-th tunnel address, as its first port and how many, or `(0, 0)` when it holds none.
+    fn block(&self, k: u32) -> (u16, u16) {
+        let first = u64::from(self.first) + u64::from(k) * u64::from(self.per_tunnel);
+        let last = first + u64::from(self.per_tunnel);
+        if self.per_tunnel == 0 || last > u64::from(self.last) + 1 {
+            return (0, 0);
+        }
+        (first as u16, self.per_tunnel)
+    }
+}
+
 /// Why an [`Ipv4Pool`] does not parse. It never repeats the text it was given.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PoolError(&'static str);
@@ -112,6 +138,7 @@ pub struct TunForwarder {
 struct Shared {
     device: OwnedFd,
     mtu: u16,
+    ports: Option<PortBlocks>,
     tunnels: Mutex<Tunnels>,
 }
 
@@ -124,12 +151,13 @@ struct Tunnels {
 }
 
 impl TunForwarder {
-    /// Opens the TUN device named `device`, whose network is `ipv4`, and starts reading it.
+    /// Opens the TUN device named `device`, whose network is `ipv4`, and starts reading it. With `ports`, each tunnel
+    /// is given the public ports of its address's block.
     ///
     /// An error says what to check: the device does not exist, belongs to another user or is not a TUN device,
     /// `/dev/net/tun` is missing or cannot be opened, or the device's MTU is under 1280. It names the device and never
     /// an address.
-    pub fn open(device: &str, ipv4: Ipv4Pool) -> io::Result<Self> {
+    pub fn open(device: &str, ipv4: Ipv4Pool, ports: Option<PortBlocks>) -> io::Result<Self> {
         let name =
             CString::new(device).ok().filter(|name| name.as_bytes().len() < libc::IFNAMSIZ).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, format!("{device:?} is not a network device's name"))
@@ -173,7 +201,7 @@ impl TunForwarder {
             ));
         }
         let tunnels = Mutex::new(Tunnels { walk: Walk::new(ipv4), ends: HashMap::new(), failed: false });
-        let shared = Arc::new(Shared { device: fd, mtu, tunnels });
+        let shared = Arc::new(Shared { device: fd, mtu, ports, tunnels });
         let weak = Arc::downgrade(&shared);
         thread::Builder::new().name("tun-reader".into()).spawn(move || read(weak))?;
         Ok(Self { shared })
@@ -195,9 +223,12 @@ impl Forwarder for TunForwarder {
         let ipv4 = walk
             .take(|address| ends.contains_key(&address))
             .ok_or_else(|| Refusal::new(ErrorCode::CAPACITY, "the relay has no tunnel address left"))?;
+        // the walk gives only the network's host addresses from the second on
+        let k = u32::from(ipv4) - u32::from(walk.pool.network) - 2;
+        let (first_port, ports) = self.shared.ports.map_or((0, 0), |blocks| blocks.block(k));
         let (sender, packets) = mpsc::channel(CHANNEL);
         ends.insert(ipv4, sender);
-        Ok(TunnelEnd { ipv4: Some(ipv4), ipv6: None, packets })
+        Ok(TunnelEnd { ipv4: Some(ipv4), ipv6: None, first_port, ports, packets })
     }
 
     fn send(&self, packet: &[u8]) {
@@ -387,8 +418,20 @@ mod tests {
     }
 
     #[test]
+    fn each_address_holds_its_block_of_ports_and_one_past_the_range_holds_none() {
+        let blocks = PortBlocks { first: 30000, last: 30031, per_tunnel: 8 };
+        let given: Vec<_> = (0..6).map(|k| blocks.block(k)).collect();
+        assert_eq!(given, [(30000, 8), (30008, 8), (30016, 8), (30024, 8), (0, 0), (0, 0)]);
+        assert_eq!(PortBlocks { last: 30030, ..blocks }.block(3), (0, 0), "a block cut short is none");
+        assert_eq!(PortBlocks { per_tunnel: 0, ..blocks }.block(0), (0, 0));
+        let top = PortBlocks { first: 65528, last: 65535, per_tunnel: 8 };
+        assert_eq!((top.block(0), top.block(1)), ((65528, 8), (0, 0)));
+        assert_eq!(PortBlocks { first: 1024, last: 65535, per_tunnel: 64 }.block(1 << 24), (0, 0));
+    }
+
+    #[test]
     fn a_missing_device_is_named_and_no_address_is() {
-        let error = TunForwarder::open("webvpn-none0", pool("198.18.0.0/16")).err().unwrap().to_string();
+        let error = TunForwarder::open("webvpn-none0", pool("198.18.0.0/16"), None).err().unwrap().to_string();
         assert!(error.contains("webvpn-none0 does not exist"), "{error}");
         assert!(!error.contains("198.18"), "{error}");
     }

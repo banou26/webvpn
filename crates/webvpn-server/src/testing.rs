@@ -250,12 +250,16 @@ impl Control {
 
 /// The packets each tunnel's channel holds before the forwarder drops one.
 const FORWARDER_CHANNEL: usize = 1024;
+/// The first public port a [`TestForwarder`] gives.
+pub(crate) const PUBLIC_PORTS: u16 = 30000;
 
 /// A forwarder for tests. Tunnel `n`, counted among the ones attached now, is given 198.18.0.(2 + n) and
 /// fd00::(2 + n), so a tunnel opened after another ended is given its addresses again. It notes what tunnels send,
 /// and lets a test deliver packets to a tunnel or end it.
 pub(crate) struct TestForwarder {
     pub mtu: u16,
+    /// The public ports each tunnel is given: tunnel `index` holds this many from `PUBLIC_PORTS + index * ports` on.
+    pub ports: u16,
     max_tunnels: usize,
     ends: std::sync::Mutex<Vec<mpsc::Sender<Vec<u8>>>>,
     sent: std::sync::Mutex<Vec<Vec<u8>>>,
@@ -263,7 +267,7 @@ pub(crate) struct TestForwarder {
 
 impl TestForwarder {
     pub(crate) fn new(mtu: u16, max_tunnels: usize) -> Self {
-        Self { mtu, max_tunnels, ends: Default::default(), sent: Default::default() }
+        Self { mtu, ports: 0, max_tunnels, ends: Default::default(), sent: Default::default() }
     }
 
     pub(crate) fn addresses(index: usize) -> (Ipv4Addr, Ipv6Addr) {
@@ -328,7 +332,8 @@ impl Forwarder for TestForwarder {
             None => ends.push(sender),
         }
         let (ipv4, ipv6) = Self::addresses(free);
-        Ok(TunnelEnd { ipv4: Some(ipv4), ipv6: Some(ipv6), packets })
+        let first_port = PUBLIC_PORTS.wrapping_add(free as u16 * self.ports);
+        Ok(TunnelEnd { ipv4: Some(ipv4), ipv6: Some(ipv6), first_port, ports: self.ports, packets })
     }
 
     fn send(&self, packet: &[u8]) {
