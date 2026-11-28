@@ -99,7 +99,7 @@ impl Settings {
             min_bind_port: vars.or("WEBVPN_MIN_BIND_PORT", basic.min_bind_port)?,
             ..basic
         };
-        Ok(Self {
+        let settings = Self {
             address: vars.or("WEBVPN_ADDRESS", Ipv4Addr::UNSPECIFIED.into())?,
             webtransport_port: vars.or("WEBVPN_WEBTRANSPORT_PORT", 4433)?,
             websocket_port: vars.or("WEBVPN_WEBSOCKET_PORT", 8443)?,
@@ -114,7 +114,23 @@ impl Settings {
             #[cfg(target_os = "linux")]
             ip_tunnel: vars.ip_tunnel(&config)?,
             config,
-        })
+        };
+        // The node sends each new TCP and UDP packet on a public port to a tunnel, whatever listens there.
+        #[cfg(target_os = "linux")]
+        if let Some(blocks) = settings.ip_tunnel.as_ref().and_then(|tunnel| tunnel.ports) {
+            let own = [
+                ("WEBVPN_WEBTRANSPORT_PORT", settings.webtransport_port),
+                ("WEBVPN_WEBSOCKET_PORT", settings.websocket_port),
+                ("WEBVPN_HTTP_PORT", settings.http_port),
+            ];
+            if let Some((name, _)) = own.iter().find(|&&(_, port)| (blocks.first..=blocks.last).contains(&port)) {
+                bail!("WEBVPN_IP_PORTS holds {name}, which the node sends to a tunnel: move the range clear of it");
+            }
+            if blocks.first < settings.policy.min_bind_port {
+                bail!("WEBVPN_IP_PORTS starts under WEBVPN_MIN_BIND_PORT, where no tunnel is given a port");
+            }
+        }
+        Ok(settings)
     }
 }
 
@@ -430,6 +446,21 @@ mod tests {
         let ipv6 =
             [TUNNELS[0], TUNNELS[1], ("WEBVPN_OWN_ADDRESSES", "2001:db8::7"), ("WEBVPN_IP_PORTS", "30000-30999")];
         assert!(refusal(&ipv6).starts_with("WEBVPN_IP_PORTS needs the relay's public IPv4 address"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn public_ports_stay_clear_of_the_relays_own_ports() {
+        for (range, name) in [
+            ("4000-4999", "WEBVPN_WEBTRANSPORT_PORT"),
+            ("8440-8450", "WEBVPN_WEBSOCKET_PORT"),
+            ("8080-8087", "WEBVPN_HTTP_PORT"),
+            ("1000-1999", "WEBVPN_MIN_BIND_PORT"),
+        ] {
+            let said = refusal(&[&TUNNELS[..], &[("WEBVPN_IP_PORTS", range)]].concat());
+            assert!(said.starts_with("WEBVPN_IP_PORTS") && said.contains(name), "{range}: {said}");
+        }
+        assert!(parse(&[&TUNNELS[..], &[("WEBVPN_IP_PORTS", "1024-1999")]].concat()).is_ok());
     }
 
     #[cfg(target_os = "linux")]
