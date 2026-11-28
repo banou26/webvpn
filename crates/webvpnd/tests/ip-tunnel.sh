@@ -132,6 +132,20 @@ grep -q "overlaps the node's local port range" "$work/refused" || { cat "$work/r
 ! ip link show dev webvpn0 >/dev/null 2>&1 || { echo "the refused setup made the device" >&2; exit 1; }
 echo "ok: public ports in the local port range are refused"
 
+# A pool whose tunnels could take more than half of the kernel's connection table is refused, and nothing is made. Its
+# five addresses at this ceiling take half at most: the connections to the public ports of four of them, which count
+# apart, take it past.
+max=$(cat /proc/sys/net/netfilter/nf_conntrack_max)
+if WEBVPN_IP_POOL=13.0.0.0/29 WEBVPN_IP_USER=1 WEBVPN_IP_FLOWS_PER_ADDRESS=$((max / 10)) WEBVPN_IP_PORTS=30000-30031 \
+	sh "$setup" up 2>"$work/refused"; then
+	echo "the setup took a pool whose ceilings pass half of the connection table" >&2
+	exit 1
+fi
+grep -q "half of the node's nf_conntrack_max" "$work/refused" || { cat "$work/refused" >&2; exit 1; }
+! ip link show dev webvpn0 >/dev/null 2>&1 && ! nft list table inet webvpn_webvpn0 >/dev/null 2>&1 ||
+	{ echo "the refused setup left something" >&2; exit 1; }
+echo "ok: a pool whose ceilings pass half of the connection table is refused"
+
 # The pool is a public network, outside the setup's reserved destinations, so that only the rule that drops packets
 # from the device to the device keeps one tunnel from another (check 7). Four tunnel addresses hold 8 public ports
 # each, 13.0.0.2 from 30000 on, and the fifth, 13.0.0.6, none.
