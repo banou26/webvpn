@@ -29,6 +29,7 @@ pub(crate) async fn listen<T: Transport, S: Session>(
     // forced to 0: the policy's floor and the system's AddrInUse keep a port from being taken over.
     let bound = async {
         session.policy.check_bind(Proto::Tcp, local)?;
+        crate::tunnel::check_bind(session.relay.config.forwarder.as_deref(), local)?;
         let listener = TcpListener::bind(local).await.map_err(|failure| Refusal::from_io(&failure))?;
         let bound = listener.local_addr().map_err(|failure| Refusal::from_io(&failure))?;
         Ok::<_, Refusal>((listener, bound))

@@ -37,9 +37,11 @@ pub(crate) async fn bind<T: Transport, S: Session>(
     let Some(ClientPacket::UdpBind { id, local }) = requests.recv().await else {
         bail!("a UDP socket's first request is not its bind");
     };
-    if let Err(refusal) = session.policy.check_bind(Proto::Udp, local) {
+    let forwarder = session.relay.config.forwarder.as_deref();
+    let allowed = session.policy.check_bind(Proto::Udp, local);
+    if let Err(refusal) = allowed.and_then(|()| crate::tunnel::check_bind(forwarder, local)) {
         session.reply(error(id, refusal)).await;
-        bail!("the policy refused a UDP bind");
+        bail!("a UDP bind was refused");
     }
     let (udp, bound) = match bind_port_locked(local).await {
         Ok(bound) => bound,

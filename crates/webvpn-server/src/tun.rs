@@ -5,6 +5,7 @@ use std::ffi::CString;
 use std::fmt;
 use std::io;
 use std::net::Ipv4Addr;
+use std::ops::RangeInclusive;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, Weak};
@@ -229,6 +230,10 @@ impl Forwarder for TunForwarder {
         let (sender, packets) = mpsc::channel(CHANNEL);
         ends.insert(ipv4, sender);
         Ok(TunnelEnd { ipv4: Some(ipv4), ipv6: None, first_port, ports, packets })
+    }
+
+    fn public_ports(&self) -> Option<RangeInclusive<u16>> {
+        self.shared.ports.map(|blocks| blocks.first..=blocks.last)
     }
 
     fn send(&self, packet: &[u8]) {

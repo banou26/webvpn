@@ -320,6 +320,11 @@ impl Forwarder for TestForwarder {
         self.mtu
     }
 
+    fn public_ports(&self) -> Option<std::ops::RangeInclusive<u16>> {
+        let count = self.max_tunnels as u16 * self.ports;
+        (count > 0).then(|| PUBLIC_PORTS..=PUBLIC_PORTS + count - 1)
+    }
+
     fn attach(&self) -> Result<TunnelEnd, Refusal> {
         let mut ends = self.ends.lock().unwrap();
         let free = ends.iter().position(mpsc::Sender::is_closed).unwrap_or(ends.len());

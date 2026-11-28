@@ -1,6 +1,7 @@
 //! An IP tunnel: the end a forwarder gave a client, and the pumps between it and the tunnel's stream.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Result};
@@ -33,6 +34,22 @@ pub trait Forwarder: Send + Sync + 'static {
     /// One whole packet from a tunnel toward its destination. It is called on the async runtime and must return at
     /// once, never waiting: a forwarder that cannot take the packet now drops it, as a link does.
     fn send(&self, packet: &[u8]);
+
+    /// The ports the forwarder's network sends to tunnels, from the first to the last, when it gives tunnels public
+    /// ports. The relay binds no socket of its own there: what anyone sends to such a port reaches a tunnel.
+    fn public_ports(&self) -> Option<RangeInclusive<u16>> {
+        None
+    }
+}
+
+/// Refuses to bind a UDP socket or a listener on one of the ports `forwarder` sends to tunnels.
+pub(crate) fn check_bind(forwarder: Option<&dyn Forwarder>, local: SocketAddr) -> Result<(), Refusal> {
+    match forwarder.and_then(|forwarder| forwarder.public_ports()) {
+        Some(ports) if ports.contains(&local.port()) => {
+            Err(Refusal::new(ErrorCode::ADDRESS_IN_USE, "the port is one of the relay's IP tunnels'"))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// One tunnel's end, as a [`Forwarder`] attached it.
@@ -577,6 +594,27 @@ mod tests {
         // the peer's next packet belongs to the flow it began
         assert!(harness.forwarder.deliver(0, udp_toward(0, PUBLIC_PORTS + 3)));
         assert_eq!(tunnel.next().await, udp_toward(0, PUBLIC_PORTS + 3));
+    }
+
+    #[tokio::test]
+    async fn a_socket_is_not_bound_on_a_port_the_forwarder_sends_to_tunnels() {
+        // two tunnels of four ports each: the eight ports from PUBLIC_PORTS on
+        let mut harness = with_ports(Config::default()).await;
+        let local = |port| SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        harness.control.send(ClientPacket::TcpListen { id: 1, local: local(PUBLIC_PORTS) }).await;
+        assert_eq!(code(&harness.control.next().await.unwrap()), (1, ErrorCode::ADDRESS_IN_USE));
+        harness.control.send(ClientPacket::UdpBind { id: 2, local: local(PUBLIC_PORTS + 7) }).await;
+        assert_eq!(code(&harness.control.next().await.unwrap()), (2, ErrorCode::ADDRESS_IN_USE));
+        harness.control.send(ClientPacket::UdpBind { id: 3, local: local(0) }).await;
+        assert!(matches!(harness.control.next().await, Some(RelayPacket::Socket { id: 3, .. })), "any free port binds");
+
+        let forwarder: &dyn Forwarder = &*harness.forwarder;
+        for outside in [PUBLIC_PORTS - 1, PUBLIC_PORTS + 8] {
+            assert!(check_bind(Some(forwarder), local(outside)).is_ok(), "{outside}");
+        }
+        assert!(check_bind(None, local(PUBLIC_PORTS)).is_ok(), "a relay with no forwarder binds any port");
+        let none = TestForwarder::new(MTU, 2);
+        assert!(check_bind(Some(&none), local(PUBLIC_PORTS)).is_ok(), "so does one whose tunnels have no ports");
     }
 
     #[tokio::test]
