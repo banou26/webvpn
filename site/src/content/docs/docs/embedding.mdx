@@ -172,7 +172,7 @@ A flow is forgotten once it stays silent both ways for its life. An answer refre
 | UDP | 5 minutes, as RFC 4787 recommends |
 | Any other | 2 minutes |
 
-A new SYN from the client on a TCP flow starts it over. A tunnel holds at most 3584 flows, about 360 KiB when full. A new flow that finds them all held first forgets the flows past their life, then, if that frees too few, the flows only their peers sent on and after them the ones nearest the end of their life, an eighth of the flows at once, so that a client that opens a new flow with every packet costs the relay a few steps a packet.
+A new SYN from the client on a TCP flow starts it over. A tunnel holds at most 3584 flows, about 360 KiB when full. A new flow that finds them all held first forgets the flows past their life, then, if that frees too few, an eighth of the flows at once, so that a client that opens a new flow with every packet costs the relay a few steps a packet: first the flows only their peers sent on or that the tunnel only refused, then the ones silent longest, an open TCP connection last.
 
 ### Limits
 
