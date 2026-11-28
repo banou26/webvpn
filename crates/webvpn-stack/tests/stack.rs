@@ -344,6 +344,7 @@ fn an_icmp_error_about_the_opening_packet_fails_the_connect_with_its_reason() {
     for (code, error) in [
         (1, ErrorCode::HOST_UNREACHABLE),
         (0, ErrorCode::NETWORK_UNREACHABLE),
+        (3, ErrorCode::CONNECTION_REFUSED),
         (13, ErrorCode::HOST_UNREACHABLE),
     ] {
         let mut net = Net::with_link(move |toward, packet| match toward {
@@ -369,6 +370,42 @@ fn fragmentation_needed_does_not_fail_a_connect() {
     net.site.tcp_listen(80, 1, BUFFERS).unwrap();
     let client = net.client.tcp_connect(SocketAddr::new(SITE.into(), 80), BUFFERS).unwrap();
     assert!(net.established(client), "the SYN is sent again and answered");
+}
+
+#[test]
+fn an_icmp_error_about_an_established_connection_leaves_it_open() {
+    let mut net = Net::new();
+    let (client, site) = net.connect(80);
+    net.client.tcp_send(client, b"x").unwrap();
+    net.client.poll(net.now);
+    let segment = net.client.output().unwrap();
+    net.client.input(&icmp_unreachable(&segment, 1));
+    net.site.input(&segment);
+    assert!(net.until(100, |net| net.site.tcp_recv(site, &mut [0; 1]) == Some(1)));
+    assert_eq!((net.client.tcp_state(client), net.client.tcp_error(client)), (Some(State::Established), None));
+}
+
+#[test]
+fn a_reset_ends_only_its_own_connection_of_those_on_one_port() {
+    let mut net = Net::new();
+    let listener = net.client.tcp_listen(FIRST_PORT, 4, BUFFERS).unwrap();
+    let dialed: Vec<u32> = (0..2)
+        .map(|_| net.site.tcp_connect(SocketAddr::new(CLIENT.into(), FIRST_PORT), BUFFERS).unwrap())
+        .collect();
+    let mut accepted = Vec::new();
+    assert!(net.until(1000, |net| {
+        accepted.extend(std::iter::from_fn(|| net.client.tcp_accept(listener)));
+        accepted.len() == 2
+    }));
+    // the site resets the later one, which a match on the local address alone would not find first
+    let (kept, reset) = (*accepted.iter().min().unwrap(), *accepted.iter().max().unwrap());
+    let remote = net.client.tcp_endpoints(reset).unwrap().1;
+    let dial = *dialed.iter().find(|&&id| net.site.tcp_endpoints(id).unwrap().0 == remote).unwrap();
+    net.site.tcp_abort(dial);
+    assert!(net.until(1000, closed(reset)));
+    assert_eq!(net.client.tcp_error(reset), Some(ErrorCode::CONNECTION_RESET));
+    net.until(10, |_| false);
+    assert_eq!((net.client.tcp_state(kept), net.client.tcp_error(kept)), (Some(State::Established), None));
 }
 
 #[test]
