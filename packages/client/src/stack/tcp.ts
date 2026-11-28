@@ -13,6 +13,10 @@ export type Buffers = { receive: number, send: number }
 
 const closed = () => stackError(ErrorCode.UNKNOWN_SOCKET)
 
+// the two ways the stack ends an open connection on its own: the peer's reset, and a peer that stopped answering
+const failure = (code: number) =>
+  code === ErrorCode.CONNECTION_RESET || code === ErrorCode.TIMED_OUT ? stackError(code) : undefined
+
 /**
  * The `TcpSocket` of a connection the stack holds as `id`. Its streams are paced by the stack's buffers: `readable`
  * takes bytes only as it is read, so a slow reader closes the window the peer sees, and a write waits for room in the
@@ -24,7 +28,7 @@ export const stackTcpSocket = (engine: Engine, id: number, local: Address, remot
   let stopped = false
   let released = false
   let readDone = false
-  let reset: WebVpnError | undefined
+  let failed: WebVpnError | undefined
   let ending: Promise<void> | undefined
   let controller!: ReadableStreamDefaultController<Uint8Array>
 
@@ -70,8 +74,8 @@ export const stackTcpSocket = (engine: Engine, id: number, local: Address, remot
         }
         if (length < 0) {
           // kept for the writes, since a connection that ended is let go of
-          if (calls.tcp_error(id) === ErrorCode.CONNECTION_RESET) reset = stackError(ErrorCode.CONNECTION_RESET)
-          return finish(reset)
+          failed = failure(calls.tcp_error(id))
+          return finish(failed)
         }
         await next()
       }
@@ -94,11 +98,11 @@ export const stackTcpSocket = (engine: Engine, id: number, local: Address, remot
         const error = engine.ended()
         if (error) throw error
         if (stopped) throw closed()
-        if (reset) throw reset
+        if (failed) throw failed
         const length = Math.min(chunk.byteLength - at, CHUNK_BYTES)
         engine.buffer().set(chunk.subarray(at, at + length))
         const taken = calls.tcp_send(id, length)
-        if (taken < 0) throw -taken === ErrorCode.CONNECTION_RESET ? stackError(-taken) : closed()
+        if (taken < 0) throw failure(-taken) ?? closed()
         at += taken
         kick()
         if (!taken) await next()

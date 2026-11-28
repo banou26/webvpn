@@ -205,6 +205,24 @@ describe('TCP over a tunnel', () => {
     expect(await outcome(writer.write(bytes('late')))).toMatchObject({ code: ErrorCode.CONNECTION_RESET })
   })
 
+  it('a peer silent through keep-alive\'s probes errors the reader and the next write with TIMED_OUT', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    try {
+      const { client, site, pipe } = await internet()
+      const { socket } = await connect(client, site)
+      pipe.drop = () => true
+      await socket.setOption({ type: 'keepAlive', enabled: true, initialDelaySeconds: 1 })
+      const read = outcome(socket.readable.getReader().read())
+      // the idle second, then 9 probes 75 seconds apart
+      await vi.advanceTimersByTimeAsync(1000 + 9 * 75_000)
+      expect(await read).toMatchObject({ code: ErrorCode.TIMED_OUT })
+      const writer = socket.writable.getWriter()
+      expect(await outcome(writer.write(bytes('late')))).toMatchObject({ code: ErrorCode.TIMED_OUT })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('close() sends what this side holds, then ends; reset() ends at once with a reset', async () => {
     const { client, site } = await internet()
     const first = await connect(client, site, 80)
