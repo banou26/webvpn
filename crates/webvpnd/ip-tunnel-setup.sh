@@ -72,6 +72,10 @@ up() {
 	esac
 	network=${pool%/*}
 	prefix=${pool#*/}
+	case $prefix in
+	[89] | [12][0-9] | 30) ;;
+	*) fail "WEBVPN_IP_POOL's prefix length is not 8 to 30" ;;
+	esac
 	last=${network##*.}
 	address=${network%.*}.$((last + 1))
 	# every address of the network but its own, the device's and the broadcast one

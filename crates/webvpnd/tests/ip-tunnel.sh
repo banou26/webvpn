@@ -145,6 +145,16 @@ grep -q "every address holds a block" "$work/refused" || { cat "$work/refused" >
 	{ echo "the refused setup left something" >&2; exit 1; }
 echo "ok: a pool with more tunnel addresses than blocks of public ports is refused"
 
+# A pool the relay refuses, with no tunnel address, is refused, and nothing is made.
+if WEBVPN_IP_POOL=13.0.0.0/31 WEBVPN_IP_USER=1 sh "$setup" up 2>"$work/refused"; then
+	echo "the setup took a pool with no tunnel address" >&2
+	exit 1
+fi
+grep -q "prefix length is not 8 to 30" "$work/refused" || { cat "$work/refused" >&2; exit 1; }
+! ip link show dev webvpn0 >/dev/null 2>&1 && ! nft list table inet webvpn_webvpn0 >/dev/null 2>&1 ||
+	{ echo "the refused setup left something" >&2; exit 1; }
+echo "ok: a pool with no tunnel address is refused"
+
 # A pool whose tunnels could take more than half of the kernel's connection table is refused, and nothing is made. Its
 # five addresses at this ceiling take half at most: the connections to their public ports, which count apart, take it
 # past.
