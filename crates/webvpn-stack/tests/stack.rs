@@ -627,6 +627,38 @@ fn a_released_connection_still_sends_what_it_held_and_ends() {
 }
 
 #[test]
+fn a_released_connection_the_peer_stops_answering_is_reset_after_a_minute() {
+    use std::{cell::Cell, rc::Rc};
+    let (silent, resets) = (Rc::new(Cell::new(false)), Rc::new(Cell::new(0)));
+    let (link_silent, link_resets) = (silent.clone(), resets.clone());
+    let mut net = Net::with_link(move |toward, packet| {
+        if toward == Toward::Site && packet.get(33).is_some_and(|flags| flags & 0x04 != 0) {
+            link_resets.set(link_resets.get() + 1);
+        }
+        if link_silent.get() { Fate::Drop } else { Fate::After(1) }
+    });
+    let listener = net.client.tcp_listen(FIRST_PORT, 1, BUFFERS).unwrap();
+    net.site.tcp_connect(SocketAddr::new(CLIENT.into(), FIRST_PORT), BUFFERS).unwrap();
+    let mut accepted = None;
+    assert!(net.until(1000, |net| {
+        accepted = net.client.tcp_accept(listener);
+        accepted.is_some()
+    }));
+    let accepted = accepted.unwrap();
+    net.client.release(listener);
+    // the connection holds its public port until the stack lets go of it
+    assert_eq!(net.client.public_port(Protocol::Tcp), Some(FIRST_PORT + 1));
+    net.client.tcp_send(accepted, b"never acknowledged").unwrap();
+    net.client.tcp_close(accepted);
+    net.client.release(accepted);
+    silent.set(true);
+    net.until_every(59_000, 100, |_| false);
+    assert_eq!((resets.get(), net.client.public_port(Protocol::Tcp)), (0, Some(FIRST_PORT + 1)));
+    net.until_every(2000, 100, |_| false);
+    assert_eq!((resets.get(), net.client.public_port(Protocol::Tcp)), (1, Some(FIRST_PORT)));
+}
+
+#[test]
 fn a_connection_released_after_an_idle_spell_still_ends_in_order() {
     let mut net = Net::new();
     let (client, site) = net.connect(80);
