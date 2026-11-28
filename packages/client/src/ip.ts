@@ -6,10 +6,12 @@ import { framed, noop, ok, unexpected, WebVpnError } from './context'
 import { decodeIpFrame, encodeIpFrame, ErrorCode, MIN_MTU } from './protocol'
 
 // A socket of the stack sends what its window allows in one turn of the event loop, before the carrier takes any of
-// it, so the queue holds two default send buffers of 128 KiB: at 64 KiB one socket's burst did not fit. Once several
-// sockets send, this queue and not their windows bounds how long every packet of the tunnel waits on a slow link: its
-// size at the link's rate, 0.2 s at 10 Mbit/s and 2 s at 1 Mbit/s. At 1 MiB that was 8 s at 1 Mbit/s, past the 5 s
-// the stack gives a lookup.
+// it, so the queue holds two default send buffers of 128 KiB: at 64 KiB one socket's burst did not fit, and one upload
+// carried a ninth to a fifth as much. Once several sockets send, the queue stands in front of every packet of the
+// tunnel for its size at the link's rate, 0.2 s at 10 Mbit/s and 2 s at 1 Mbit/s, and what the browser or the system
+// holds below it comes on top. Measured on 2026-11-28 with 8 uploads: 1 MiB carried 3 times as much on a fast link,
+// but at 1 Mbit/s a lookup behind it failed at its 5 s, and over WebTransport at 50 Mbit/s a download beside the
+// uploads fell from 37 to 5 Mbit/s.
 const QUEUE_BYTES = 256 * 1024
 
 const STREAM_MS = 30_000
