@@ -19,7 +19,7 @@
 #                      an answer on a forgotten flow never reaches the client anyway: the default sits a little above,
 #                      so that the relay's own bound acts first and this one only keeps the kernel's table bounded.
 #   WEBVPN_IP_PORTS    the tunnels' public ports, as the relay is given them: a range written first-last, such as
-#                      30000-39999. Unset, tunnels have none. The pool's k-th tunnel address, from 0 at the pool's
+#                      20000-29999. Unset, tunnels have none. The pool's k-th tunnel address, from 0 at the pool's
 #                      second host address, holds the ports first + k * size to first + (k + 1) * size - 1, and an
 #                      address whose block would pass last holds none. A TCP or UDP packet to one of the node's own
 #                      addresses on one of those ports goes to the address that holds it, on the same port, and counts

@@ -195,7 +195,7 @@ impl<F: Fn(&str) -> Result<String, VarError>> Vars<F> {
         let Some(range) = self.get(name)? else { return Ok(None) };
         let parsed = range.split_once('-').and_then(|(first, last)| Some((first.parse().ok()?, last.parse().ok()?)));
         let Some((first, last)) = parsed.filter(|&(first, last): &(u16, u16)| 0 < first && first <= last) else {
-            bail!("{name} does not parse: write a range of ports from 1 to 65535 as first-last, such as 30000-39999");
+            bail!("{name} does not parse: write a range of ports from 1 to 65535 as first-last, such as 20000-29999");
         };
         if per_tunnel == 0 || u32::from(per_tunnel) > u32::from(last - first) + 1 {
             bail!("{} is 0 or more than the ports of {name}", IP_TUNNEL_VARIABLES[4]);
