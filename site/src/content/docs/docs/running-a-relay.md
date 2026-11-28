@@ -169,7 +169,7 @@ WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=198.18.0.0/28 WEBVPN_IP_USER=webvpnd sh 
 
 It takes `WEBVPN_IP_DEVICE` (`webvpn0` by default), `WEBVPN_IP_POOL`, `WEBVPN_IP_PORTS` and `WEBVPN_IP_PORTS_PER_TUNNEL` as the relay does, `WEBVPN_IP_USER`, the user the relay runs as, which is required (a device with no owner is open to every local user), `WEBVPN_IP_MTU` (`1500` by default), and `WEBVPN_IP_FLOWS_PER_ADDRESS`, the open connections the kernel tracks that one tunnel address opens, and apart from those, to its public ports (`4096` by default, a little above the 3584 flows the relay keeps for a tunnel, so that the relay's own bound acts first). `up` prints nothing unless something fails. Running it again with the same values changes nothing: it keeps the table it loaded, and with it what the ceilings count and the timeouts of the connections the kernel tracks. With other values it loads the table again, which counts from nothing and puts the connections open at that moment back on the host's timeouts. To change a setting, run `down`, then `up`, with the relay stopped. It:
 
-1. makes the device for its user, gives it the network's first host address, sets its MTU and brings it up;
+1. makes the device for its user, gives it the network's first host address, as its only IPv4 address, sets its MTU and brings it up;
 2. turns IPv4 forwarding on, when it is off;
 3. loads one nftables table of its own, named after the device, with:
    - packets from the device to the device dropped, so that no tunnel reaches another;
