@@ -29,17 +29,21 @@ export const stackListen = (engine: Engine, local: Address, backlog: number, buf
     if (done) return
     done = true
     unwatch()
-    if (!engine.ended()) {
-      // the stack would reset the connections nobody took, where a session's listener closes them
-      for (let accepted = calls.tcp_accept(id); accepted; accepted = calls.tcp_accept(id)) {
-        calls.tcp_close(accepted)
-        calls.stack_release(accepted)
+    try {
+      if (!engine.ended()) {
+        // the stack would reset the connections nobody took, where a session's listener closes them
+        for (let accepted = calls.tcp_accept(id); accepted; accepted = calls.tcp_accept(id)) {
+          calls.tcp_close(accepted)
+          calls.stack_release(accepted)
+        }
+        calls.stack_release(id)
+        kick()
       }
-      calls.stack_release(id)
-      kick()
+    } finally {
+      // a trap in these calls ends the stack, whose end no longer reaches this listener
+      wake()
+      finish(by)
     }
-    wake()
-    finish(by)
   }
 
   const unwatch = engine.watch(id, () => {

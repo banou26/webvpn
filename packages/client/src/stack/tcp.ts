@@ -35,8 +35,9 @@ export const stackTcpSocket = (engine: Engine, id: number, local: Address, remot
   const release = () => {
     if (released || engine.ended()) return
     released = true
-    unwatch()
     calls.stack_release(id)
+    // unwatched after the call, so the end that a trap in it makes still wakes this socket
+    unwatch()
     kick()
   }
 

@@ -32,12 +32,16 @@ export const stackUdpBind = (engine: Engine, port: number, ip: Uint8Array, buffe
     if (done) return
     done = true
     unwatch()
-    if (!engine.ended()) {
-      calls.stack_release(id)
-      kick()
+    try {
+      if (!engine.ended()) {
+        calls.stack_release(id)
+        kick()
+      }
+    } finally {
+      // a trap in the release ends the stack, whose end no longer reaches this socket
+      wake()
+      finish(by)
     }
-    wake()
-    finish(by)
   }
 
   const unwatch = engine.watch(id, () => {
