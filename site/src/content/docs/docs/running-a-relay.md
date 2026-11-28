@@ -169,7 +169,7 @@ WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=198.18.0.0/16 WEBVPN_IP_USER=webvpnd sh 
 It takes `WEBVPN_IP_DEVICE` (`webvpn0` by default), `WEBVPN_IP_POOL`, `WEBVPN_IP_PORTS` and `WEBVPN_IP_PORTS_PER_TUNNEL` as the relay does, `WEBVPN_IP_USER`, the user the relay runs as, which is required (a device with no owner is open to every local user), `WEBVPN_IP_MTU` (`1500` by default), and `WEBVPN_IP_FLOWS_PER_ADDRESS`, the connections the kernel tracks for one tunnel address (`4096` by default, a little above the 3584 flows the relay keeps for a tunnel, so that the relay's own bound acts first). `up` prints nothing unless something fails, and running it again changes nothing. It:
 
 1. makes the device for its user, gives it the network's first host address, sets its MTU and brings it up;
-2. turns IPv4 forwarding on;
+2. turns IPv4 forwarding on, when it is off;
 3. loads one nftables table of its own, named after the device, with:
    - packets from the device to the device dropped, so that no tunnel reaches another;
    - IPv6 packets from the device dropped, until tunnels have IPv6 addresses;
@@ -182,6 +182,8 @@ It takes `WEBVPN_IP_DEVICE` (`webvpn0` by default), `WEBVPN_IP_POOL`, `WEBVPN_IP
    - the network's addresses translated to the host's where packets leave by any other interface.
 
 `down` removes that table and the device, and leaves forwarding on, since other things on the host may need it. `up` refuses a range of public ports that overlaps the host's local port range (`/proc/sys/net/ipv4/ip_local_port_range`), and then changes nothing.
+
+The script needs the right to change the network (`CAP_NET_ADMIN`) and `/dev/net/tun`, and to turn forwarding on, the right to write the system's settings. On a host whose forwarding is already on, as on a Kubernetes node, a container with `CAP_NET_ADMIN` alone and `/dev/net/tun` mounted can run it. The relay's own container then needs only `/dev/net/tun` mounted and no capability.
 
 The table does not assume it is the only firewall on the host. Another table that drops forwarded packets, such as a firewall manager's, still drops the tunnels' packets: let packets from and toward the device through there too.
 

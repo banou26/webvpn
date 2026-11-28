@@ -1,6 +1,7 @@
 #!/bin/sh
 # Sets a Linux node up for webvpnd's IP tunnels, or takes that setup down. Run it as root, before the relay starts:
-# the relay itself needs no privilege, it only opens the device this makes for its user.
+# the relay itself needs no privilege, it only opens the device this makes for its user. Where forwarding is on
+# already, the right to change the network (CAP_NET_ADMIN) and /dev/net/tun are all the script needs.
 #
 #   ip-tunnel-setup.sh up      makes the device and its rules
 #   ip-tunnel-setup.sh down    removes them
@@ -63,7 +64,8 @@ up() {
 	ip link show dev "$device" >/dev/null 2>&1 || ip tuntap add dev "$device" mode tun user "$user"
 	ip address replace "$address/$prefix" dev "$device"
 	ip link set dev "$device" mtu "$mtu" up
-	echo 1 >/proc/sys/net/ipv4/ip_forward
+	# only when it is off: where it is on already, the step then needs no more than the right to change the network
+	[ "$(cat /proc/sys/net/ipv4/ip_forward)" = 1 ] || echo 1 >/proc/sys/net/ipv4/ip_forward
 
 	# The reserved destinations are the relay's own egress rule (crates/webvpn-server/src/egress.rs), held again here
 	# so that a relay set to reach them still does not reach them through a tunnel.
