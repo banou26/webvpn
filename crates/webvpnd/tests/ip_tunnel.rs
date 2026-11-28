@@ -1,12 +1,12 @@
 //! IP tunnels through a running `webvpnd`, over a real TUN device and a real network. `tests/ip-tunnel.sh` builds that
 //! network in namespaces of its own, starts the relay and runs this test there; a plain `cargo test` skips it.
 //!
-//! The network: the relay's host routes the pool 198.18.0.0/29 to its TUN device, under `ip-tunnel-setup.sh`, and
+//! The network: the relay's host routes the pool 13.0.0.0/29 to its TUN device, under `ip-tunnel-setup.sh`, and
 //! reaches "the internet" at 11.0.0.0/24 by a veth pair, its default route, and at 12.0.0.0/24 by a second one. The
 //! peer, at 11.0.0.2 and 12.0.0.2, answers ICMP echoes, writes what reaches UDP port 7002 to a file, accepts TCP on
 //! port 7003, and has nothing on UDP port 7004. It is reached at the private address 10.0.0.2 too. The setup keeps at
 //! most 8 connections for one tunnel address. The relay's public address is 11.0.0.1, and its public ports are 30000
-//! to 30031 in blocks of 8: 198.18.0.2 holds 30000 to 30007, up to 198.18.0.5, and 198.18.0.6 holds none.
+//! to 30031 in blocks of 8: 13.0.0.2 holds 30000 to 30007, up to 13.0.0.5, and 13.0.0.6 holds none.
 //!
 //! This test is the peer's UDP port 7001 itself, from a socket it makes in the peer's namespace, and answers each
 //! datagram there with the source address it came from. socat's forking responder left a datagram that closely
@@ -47,13 +47,13 @@ const PRIVATE: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
 /// The connections the setup keeps for one tunnel address, from `WEBVPN_IP_FLOWS_PER_ADDRESS` in tests/ip-tunnel.sh.
 const FLOWS_PER_ADDRESS: u16 = 8;
 /// The TUN device's own address, the pool's first host.
-const DEVICE: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 1);
+const DEVICE: Ipv4Addr = Ipv4Addr::new(13, 0, 0, 1);
 const POOL: [Ipv4Addr; 5] = [
-    Ipv4Addr::new(198, 18, 0, 2),
-    Ipv4Addr::new(198, 18, 0, 3),
-    Ipv4Addr::new(198, 18, 0, 4),
-    Ipv4Addr::new(198, 18, 0, 5),
-    Ipv4Addr::new(198, 18, 0, 6),
+    Ipv4Addr::new(13, 0, 0, 2),
+    Ipv4Addr::new(13, 0, 0, 3),
+    Ipv4Addr::new(13, 0, 0, 4),
+    Ipv4Addr::new(13, 0, 0, 5),
+    Ipv4Addr::new(13, 0, 0, 6),
 ];
 
 /// The public ports, from `WEBVPN_IP_PORTS` in tests/ip-tunnel.sh, in blocks of the default 8.
@@ -593,7 +593,7 @@ async fn tunnels_reach_a_real_network_and_take_only_answers() {
 }
 
 /// The checks of the tunnels' public ports. Every tunnel address is held, so each is known: the tunnels at
-/// 198.18.0.3 and .4 sent little before, and stay far under the ceiling of connections.
+/// 13.0.0.3 and .4 sent little before, and stay far under the ceiling of connections.
 async fn public_ports(session: &mut Session) {
     let mut tunnels = Vec::new();
     for _ in 0..POOL.len() {
