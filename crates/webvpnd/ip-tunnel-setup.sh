@@ -28,10 +28,11 @@
 #                      bound acts first. Those connections outlast their tunnel, so the pool's tunnel addresses times
 #                      this, plus the addresses that hold public ports times it, is what the tunnels' open connections
 #                      can take of the kernel's table, which every program on the node shares: up refuses more than
-#                      half of nf_conntrack_max. A TCP connection stops counting once it closes. The kernel keeps it
-#                      for the node's TIME_WAIT timeout (nf_conntrack_tcp_timeout_time_wait, 2 minutes by default), as
-#                      it keeps every closed connection on the node. So an address that opens and closes connections
-#                      fast holds more.
+#                      half of nf_conntrack_max. It counts only its own pool: on a host with several setups, size their
+#                      pools and ceilings so that together they stay under half. A TCP connection stops counting once
+#                      it closes. The kernel keeps it for the node's TIME_WAIT timeout
+#                      (nf_conntrack_tcp_timeout_time_wait, 2 minutes by default), as it keeps every closed connection
+#                      on the node. So an address that opens and closes connections fast holds more.
 #   WEBVPN_IP_PORTS    the tunnels' public ports, as the relay is given them: a range written first-last, such as
 #                      20000-29999. Unset, tunnels have none. The pool's k-th tunnel address, from 0 at the pool's
 #                      second host address, holds the ports first + k * size to first + (k + 1) * size - 1, and up
@@ -91,7 +92,7 @@ delete table inet ${table}_probe
 EOF
 	# The kernel keeps a tunnel's connections past the tunnel, so each address may hold its ceiling of open ones, and
 	# each address that holds public ports that many again: that is what the tunnels can take of a table every program
-	# on the node shares, and half of it stays for the others.
+	# on the node shares, and half of it stays for the others when this is the host's only setup.
 	max=$(cat /proc/sys/net/netfilter/nf_conntrack_max)
 	[ $(((addresses + holders) * flows)) -le $((max / 2)) ] ||
 		fail "the pool's $addresses tunnel addresses, plus the $holders that hold public ports, times \
