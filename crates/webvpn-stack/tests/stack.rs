@@ -92,6 +92,18 @@ impl Net {
         done(self)
     }
 
+    /// As `until`, in steps of `step` milliseconds.
+    fn until_every(&mut self, ms: i64, step: i64, mut done: impl FnMut(&mut Self) -> bool) -> bool {
+        for _ in 0..ms / step {
+            if done(self) {
+                return true;
+            }
+            self.tick();
+            self.now += step - 1;
+        }
+        done(self)
+    }
+
     fn established(&mut self, client: u32) -> bool {
         self.until(2000, |net| net.client.tcp_state(client) == Some(State::Established))
     }
@@ -350,15 +362,91 @@ fn an_idle_connection_without_keep_alive_lasts() {
         accepted.is_some()
     }));
     let accepted = accepted.unwrap();
-    // three hours in steps of a second
-    for _ in 0..10_800 {
-        net.tick();
-        net.now += 999;
-    }
+    net.until_every(3 * 3_600_000, 1000, |_| false);
     let states = (net.client.tcp_state(accepted), net.site.tcp_state(dialed));
     assert_eq!(states, (Some(State::Established), Some(State::Established)));
     net.site.tcp_send(dialed, b"late").unwrap();
     assert!(net.until(100, |net| net.client.tcp_recv(accepted, &mut [0; 4]) == Some(4)));
+}
+
+fn closed(client: u32) -> impl FnMut(&mut Net) -> bool {
+    move |net| net.client.tcp_state(client) == Some(State::Closed)
+}
+
+/// Polls the client alone, each time when its last poll asked, as a page does, and drops what it sends, as for a
+/// peer gone silent: how many milliseconds passed until `client` closed, or a little over an hour.
+fn alone_until_closed(net: &mut Net, client: u32) -> i64 {
+    let start = net.now;
+    loop {
+        let delay = net.client.poll(net.now);
+        while net.client.output().is_some() {}
+        if net.client.tcp_state(client) == Some(State::Closed) || net.now - start > 3_600_000 {
+            return net.now - start;
+        }
+        net.now += delay.expect("a poll is asked for") as i64;
+    }
+}
+
+#[test]
+fn what_a_silent_peer_never_acknowledges_times_out_after_15_minutes() {
+    for half_close in [false, true] {
+        let mut net = Net::new();
+        let (client, _) = net.connect(80);
+        if half_close {
+            net.client.tcp_close(client);
+        } else {
+            net.client.tcp_send(client, b"lost").unwrap();
+        }
+        assert_eq!(alone_until_closed(&mut net, client), 900_000, "half close {half_close}");
+        assert_eq!(net.client.tcp_error(client), Some(ErrorCode::TIMED_OUT), "half close {half_close}");
+    }
+}
+
+#[test]
+fn keep_alive_ends_a_connection_whose_peer_went_silent_as_linux_does() {
+    let mut net = Net::new();
+    let (client, _) = net.connect(80);
+    net.client.tcp_set_keep_alive(client, Some(30)).unwrap();
+    // 30 seconds idle, then 9 probes 75 seconds apart
+    assert_eq!(alone_until_closed(&mut net, client), 705_000);
+    assert_eq!(net.client.tcp_error(client), Some(ErrorCode::TIMED_OUT));
+}
+
+#[test]
+fn keep_alive_keeps_a_live_idle_connection() {
+    let mut net = Net::new();
+    let (client, site) = net.connect(80);
+    net.client.tcp_set_keep_alive(client, Some(0)).unwrap();
+    assert!(!net.until_every(5 * 3_600_000, 1000, closed(client)));
+    net.site.tcp_send(site, b"late").unwrap();
+    assert!(net.until(100, |net| net.client.tcp_recv(client, &mut [0; 4]) == Some(4)));
+}
+
+#[test]
+fn a_peer_that_does_not_read_keeps_the_connection() {
+    let mut net = Net::new();
+    let (client, _) = net.connect(80);
+    let data = pattern(1_000_000);
+    let mut sent = 0;
+    net.until_every(3_600_000, 100, |net| {
+        sent += net.client.tcp_send(client, &data[sent..]).unwrap();
+        false
+    });
+    assert!(sent < data.len(), "the peer's window closed");
+    assert_eq!(net.client.tcp_state(client), Some(State::Established));
+}
+
+#[test]
+fn a_connection_idle_for_hours_still_closes_in_order_and_takes_keep_alive() {
+    let mut net = Net::new();
+    let (closing, closing_site) = net.connect(80);
+    let (probed, _) = net.connect(81);
+    net.until_every(3 * 3_600_000, 1000, |_| false);
+    net.client.tcp_close(closing);
+    net.client.tcp_set_keep_alive(probed, Some(60)).unwrap();
+    assert!(net.until(1000, |net| net.site.tcp_recv(closing_site, &mut [0; 16]).is_none()));
+    assert_eq!(net.site.tcp_error(closing_site), None, "the peer reads the end, not a reset");
+    assert!(!net.until_every(3_600_000, 1000, closed(probed)));
 }
 
 #[test]

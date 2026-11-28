@@ -16,6 +16,12 @@ const RELEASED_MS: i64 = 60_000;
 const KEEP_ALIVE_DEFAULT_SECONDS: u64 = 7200;
 // a connection a listener took that the peer does not finish opening gives its place in the backlog back this soon
 const HANDSHAKE_MS: u64 = 10_000;
+// how long a peer may stay silent, as for Linux behind the relay: while bytes or the end wait for its acknowledgement,
+// about what tcp_retries2 (15) retransmissions take; with keep-alive on, the idle time and then tcp_keepalive_probes
+// (9) probes tcp_keepalive_intvl (75 s) apart
+const UNACKED_MS: u64 = 900_000;
+const KEEP_ALIVE_INTERVAL_SECONDS: u64 = 75;
+const KEEP_ALIVE_PROBES: u32 = 9;
 const UDP_BYTES_PER_SLOT: usize = 256;
 const UDP_MIN_SLOTS: usize = 16;
 const UNSEEN: (u8, usize, usize) = (u8::MAX, 0, 0);
@@ -132,6 +138,25 @@ struct Tcp {
     released: bool,
     /// Set by the first poll after the release, as `connect_by` is.
     released_at: Option<Instant>,
+    /// How long a peer may stay silent with keep-alive on.
+    keep_alive_for: Option<Duration>,
+    /// Since when the peer is silent while the connection waits for it: set by a poll, and cleared by any segment
+    /// from the peer. smoltcp's own timeout counts from the peer's last segment, which on an idle connection can be
+    /// hours before a wait starts.
+    silent_since: Option<Instant>,
+}
+
+impl Tcp {
+    // how long the peer may stay silent, `None` while nothing waits for it
+    fn patience(&self, socket: &tcp::Socket) -> Option<Duration> {
+        use tcp::State::*;
+        match socket.state() {
+            Closed | Listen | SynSent | SynReceived | TimeWait => None,
+            FinWait1 | Closing | LastAck => Some(Duration::from_millis(UNACKED_MS)),
+            _ if socket.send_queue() > 0 => Some(Duration::from_millis(UNACKED_MS)),
+            _ => self.keep_alive_for,
+        }
+    }
 }
 
 struct Listener {
@@ -391,6 +416,8 @@ impl Stack {
             ended_here: false,
             released: false,
             released_at: None,
+            keep_alive_for: None,
+            silent_since: None,
         })))
     }
 
@@ -429,6 +456,8 @@ impl Stack {
     /// Why the connection failed or ended abnormally: `CONNECTION_REFUSED` for a reset or an ICMP port unreachable
     /// in answer to the opening packet, `TIMED_OUT` for a connect that got no answer in time, `HOST_UNREACHABLE` or
     /// `NETWORK_UNREACHABLE` for an ICMP error about the opening packet, `CONNECTION_RESET` for a later reset.
+    /// `TIMED_OUT` also ends a connection whose peer stayed silent while bytes or the end waited 15 minutes for its
+    /// acknowledgement, or for the time `tcp_set_keep_alive` gives it.
     pub fn tcp_error(&self, id: u32) -> Option<ErrorCode> {
         self.tcp(id)?.error
     }
@@ -480,13 +509,20 @@ impl Stack {
         Ok(())
     }
 
-    /// Probes an idle connection every `seconds`, 0 for the usual two hours; `None` stops the probes.
+    /// Turns keep-alive on, for a connection idle `seconds` (0 for the usual two hours), or off with `None`. A peer
+    /// silent that long and then for 9 probes 75 seconds apart is given up on with `TIMED_OUT`, as Linux behind the
+    /// relay gives up. smoltcp probes at one pace, so the probes go out every 75 seconds the connection is idle, or
+    /// every `seconds` when that is shorter.
     pub fn tcp_set_keep_alive(&mut self, id: u32, seconds: Option<u32>) -> Result<()> {
-        let interval = seconds.map(|seconds| match seconds {
+        let idle = seconds.map(|seconds| match seconds {
             0 => Duration::from_secs(KEEP_ALIVE_DEFAULT_SECONDS),
             seconds => Duration::from_secs(u64::from(seconds)),
         });
-        self.tcp_socket(id)?.set_keep_alive(interval);
+        let interval = Duration::from_secs(KEEP_ALIVE_INTERVAL_SECONDS);
+        self.tcp_socket(id)?.set_keep_alive(idle.map(|idle| idle.min(interval)));
+        if let Some(tcp) = self.tcp_at(id) {
+            tcp.keep_alive_for = idle.map(|idle| idle + interval * KEEP_ALIVE_PROBES);
+        }
         Ok(())
     }
 
@@ -594,6 +630,8 @@ impl Stack {
             ended_here: true,
             released: true,
             released_at: None,
+            keep_alive_for: None,
+            silent_since: None,
         };
         self.insert(Kind::Tcp(tcp));
     }
@@ -691,16 +729,17 @@ impl Stack {
         }
     }
 
-    // smoltcp tells a socket neither that a reset closed it nor of an ICMP error about its packets, so both are read
-    // here, before the packet goes in
+    // smoltcp tells a socket neither that a reset closed it, nor of an ICMP error about its packets, nor when the peer
+    // last sent anything, so these are read here, before the packet goes in
     fn inspect(&mut self, packet: &[u8]) {
         let Some(outer) = header(packet) else { return };
         match outer.protocol {
-            TCP if outer.payload.get(13).is_some_and(|flags| flags & RST != 0) => {
+            TCP => {
                 let Some((from, to)) = ports(outer.payload) else { return };
                 let (local, remote) = (SocketAddr::new(outer.destination, to), SocketAddr::new(outer.source, from));
                 if let Some(tcp) = self.find_tcp(local, remote).and_then(|id| self.tcp_at(id)) {
-                    tcp.reset = true;
+                    tcp.reset |= outer.payload.get(13).is_some_and(|flags| flags & RST != 0);
+                    tcp.silent_since = None;
                 }
             }
             ICMP | ICMPV6 => {
@@ -738,6 +777,14 @@ impl Stack {
                         tcp.error = Some(ErrorCode::TIMED_OUT);
                         socket.abort();
                     }
+                    match tcp.patience(socket) {
+                        Some(patience) if now >= *tcp.silent_since.get_or_insert(now) + patience => {
+                            tcp.error = Some(ErrorCode::TIMED_OUT);
+                            socket.abort();
+                        }
+                        Some(_) => {}
+                        None => tcp.silent_since = None,
+                    }
                     if tcp.released {
                         let released_at = *tcp.released_at.get_or_insert(now);
                         while socket.can_recv() && socket.recv(|bytes| (bytes.len(), ())).is_ok() {}
@@ -768,6 +815,8 @@ impl Stack {
                 ended_here: false,
                 released: false,
                 released_at: None,
+                keep_alive_for: None,
+                silent_since: None,
             };
             let id = self.insert(Kind::Tcp(tcp));
             if let Some(Entry { kind: Kind::Listener(listener), .. }) = self.entries.get_mut(&listener_id) {
@@ -823,7 +872,9 @@ impl Stack {
             let Kind::Tcp(tcp) = &entry.kind else { continue };
             let connecting = tcp.connect_by.filter(|_| tcp.state == tcp::State::SynSent);
             let released = tcp.released_at.map(|at| at + Duration::from_millis(RELEASED_MS as u64));
-            for at in connecting.into_iter().chain(released) {
+            let patience = tcp.patience(self.sockets.get::<tcp::Socket>(tcp.handle));
+            let silent = tcp.silent_since.zip(patience).map(|(since, patience)| since + patience);
+            for at in connecting.into_iter().chain(released).chain(silent) {
                 next = Some(next.map_or(at, |next| next.min(at)));
             }
         }
