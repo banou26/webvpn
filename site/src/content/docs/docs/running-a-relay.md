@@ -219,7 +219,7 @@ With `--network host`, the relay binds its ports on the host itself, so no `-p` 
 
 - **Its address is private, and translated.** It is one of the network's addresses, and the host translates it to its own where packets leave. It lasts as long as the tunnel does.
 - **A tunnel takes only answers.** A packet reaches the client only when it answers a flow the client sent on, or is an ICMP error about a packet it sent, or comes to one of its [public ports](#public-ports). Nothing else reaches a tunnel unasked, and nothing that answers the address's earlier holder.
-- **Flows are bounded and forgotten when silent.** The relay keeps at most 3584 flows a tunnel, and forgets a flow silent for 2 minutes, 5 for UDP, and 2 hours for an open TCP connection. A client that needs a quiet flow kept sends on it more often than that.
+- **Flows are bounded and forgotten when silent.** The relay keeps at most 3584 flows a tunnel, and forgets a flow silent for 2 minutes, 5 for UDP, and 2 hours 4 minutes for an open TCP connection. A client that needs a quiet flow kept sends on it more often than that.
 - **Packets may be dropped.** A tunnel is a link that may drop, when a queue is full or a packet is refused, and nothing is sent again.
 
 `webvpn_ip_packets_total` counts the tunnels' packets by direction, and `webvpn_ip_dropped_total` the relay's drops by reason.
