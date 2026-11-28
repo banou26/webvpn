@@ -1,10 +1,12 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use webvpn_proto::ErrorCode;
 use webvpn_stack::{Buffers, Config, Protocol, Sent, Stack, TcpState as State};
 
 const CLIENT: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
 const SITE: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+const CLIENT6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+const SITE6: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
 const BUFFERS: Buffers = Buffers { receive: 64 * 1024, send: 64 * 1024 };
 const FIRST_PORT: u16 = 40000;
 
@@ -49,6 +51,15 @@ impl Net {
             now: 0,
             link: Box::new(link),
             flying: Vec::new(),
+        }
+    }
+
+    /// As `with_link`, with both stacks on IPv6 as well.
+    fn dual_stack(link: impl FnMut(Toward, &[u8]) -> Fate + 'static) -> Self {
+        Self {
+            client: Stack::new(Config { ipv6: Some(CLIENT6), ..config(CLIENT, 8, 1) }, 0),
+            site: Stack::new(Config { ipv6: Some(SITE6), ..config(SITE, 0, 2) }, 0),
+            ..Self::with_link(link)
         }
     }
 
@@ -110,8 +121,13 @@ impl Net {
 
     /// A connection from the client to a listener of the site, and the site's end of it.
     fn connect(&mut self, port: u16) -> (u32, u32) {
-        let listener = self.site.tcp_listen(port, 4, BUFFERS).unwrap();
-        let client = self.client.tcp_connect(SocketAddr::new(SITE.into(), port), BUFFERS).unwrap();
+        self.connect_to(SocketAddr::new(SITE.into(), port))
+    }
+
+    /// As `connect`, to `remote`, one of the site's addresses.
+    fn connect_to(&mut self, remote: SocketAddr) -> (u32, u32) {
+        let listener = self.site.tcp_listen(remote.port(), 4, BUFFERS).unwrap();
+        let client = self.client.tcp_connect(remote, BUFFERS).unwrap();
         assert!(self.established(client));
         let mut site = None;
         assert!(self.until(1000, |net| {
@@ -180,6 +196,50 @@ fn an_abort_resets_the_peer() {
     assert_eq!(net.site.tcp_error(site), None, "the side that aborted has no error");
     assert_eq!(net.client.tcp_recv(client, &mut [0; 4]), None);
     assert_eq!(net.client.tcp_send(client, b"late"), Err(ErrorCode::CONNECTION_RESET));
+}
+
+#[test]
+fn over_ipv6_a_connection_carries_bytes_and_a_reset_and_an_icmp_error_fail_it_as_over_ipv4() {
+    let mut net = Net::dual_stack(|_, _| Fate::After(1));
+    let (client, site) = net.connect_to(SocketAddr::new(SITE6.into(), 80));
+    assert_eq!(net.client.tcp_endpoints(client).unwrap().0.ip(), IpAddr::from(CLIENT6));
+    let up = pattern(100_000);
+    assert_eq!(transfer(&mut net, Toward::Site, (client, site), &up, 5000), up);
+    net.site.tcp_abort(site);
+    assert!(net.until(1000, closed(client)));
+    assert_eq!(net.client.tcp_error(client), Some(ErrorCode::CONNECTION_RESET));
+
+    for (code, error) in [
+        (0, ErrorCode::NETWORK_UNREACHABLE),
+        (3, ErrorCode::HOST_UNREACHABLE),
+        (4, ErrorCode::CONNECTION_REFUSED),
+    ] {
+        let mut net = Net::dual_stack(move |toward, packet| match toward {
+            Toward::Site => Fate::Answer(icmpv6_unreachable(packet, code)),
+            Toward::Client => Fate::After(1),
+        });
+        let client = net.client.tcp_connect(SocketAddr::new(SITE6.into(), 80), BUFFERS).unwrap();
+        assert!(net.until(100, closed(client)), "code {code}");
+        assert_eq!(net.client.tcp_error(client), Some(error), "code {code}");
+    }
+}
+
+#[test]
+fn a_udp_datagram_over_ipv6_fits_the_mtu_with_its_48_bytes_of_headers() {
+    let mut net = Net::dual_stack(|_, _| Fate::After(1));
+    let site = net.site.udp_bind(53, BUFFERS).unwrap();
+    let udp = net.client.udp_bind(0, BUFFERS).unwrap();
+    let target = SocketAddr::new(SITE6.into(), 53);
+    assert_eq!(net.client.udp_send(udp, target, &[0; 1453]), Err(ErrorCode::OTHER));
+    assert_eq!(net.client.udp_send(udp, target, &[7; 1452]), Ok(Sent::Queued));
+    let mut buffer = [0; 1500];
+    let mut got = None;
+    assert!(net.until(100, |net| {
+        got = net.site.udp_recv(site, &mut buffer);
+        got.is_some()
+    }));
+    let (length, from) = got.unwrap();
+    assert_eq!((length, from.ip()), (1452, IpAddr::from(CLIENT6)));
 }
 
 #[test]
@@ -252,6 +312,23 @@ fn icmp_unreachable(quoting: &[u8], code: u8) -> Vec<u8> {
     packet[10..12].copy_from_slice(&sum.to_be_bytes());
     packet.extend_from_slice(&icmp);
     packet
+}
+
+/// An ICMPv6 destination unreachable from a router, quoting the IPv6 packet it is about.
+fn icmpv6_unreachable(quoting: &[u8], code: u8) -> Vec<u8> {
+    let router = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0xff);
+    let mut icmp = vec![1, code, 0, 0, 0, 0, 0, 0];
+    icmp.extend_from_slice(&quoting[..48]);
+    let mut header = vec![0x60, 0, 0, 0, 0, 0, 58, 64];
+    header[4..6].copy_from_slice(&(icmp.len() as u16).to_be_bytes());
+    header.extend_from_slice(&router.octets());
+    header.extend_from_slice(&quoting[8..24]);
+    let mut pseudo = header[8..40].to_vec();
+    pseudo.extend_from_slice(&(icmp.len() as u32).to_be_bytes());
+    pseudo.extend_from_slice(&[0, 0, 0, 58]);
+    let sum = checksum(&[pseudo, icmp.clone()].concat());
+    icmp[2..4].copy_from_slice(&sum.to_be_bytes());
+    [header, icmp].concat()
 }
 
 fn checksum(bytes: &[u8]) -> u16 {
