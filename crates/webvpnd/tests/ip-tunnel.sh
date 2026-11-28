@@ -161,17 +161,21 @@ echo "ok: a pool whose ceilings pass half of the connection table is refused"
 
 # The pool is a public network, outside the setup's reserved destinations, so that only the rule that drops packets
 # from the device to the device keeps one tunnel from another (check 7). Each of the five tunnel addresses holds 8
-# public ports, 13.0.0.2 from 30000 on.
+# public ports, 13.0.0.2 from 30000 on. up runs first with a ceiling of 7: the next, with 8, loads the table again, and
+# check 11 counts to 8.
+WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=13.0.0.0/29 WEBVPN_IP_USER=1 WEBVPN_IP_FLOWS_PER_ADDRESS=7 \
+	WEBVPN_IP_PORTS=30000-30039 sh "$setup" up
 WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=13.0.0.0/29 WEBVPN_IP_USER=1 WEBVPN_IP_FLOWS_PER_ADDRESS=8 \
 	WEBVPN_IP_PORTS=30000-30039 sh "$setup" up
 
-# Running up again changes nothing: it keeps the table, and with it what the ceilings count and the timeout policy of
-# the connections the kernel tracks.
-loaded=$(nft -a list table inet webvpn_webvpn0)
+# Running up again with the same values keeps the table, and with it what the ceilings count and the timeout policy of
+# the connections the kernel tracks. A table loaded again has another handle.
+loaded=$(nft -a list table inet webvpn_webvpn0 | head -1)
 WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=13.0.0.0/29 WEBVPN_IP_USER=1 WEBVPN_IP_FLOWS_PER_ADDRESS=8 \
 	WEBVPN_IP_PORTS=30000-30039 sh "$setup" up
-[ "$(nft -a list table inet webvpn_webvpn0)" = "$loaded" ] || { echo "running up again changed the table" >&2; exit 1; }
-echo "ok: running up again changes nothing"
+[ "$(nft -a list table inet webvpn_webvpn0 | head -1)" = "$loaded" ] ||
+	{ echo "running up again with the same values loaded the table again" >&2; exit 1; }
+echo "ok: running up again with the same values keeps the table"
 
 if [ -n "${WEBVPN_TEST_CAPTURE:-}" ]; then
 	for at in host:webvpn0 host:out0 host:out1 peer:peer0 peer:peer1; do
