@@ -772,6 +772,22 @@ describe('an IP tunnel', () => {
     expect(await opening).toMatchObject({ code: ErrorCode.CAPACITY, message: 'no address is free' })
   })
 
+  it('refuses a tunnel under 1280 bytes and closes it at the relay', async () => {
+    const { relay, session } = await opened(Feature.IP)
+    const opening = outcome(session.ipOpen())
+    await answer(relay, (id) => ({ type: 'ipTunnel', id, socket: 12, mtu: 1279, ...BOTH }))
+    await settle()
+    relay.open(12)
+    expect(await opening).toMatchObject({ code: ErrorCode.OTHER })
+    expect(await relay.next()).toMatchObject({ type: 'ipClose', socket: 12 })
+
+    const next = session.ipOpen()
+    await answer(relay, (id) => ({ type: 'ipTunnel', id, socket: 13, mtu: 1280, ...BOTH }))
+    await settle()
+    relay.open(13)
+    expect((await next).mtu).toBe(1280)
+  })
+
   it('waits for the reply when its stream comes first', async () => {
     const { relay, session } = await opened(Feature.IP)
     const opening = session.ipOpen()

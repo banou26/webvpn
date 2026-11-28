@@ -2,8 +2,8 @@ import type { ClosedBy, Context, SocketStream } from './context'
 import type { RelayPacket } from './protocol'
 
 import { formatIp } from './address'
-import { framed, noop, ok, unexpected } from './context'
-import { decodeIpFrame, encodeIpFrame } from './protocol'
+import { framed, noop, ok, unexpected, WebVpnError } from './context'
+import { decodeIpFrame, encodeIpFrame, ErrorCode, MIN_MTU } from './protocol'
 
 // the relay holds as much toward the client (QUEUE_BYTES in its tunnel.rs): a link's short queue, about 44 packets of
 // 1500 bytes, so that what flows through the tunnel learns of a slow path from loss within a few dozen milliseconds
@@ -63,6 +63,10 @@ export type IpTunnel = {
 export const ipTunnel = async (context: Context, reply: RelayPacket): Promise<IpTunnel> => {
   if (reply.type !== 'ipTunnel') throw unexpected(reply)
   const { socket, mtu } = reply
+  if (mtu < MIN_MTU) {
+    context.release('ip', socket)
+    throw new WebVpnError(ErrorCode.OTHER, `the relay gave the tunnel an mtu of ${mtu}, under ${MIN_MTU}`)
+  }
   let done = false
   let closing: Promise<void> | undefined
   let finish!: (by: ClosedBy) => void
