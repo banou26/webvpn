@@ -33,8 +33,10 @@ use crate::transport::{SendHalf, Transport};
 /// The endpoint settings the relay's sessions are tuned for, with `identity` as the endpoint's certificate.
 ///
 /// `bind` says where the endpoint listens: `ServerConfig::builder()` given a bound socket (`with_bind_socket`) or an
-/// address. Nothing is bound until an endpoint is made from the result. For `Endpoint::reload_config(config, false)`,
-/// which keeps the socket the endpoint holds, any bind does, for example `with_bind_default(0)`.
+/// address. An address is bound only when an endpoint is made from the result, but a socket from [`bind_socket`] is
+/// bound when that function returns, so it is for the endpoint's first config only. For
+/// `Endpoint::reload_config(config, false)`, which keeps the socket the endpoint holds, take a bind that binds
+/// nothing by itself, for example `with_bind_default(0)`.
 ///
 /// The certificate is the caller's to load and renew: build the [`Identity`] (`Identity::load_pemfiles`, or
 /// `Identity::self_signed`, whose certificate a browser takes only by its hash and for 14 days at most), and reload the
@@ -64,18 +66,24 @@ pub fn server_config(bind: ServerConfigBuilder<WantsIdentity>, identity: Identit
 /// The receive buffer the relay asks for its WebTransport socket. The packets of every session's client wait there
 /// until the endpoint reads them, and with IP tunnels they come in bursts, since a page's stack acknowledges each chunk
 /// the browser hands it at once: at the kernel's default of 224 KiB the socket dropped 1700 to 2500 datagrams in 16 s
-/// of downloads at a 20 ms round trip, and none at 8 MiB (measured 2026-11-28). The system caps it at
-/// `net.core.rmem_max`, which on many hosts leaves the default: raise that sysctl where the relay runs.
+/// of downloads at a 20 ms round trip, and none at 8 MiB (measured 2026-11-28). Linux gives no more than
+/// `net.core.rmem_max`, which on a stock host is the default itself: raise that sysctl where the relay runs.
 const RECEIVE_BUFFER: usize = 8 * 1024 * 1024;
 
 /// A UDP socket bound on `address` for an endpoint, as `ServerConfig::builder().with_bind_socket` takes it, with a
-/// receive buffer of 8 MiB as far as the system allows. An IPv6 address keeps the system's dual-stack default, as
-/// `with_bind_address` does.
+/// receive buffer of 8 MiB as far as the system allows, or the system's own when that is larger. An IPv6 address keeps
+/// the system's dual-stack default, as `with_bind_address` does.
 pub fn bind_socket(address: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
     use socket2::{Domain, Protocol, Socket, Type};
-    let socket = Socket::new(Domain::for_address(address), Type::DGRAM, Some(Protocol::UDP))?;
-    // a system that refuses the size keeps its own, as one that caps it does
+    let open = || Socket::new(Domain::for_address(address), Type::DGRAM, Some(Protocol::UDP));
+    let mut socket = open()?;
+    let own = socket.recv_buffer_size().unwrap_or(0);
     let _ = socket.set_recv_buffer_size(RECEIVE_BUFFER);
+    // Linux caps the request at `rmem_max` and gives that instead of what the socket had: a host whose default is
+    // larger keeps its default, on a new socket, since a size once lowered cannot be raised again past the cap
+    if !socket.recv_buffer_size().is_ok_and(|size| size >= own) {
+        socket = open()?;
+    }
     socket.bind(&address.into())?;
     Ok(socket.into())
 }
@@ -422,13 +430,14 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn the_socket_takes_a_receive_buffer_of_8_mib_as_far_as_the_system_allows() {
+    fn the_socket_takes_a_receive_buffer_of_8_mib_as_far_as_the_system_allows_or_its_own_when_larger() {
         let read = |name: &str| std::fs::read_to_string(format!("/proc/sys/net/core/{name}")).unwrap();
-        let max: usize = read("rmem_max").trim().parse().unwrap();
+        let read = |name: &str| read(name).trim().parse::<usize>().unwrap();
+        let (max, default) = (read("rmem_max"), read("rmem_default"));
         let socket = bind_socket(loopback()).unwrap();
         // Linux keeps twice what it is given, for its own bookkeeping
         let got = socket2::SockRef::from(&socket).recv_buffer_size().unwrap();
-        assert_eq!(got, 2 * max.min(RECEIVE_BUFFER), "rmem_max {max}, rmem_default {}", read("rmem_default").trim());
+        assert_eq!(got, default.max(2 * max.min(RECEIVE_BUFFER)), "rmem_max {max}, rmem_default {default}");
     }
 
     #[tokio::test]
