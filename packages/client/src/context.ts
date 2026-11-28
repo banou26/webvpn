@@ -112,6 +112,11 @@ export type Context = {
   retire: (socket: number) => void,
   /** Retires a socket nobody will use, and closes it at the relay. */
   release: (opens: Opens, socket: number) => void,
+  /**
+   * Notes the `ipClose` request `asked`: the relay counts a tunnel until it answers that close, so the next `ipOpen`
+   * is sent only once it settled.
+   */
+  closingIp: (asked: Promise<unknown>) => void,
   /** Hands the notices and UDP packets of `socket` to `owner`, until the call it returns. */
   own: (socket: number, owner: Owner) => () => void,
   /** Why the session ended, once it did. */

@@ -76,6 +76,8 @@ export type Session = {
   /**
    * Opens an IP tunnel, which carries whole IP packets for a program that brings its own network stack. Resolves once
    * the tunnel's stream arrived, and rejects with `NO_STREAM` when it did not in 30 seconds. Needs the `IP` feature.
+   * The request is sent only once the relay answered every tunnel close sent before it, since the relay counts a
+   * tunnel until then.
    */
   ipOpen: () => Promise<IpTunnel>,
   /** Closes the session with `NORMAL`. */
@@ -238,9 +240,15 @@ export const openSession = async (carrier: Carrier, options: { agent?: string } 
     remember(retired, socket, { at: Date.now() }, RETIRED_SOCKET_MS, RETIRED_SOCKET_MAX)
   }
 
+  // settles once every ipClose sent so far did; `then` keeps its value flat, so a long chain holds no nested results
+  let ipClosing: Promise<unknown> = Promise.resolve()
+  const closingIp = (asked: Promise<unknown>) => { ipClosing = Promise.allSettled([ipClosing, asked]).then(noop) }
+
   const release = (opens: Opens, socket: number) => {
     retire(socket)
-    request({ type: CLOSES[opens], socket }, ok).catch(noop)
+    const asked = request({ type: CLOSES[opens], socket }, ok)
+    asked.catch(noop)
+    if (opens === 'ip') closingIp(asked)
   }
 
   const claim = (socket: number, timeoutMs?: number) => {
@@ -372,6 +380,7 @@ export const openSession = async (carrier: Carrier, options: { agent?: string } 
     claim,
     retire,
     release,
+    closingIp,
     own: (socket, owner) => {
       owners.set(socket, owner)
       return () => {
@@ -426,6 +435,7 @@ export const openSession = async (carrier: Carrier, options: { agent?: string } 
     },
     ipOpen: async () => {
       offered(Feature.IP, 'IP tunnels')
+      await ipClosing
       return request({ type: 'ipOpen' }, (reply) => ipTunnel(context, reply), { opens: 'ip' })
     },
     close: () => fail(CloseCode.NORMAL, 'the client closed the session'),

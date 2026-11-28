@@ -105,6 +105,7 @@ export const ipTunnel = async (context: Context, reply: RelayPacket): Promise<Ip
   const close = () => closing ??= (async () => {
     if (done) return
     const asked = context.request({ type: 'ipClose', socket }, ok)
+    context.closingIp(asked)
     stop({ by: 'client' })
     try {
       await asked
