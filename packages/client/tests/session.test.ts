@@ -780,7 +780,7 @@ describe('an IP tunnel', () => {
     await settle()
     relay.open(12)
     expect(await opening).toMatchObject({ code: ErrorCode.OTHER })
-    expect(await relay.next()).toMatchObject({ type: 'ipClose', socket: 12 })
+    expect(await answer(relay, (id) => ({ type: 'ok', id }))).toMatchObject({ type: 'ipClose', socket: 12 })
 
     const next = session.ipOpen()
     await answer(relay, (id) => ({ type: 'ipTunnel', id, socket: 13, mtu: 1280, ...BOTH }))
