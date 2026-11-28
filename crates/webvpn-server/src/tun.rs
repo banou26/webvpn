@@ -69,9 +69,9 @@ impl Ipv4Pool {
 ///
 /// The k-th tunnel address of the network, counting from 0 at the network's second host address (the device holds
 /// the first), holds the k-th block: the ports from `first + k * per_tunnel` to `first + (k + 1) * per_tunnel - 1`.
-/// An address whose block would pass `last` holds none, and so does every address when `per_tunnel` is 0. The setup
-/// step maps the same blocks on the node, so a TCP or UDP packet to one of the node's own addresses on a port of a
-/// block reaches the address that holds it, on the same port.
+/// [`TunForwarder::open`] refuses a network with more tunnel addresses than blocks, so every address holds one. The
+/// setup step maps the same blocks on the node, so a TCP or UDP packet to one of the node's own addresses on a port of
+/// a block reaches the address that holds it, on the same port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PortBlocks {
     pub first: u16,
@@ -155,10 +155,25 @@ impl TunForwarder {
     /// Opens the TUN device named `device`, whose network is `ipv4`, and starts reading it. With `ports`, each tunnel
     /// is given the public ports of its address's block.
     ///
-    /// An error says what to check: the device does not exist, belongs to another user or is not a TUN device,
-    /// `/dev/net/tun` is missing or cannot be opened, or the device's MTU is under 1280. It names the device and never
-    /// an address.
+    /// An error says what to check: `ipv4` has more tunnel addresses than `ports` has blocks, the device does not
+    /// exist, belongs to another user or is not a TUN device, `/dev/net/tun` is missing or cannot be opened, or the
+    /// device's MTU is under 1280. It names the device and never an address.
     pub fn open(device: &str, ipv4: Ipv4Pool, ports: Option<PortBlocks>) -> io::Result<Self> {
+        if let Some(PortBlocks { first, last, per_tunnel }) = ports {
+            // the walk gives every address in turn, so an address past the last block would get none on an idle relay
+            let addresses = ipv4.size() - 3;
+            let span = (u32::from(last) + 1).saturating_sub(u32::from(first));
+            let blocks = span.checked_div(u32::from(per_tunnel)).unwrap_or(0);
+            if blocks < addresses {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "the pool holds {addresses} tunnel addresses and the public ports only {blocks} blocks: make \
+                         the pool smaller or the range larger, so that every address holds a block"
+                    ),
+                ));
+            }
+        }
         let name =
             CString::new(device).ok().filter(|name| name.as_bytes().len() < libc::IFNAMSIZ).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, format!("{device:?} is not a network device's name"))
@@ -439,5 +454,15 @@ mod tests {
         let error = TunForwarder::open("webvpn-none0", pool("198.18.0.0/16"), None).err().unwrap().to_string();
         assert!(error.contains("webvpn-none0 does not exist"), "{error}");
         assert!(!error.contains("198.18"), "{error}");
+    }
+
+    #[test]
+    fn a_pool_with_more_tunnel_addresses_than_blocks_of_ports_is_refused() {
+        let blocks = Some(PortBlocks { first: 20000, last: 29999, per_tunnel: 8 });
+        let error = TunForwarder::open("webvpn-none0", pool("198.18.0.0/16"), blocks).err().unwrap().to_string();
+        assert!(error.contains("65533") && error.contains("1250"), "{error}");
+        assert!(!error.contains("198.18"), "{error}");
+        let error = TunForwarder::open("webvpn-none0", pool("198.18.0.0/22"), blocks).err().unwrap().to_string();
+        assert!(error.contains("does not exist"), "a pool the blocks cover is taken: {error}");
     }
 }

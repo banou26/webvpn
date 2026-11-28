@@ -25,12 +25,12 @@
 #                      nf_conntrack_max.
 #   WEBVPN_IP_PORTS    the tunnels' public ports, as the relay is given them: a range written first-last, such as
 #                      20000-29999. Unset, tunnels have none. The pool's k-th tunnel address, from 0 at the pool's
-#                      second host address, holds the ports first + k * size to first + (k + 1) * size - 1, and an
-#                      address whose block would pass last holds none. A TCP or UDP packet to one of the node's own
-#                      addresses on one of those ports goes to the address that holds it, on the same port. Those
-#                      connections count toward a ceiling of WEBVPN_IP_FLOWS_PER_ADDRESS of their own, apart from the
-#                      tunnel's own. up refuses a range that overlaps the node's local port range: keep it clear of
-#                      every port something on the node uses.
+#                      second host address, holds the ports first + k * size to first + (k + 1) * size - 1, and up
+#                      refuses, as the relay does, a pool with more tunnel addresses than blocks. A TCP or UDP packet
+#                      to one of the node's own addresses on one of those ports goes to the address that holds it, on
+#                      the same port. Those connections count toward a ceiling of WEBVPN_IP_FLOWS_PER_ADDRESS of their
+#                      own, apart from the tunnel's own. up refuses a range that overlaps the node's local port range:
+#                      keep it clear of every port something on the node uses.
 #   WEBVPN_IP_PORTS_PER_TUNNEL
 #                      the size of a block, as the relay is given it. Default: 8
 #
@@ -170,6 +170,11 @@ public_ports() {
 	esac
 	[ "$first" -le "$end" ] && [ "$end" -le 65535 ] || fail "WEBVPN_IP_PORTS is not a range of ports from 1 to 65535"
 	[ "$size" -le $((end - first + 1)) ] || fail "WEBVPN_IP_PORTS_PER_TUNNEL is more than the ports of WEBVPN_IP_PORTS"
+	# the relay refuses the same: it gives every address in turn, so one past the last block would get no port
+	blocks=$(((end - first + 1) / size))
+	[ "$blocks" -ge "$addresses" ] ||
+		fail "WEBVPN_IP_POOL holds $addresses tunnel addresses and WEBVPN_IP_PORTS only $blocks blocks: make the \
+pool smaller or the range larger, so that every address holds a block"
 	# through cat: dash reads a file a byte at a time, and a sysctl file gives a read past its start nothing
 	local_ports=$(cat /proc/sys/net/ipv4/ip_local_port_range)
 	low=${local_ports%%[!0-9]*}
@@ -186,7 +191,7 @@ public_ports() {
 	base=$((($1 << 24) + ($2 << 16) + ($3 << 8) + $4))
 	elements=
 	k=0
-	while [ "$k" -lt "$addresses" ] && [ $((first + (k + 1) * size - 1)) -le "$end" ]; do
+	while [ "$k" -lt "$addresses" ]; do
 		n=$((base + 2 + k))
 		from=$((first + k * size))
 		owner=$((n >> 24 & 255)).$((n >> 16 & 255)).$((n >> 8 & 255)).$((n & 255))

@@ -7,8 +7,8 @@
 //! port 7003 and keeps each connection open, and has nothing on UDP port 7004. It is reached at the private address
 //! 10.0.0.2 too, and counts what reaches it with an address of the pool as its source. The setup keeps at most 8
 //! connections that one tunnel address opens, and apart from those, 8 to its public ports. The relay's public address
-//! is 11.0.0.1, and its public ports are 30000 to 30031 in blocks of 8: 13.0.0.2 holds 30000 to 30007, up to
-//! 13.0.0.5, and 13.0.0.6 holds none.
+//! is 11.0.0.1, and its public ports are 30000 to 30039 in blocks of 8: 13.0.0.2 holds 30000 to 30007, up to
+//! 13.0.0.6, which holds 30032 to 30039.
 //!
 //! This test is the peer's UDP port 7001 itself, from a socket it makes in the peer's namespace, and answers each
 //! datagram there with the source address it came from. socat's forking responder left a datagram that closely
@@ -62,7 +62,7 @@ const POOL: [Ipv4Addr; 5] = [
 ];
 
 /// The public ports, from `WEBVPN_IP_PORTS` in tests/ip-tunnel.sh, in blocks of the default 8.
-const PUBLIC_PORTS: (u16, u16) = (30000, 30031);
+const PUBLIC_PORTS: (u16, u16) = (30000, 30039);
 const PORTS_PER_TUNNEL: u16 = 8;
 
 const UDP_WHO: u16 = 7001;
@@ -168,12 +168,7 @@ async fn joined<T>(thread: std::thread::JoinHandle<T>) -> T {
 /// The public ports the relay gives a tunnel at `address`: its first port and how many.
 fn block(address: Ipv4Addr) -> (u16, u16) {
     let k = u16::from(address.octets()[3]) - 2;
-    let first = PUBLIC_PORTS.0 + k * PORTS_PER_TUNNEL;
-    if first + PORTS_PER_TUNNEL - 1 <= PUBLIC_PORTS.1 {
-        (first, PORTS_PER_TUNNEL)
-    } else {
-        (0, 0)
-    }
+    (PUBLIC_PORTS.0 + k * PORTS_PER_TUNNEL, PORTS_PER_TUNNEL)
 }
 
 /// Sends a datagram from `peer` to the tunnel's first public port, and waits for it on the tunnel.
@@ -592,7 +587,7 @@ async fn tunnels_reach_a_real_network_and_take_only_answers() {
     let sent_from = [me, them, held];
     let mut fresh = loop {
         let tunnel = session.tunnel().await;
-        if !sent_from.contains(&tunnel.address) && tunnel.first_port != 0 {
+        if !sent_from.contains(&tunnel.address) {
             break tunnel;
         }
         session.close(tunnel).await;
@@ -657,9 +652,9 @@ async fn public_ports(session: &mut Session) {
     let mut take = |address: Ipv4Addr| {
         tunnels.iter_mut().find(|held| held.as_ref().is_some_and(|tunnel| tunnel.address == address)).unwrap().take()
     };
-    let (mut one, mut next, mut none) = (take(POOL[1]).unwrap(), take(POOL[2]).unwrap(), take(POOL[4]).unwrap());
+    let (mut one, mut next, mut last) = (take(POOL[1]).unwrap(), take(POOL[2]).unwrap(), take(POOL[4]).unwrap());
     let rest: Vec<_> = tunnels.into_iter().flatten().collect();
-    assert_eq!((one.first_port, next.first_port, none.first_port), (30008, 30016, 0));
+    assert_eq!((one.first_port, next.first_port, last.first_port), (30008, 30016, 30032));
     let me = one.address;
 
     let connected = in_peer(|| std::net::TcpStream::connect_timeout(&SocketAddr::from((OUTSIDE, 30009)), WAIT));
@@ -697,14 +692,14 @@ async fn public_ports(session: &mut Session) {
     println!("ok 15: a port just past a tunnel's block reaches the tunnel that holds it, and not the first");
 
     let before = dropped("unasked").await;
-    within(peer.send_to(b"none", (OUTSIDE, PUBLIC_PORTS.1 + 1))).await.unwrap();
+    within(peer.send_to(b"past", (OUTSIDE, PUBLIC_PORTS.1 + 1))).await.unwrap();
     // straight to another tunnel's address: the host's rule maps only its own addresses, so this is not sent on
-    within(peer.send_to(b"straight", (none.address, 30016))).await.unwrap();
+    within(peer.send_to(b"straight", (last.address, 30016))).await.unwrap();
     on_peer(&format!("socat -u OPEN:/dev/null TCP:{OUTSIDE}:{},connect-timeout=1 || true", PUBLIC_PORTS.1 + 1)).await;
-    none.quiet("a tunnel with no public port").await;
+    last.quiet("a datagram or a SYN to the port just past the range").await;
     next.quiet("a datagram to its public port straight to another tunnel's address").await;
     assert_eq!(dropped("unasked").await, before, "the host's rules drop them before the relay");
-    println!("ok 16: a tunnel with no public port is reached by nothing, and a public port only by the host's address");
+    println!("ok 16: a port past the range reaches no tunnel, and a public port is reached only by the host's address");
 
     let before = dropped("refused").await;
     one.send(&udp_packet((me, 40016), (OUTSIDE, 30016), b"own")).await;
@@ -715,7 +710,7 @@ async fn public_ports(session: &mut Session) {
 
     // held open until here, so that its end reaches no check that waits for quiet
     drop(stream);
-    for tunnel in [one, next, none].into_iter().chain(rest) {
+    for tunnel in [one, next, last].into_iter().chain(rest) {
         session.close(tunnel).await;
     }
 }
