@@ -1,7 +1,9 @@
 #!/bin/sh
 # Sets a Linux node up for webvpnd's IP tunnels, or takes that setup down. Run it as root, before the relay starts:
-# the relay itself needs no privilege, it only opens the device this makes for its user. Where forwarding is on
-# already, the right to change the network (CAP_NET_ADMIN) and /dev/net/tun are all the script needs.
+# the relay itself needs no privilege, it only opens the device this makes for its user. When IPv4 forwarding is off,
+# up turns it on for the whole host, which then routes between all of its interfaces and not only the device's, and
+# down leaves it on. Where forwarding is on already, the right to change the network (CAP_NET_ADMIN) and /dev/net/tun
+# are all the script needs.
 #
 #   ip-tunnel-setup.sh up      makes the device and its rules
 #   ip-tunnel-setup.sh down    removes them
@@ -10,28 +12,34 @@
 # tunnel until it restarts, even once up made the device again. Set with variables:
 #
 #   WEBVPN_IP_DEVICE   the TUN device's name, as the relay is given it. Default: webvpn0
-#   WEBVPN_IP_POOL     the device's IPv4 network, as the relay is given it, such as 198.18.0.0/16. Required for up.
+#   WEBVPN_IP_POOL     the device's IPv4 network, as the relay is given it, such as 198.18.0.0/28. Required for up.
 #                      The device takes its first host address; the relay gives the others to tunnels.
 #   WEBVPN_IP_USER     the user the relay runs as, a name or a number, which owns the device. Required for up: a
 #                      device with no owner is open to every local user.
 #   WEBVPN_IP_MTU      the device's MTU, at least 1280. Default: 1500
 #   WEBVPN_IP_FLOWS_PER_ADDRESS
-#                      the connections the kernel tracks for one tunnel address, past which a new one is dropped.
-#                      Default: 4096. The relay keeps at most 3584 flows a tunnel and forgets flows past that, so
-#                      an answer on a forgotten flow never reaches the client anyway: the default sits a little above,
-#                      so that the relay's own bound acts first and this one only keeps the kernel's table bounded.
+#                      the connections the kernel tracks that one tunnel address opens, past which a new one is
+#                      dropped, and apart from those, the connections to its public ports. Default: 4096. The relay
+#                      keeps at most 3584 flows a tunnel and forgets flows past that, so an answer on a forgotten
+#                      flow never reaches the client anyway: the default sits a little above, so that the relay's own
+#                      bound acts first. Those connections outlast their tunnel, so the pool's tunnel addresses times
+#                      this, plus the addresses that hold public ports times it, is what the tunnels can take of the
+#                      kernel's table, which every program on the node shares: up refuses more than half of
+#                      nf_conntrack_max.
 #   WEBVPN_IP_PORTS    the tunnels' public ports, as the relay is given them: a range written first-last, such as
 #                      20000-29999. Unset, tunnels have none. The pool's k-th tunnel address, from 0 at the pool's
-#                      second host address, holds the ports first + k * size to first + (k + 1) * size - 1, and an
-#                      address whose block would pass last holds none. A TCP or UDP packet to one of the node's own
-#                      addresses on one of those ports goes to the address that holds it, on the same port, and counts
-#                      toward WEBVPN_IP_FLOWS_PER_ADDRESS as the tunnel's own connections do. up refuses a range that
-#                      overlaps the node's local port range: keep it clear of every port something on the node uses.
+#                      second host address, holds the ports first + k * size to first + (k + 1) * size - 1, and up
+#                      refuses, as the relay does, a pool with more tunnel addresses than blocks. A TCP or UDP packet
+#                      to one of the node's own addresses on one of those ports goes to the address that holds it, on
+#                      the same port. Those connections count toward a ceiling of WEBVPN_IP_FLOWS_PER_ADDRESS of their
+#                      own, apart from the tunnel's own. up refuses a range that overlaps the node's local port range:
+#                      keep it clear of every port something on the node uses.
 #   WEBVPN_IP_PORTS_PER_TUNNEL
 #                      the size of a block, as the relay is given it. Default: 8
 #
-# up loads one nftables table of its own, named after the device. It does not assume it is the only firewall on the
-# host: another table that drops forwarded packets still drops the tunnels' packets, and has to let them through.
+# up loads one nftables table of its own, named after the device, which needs a kernel with connection tracking timeout
+# policies (CONFIG_NF_CONNTRACK_TIMEOUT). It does not assume it is the only firewall on the host: another table that
+# drops forwarded packets still drops the tunnels' packets, and has to let them through.
 
 set -eu
 
@@ -44,7 +52,7 @@ fail() {
 }
 
 up() {
-	pool=${WEBVPN_IP_POOL:?WEBVPN_IP_POOL is required, such as 198.18.0.0/16}
+	pool=${WEBVPN_IP_POOL:?WEBVPN_IP_POOL is required, such as 198.18.0.0/28}
 	user=${WEBVPN_IP_USER:?WEBVPN_IP_USER is required: the user the relay runs as}
 	mtu=${WEBVPN_IP_MTU:-1500}
 	flows=${WEBVPN_IP_FLOWS_PER_ADDRESS:-4096}
@@ -59,8 +67,24 @@ up() {
 	prefix=${pool#*/}
 	last=${network##*.}
 	address=${network%.*}.$((last + 1))
+	# every address of the network but its own, the device's and the broadcast one
+	addresses=$(((1 << (32 - prefix)) - 3))
 	public_ports
 
+	# without connection tracking timeout policies the kernel refuses the whole table, and nft would not say why. The
+	# probe loads connection tracking too, whose size is read next.
+	nft -f - <<EOF || fail "the kernel has no connection tracking timeout policies (CONFIG_NF_CONNTRACK_TIMEOUT)"
+table inet ${table}_probe { ct timeout probe { protocol tcp; l3proto ip; }; }
+delete table inet ${table}_probe
+EOF
+	# The kernel keeps a tunnel's connections past the tunnel, so each address may hold its ceiling of them, and each
+	# address that holds public ports that many again: that is what the tunnels can take of a table every program on
+	# the node shares, and half of it stays for the others.
+	max=$(cat /proc/sys/net/netfilter/nf_conntrack_max)
+	[ $(((addresses + holders) * flows)) -le $((max / 2)) ] ||
+		fail "the pool's $addresses tunnel addresses, plus the $holders that hold public ports, times \
+WEBVPN_IP_FLOWS_PER_ADDRESS, $flows, is more than half of the node's nf_conntrack_max, $max: take a smaller pool, \
+a lower ceiling or fewer public ports, or raise nf_conntrack_max"
 
 	ip link show dev "$device" >/dev/null 2>&1 || ip tuntap add dev "$device" mode tun user "$user"
 	ip address replace "$address/$prefix" dev "$device"
@@ -86,8 +110,17 @@ table inet $table {
 
 	set flows {
 		type ipv4_addr
-		size 65536
+		size $addresses
 		flags dynamic
+	}
+
+	# as long as the relay keeps a quiet open TCP flow (TCP_OPEN_LIFE in crates/webvpn-server/src/flow.rs), where the
+	# node's default is 5 days: a closed tunnel's connections count toward the ceilings of the next tunnel at its
+	# address. The other states keep the node's timeouts.
+	ct timeout tunnel {
+		protocol tcp
+		l3proto ip
+		policy = { established: 7440 }
 	}
 
 $public_map
@@ -98,7 +131,11 @@ $public_map
 		iifname "$device" meta nfproto ipv6 drop
 		iifname "$device" ip daddr @reserved drop
 		iifname "$device" ct state new add @flows { ip saddr ct count over $flows } drop
-		iifname "$device" accept
+		# the masquerade below translates no packet connection tracking calls invalid: it would leave with the pool's
+		# address as its source
+		iifname "$device" ct state invalid drop
+		# the kernel takes a connection's timeout policy from its first packet only
+		iifname "$device" ct timeout set "tunnel" accept
 		oifname "$device" ct state established,related accept
 $public_forward
 		oifname "$device" drop
@@ -118,9 +155,10 @@ $public_prerouting
 EOF
 }
 
-# Sets public_map, public_forward and public_prerouting to the rules of WEBVPN_IP_PORTS, empty when it is unset.
+# Sets public_map, public_forward and public_prerouting to the rules of WEBVPN_IP_PORTS, empty when it is unset, and
+# holders to the tunnel addresses that hold ports.
 public_ports() {
-	public_map= public_forward= public_prerouting=
+	public_map= public_forward= public_prerouting= holders=0
 	range=${WEBVPN_IP_PORTS:-}
 	[ -n "$range" ] || return 0
 	size=${WEBVPN_IP_PORTS_PER_TUNNEL:-8}
@@ -135,6 +173,11 @@ public_ports() {
 	esac
 	[ "$first" -le "$end" ] && [ "$end" -le 65535 ] || fail "WEBVPN_IP_PORTS is not a range of ports from 1 to 65535"
 	[ "$size" -le $((end - first + 1)) ] || fail "WEBVPN_IP_PORTS_PER_TUNNEL is more than the ports of WEBVPN_IP_PORTS"
+	# the relay refuses the same: it gives every address in turn, so one past the last block would get no port
+	blocks=$(((end - first + 1) / size))
+	[ "$blocks" -ge "$addresses" ] ||
+		fail "WEBVPN_IP_POOL holds $addresses tunnel addresses and WEBVPN_IP_PORTS only $blocks blocks: make the \
+pool smaller or the range larger, so that every address holds a block"
 	# through cat: dash reads a file a byte at a time, and a sysctl file gives a read past its start nothing
 	local_ports=$(cat /proc/sys/net/ipv4/ip_local_port_range)
 	low=${local_ports%%[!0-9]*}
@@ -149,25 +192,33 @@ public_ports() {
 	set -- $network
 	IFS=$saved
 	base=$((($1 << 24) + ($2 << 16) + ($3 << 8) + $4))
-	hosts=$(((1 << (32 - prefix)) - 4))
 	elements=
 	k=0
-	while [ "$k" -le "$hosts" ] && [ $((first + (k + 1) * size - 1)) -le "$end" ]; do
+	while [ "$k" -lt "$addresses" ]; do
 		n=$((base + 2 + k))
 		from=$((first + k * size))
 		owner=$((n >> 24 & 255)).$((n >> 16 & 255)).$((n >> 8 & 255)).$((n & 255))
 		elements="$elements $from-$((from + size - 1)) : $owner,"
 		k=$((k + 1))
 	done
+	holders=$k
 
 	public_map="	map public {
 		type inet_service : ipv4_addr
 		flags interval
 		elements = {${elements%,} }
 	}
+
+	set inbound {
+		type ipv4_addr
+		size $holders
+		flags dynamic
+	}
 "
-	public_forward="		oifname \"$device\" ct status dnat ct state new add @flows { ip daddr ct count over $flows } drop
-		oifname \"$device\" ct status dnat ct state new accept"
+	# a count of their own: anyone can open these, and in the tunnel's count they would stop its own connections
+	public_forward="
+		oifname \"$device\" ct status dnat ct state new add @inbound { ip daddr ct count over $flows } drop
+		oifname \"$device\" ct status dnat ct state new ct timeout set \"tunnel\" accept"
 	public_prerouting="	chain prerouting {
 		type nat hook prerouting priority dstnat; policy accept;
 		iifname != \"$device\" fib daddr type local ip protocol { tcp, udp } dnat ip to th dport map @public

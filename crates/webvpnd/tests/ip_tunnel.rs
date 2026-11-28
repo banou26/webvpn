@@ -1,12 +1,14 @@
 //! IP tunnels through a running `webvpnd`, over a real TUN device and a real network. `tests/ip-tunnel.sh` builds that
 //! network in namespaces of its own, starts the relay and runs this test there; a plain `cargo test` skips it.
 //!
-//! The network: the relay's host routes the pool 198.18.0.0/29 to its TUN device, under `ip-tunnel-setup.sh`, and
+//! The network: the relay's host routes the pool 13.0.0.0/29 to its TUN device, under `ip-tunnel-setup.sh`, and
 //! reaches "the internet" at 11.0.0.0/24 by a veth pair, its default route, and at 12.0.0.0/24 by a second one. The
 //! peer, at 11.0.0.2 and 12.0.0.2, answers ICMP echoes, writes what reaches UDP port 7002 to a file, accepts TCP on
-//! port 7003, and has nothing on UDP port 7004. It is reached at the private address 10.0.0.2 too. The setup keeps at
-//! most 8 connections for one tunnel address. The relay's public address is 11.0.0.1, and its public ports are 30000
-//! to 30031 in blocks of 8: 198.18.0.2 holds 30000 to 30007, up to 198.18.0.5, and 198.18.0.6 holds none.
+//! port 7003 and keeps each connection open, and has nothing on UDP port 7004. It is reached at the private address
+//! 10.0.0.2 too, and counts what reaches it with an address of the pool as its source. The setup keeps at most 8
+//! connections that one tunnel address opens, and apart from those, 8 to its public ports. The relay's public address
+//! is 11.0.0.1, and its public ports are 30000 to 30039 in blocks of 8: 13.0.0.2 holds 30000 to 30007, up to
+//! 13.0.0.6, which holds 30032 to 30039.
 //!
 //! This test is the peer's UDP port 7001 itself, from a socket it makes in the peer's namespace, and answers each
 //! datagram there with the source address it came from. socat's forking responder left a datagram that closely
@@ -44,20 +46,23 @@ const PEER_2: Ipv4Addr = Ipv4Addr::new(12, 0, 0, 2);
 const OUTSIDE_2: Ipv4Addr = Ipv4Addr::new(12, 0, 0, 1);
 /// A private address outside the pool that the peer holds.
 const PRIVATE: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
-/// The connections the setup keeps for one tunnel address, from `WEBVPN_IP_FLOWS_PER_ADDRESS` in tests/ip-tunnel.sh.
+/// The connections the setup keeps that one tunnel address opens, and apart from those, to its public ports, from
+/// `WEBVPN_IP_FLOWS_PER_ADDRESS` in tests/ip-tunnel.sh.
 const FLOWS_PER_ADDRESS: u16 = 8;
+/// The relay's life of a quiet open TCP flow, in seconds, after which the setup has the kernel forget it too.
+const TCP_OPEN_LIFE: u32 = 7440;
 /// The TUN device's own address, the pool's first host.
-const DEVICE: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 1);
+const DEVICE: Ipv4Addr = Ipv4Addr::new(13, 0, 0, 1);
 const POOL: [Ipv4Addr; 5] = [
-    Ipv4Addr::new(198, 18, 0, 2),
-    Ipv4Addr::new(198, 18, 0, 3),
-    Ipv4Addr::new(198, 18, 0, 4),
-    Ipv4Addr::new(198, 18, 0, 5),
-    Ipv4Addr::new(198, 18, 0, 6),
+    Ipv4Addr::new(13, 0, 0, 2),
+    Ipv4Addr::new(13, 0, 0, 3),
+    Ipv4Addr::new(13, 0, 0, 4),
+    Ipv4Addr::new(13, 0, 0, 5),
+    Ipv4Addr::new(13, 0, 0, 6),
 ];
 
 /// The public ports, from `WEBVPN_IP_PORTS` in tests/ip-tunnel.sh, in blocks of the default 8.
-const PUBLIC_PORTS: (u16, u16) = (30000, 30031);
+const PUBLIC_PORTS: (u16, u16) = (30000, 30039);
 const PORTS_PER_TUNNEL: u16 = 8;
 
 const UDP_WHO: u16 = 7001;
@@ -93,6 +98,28 @@ async fn dropped(reason: &str) -> u64 {
     let metrics = http("/metrics").await;
     let count = metrics.lines().find_map(|text| text.strip_prefix(line.as_str()));
     count.unwrap_or_else(|| panic!("no {line:?} in the metrics")).parse().unwrap()
+}
+
+/// The seconds the host's connection tracking still keeps the established TCP connection that `selected` names, in
+/// options of `conntrack -L`. Waits until it is established.
+async fn established_life(selected: &[&str]) -> u32 {
+    within(async {
+        loop {
+            let listed = Command::new("conntrack")
+                .args(["-L", "-p", "tcp"])
+                .args(selected)
+                .stderr(Stdio::null())
+                .output()
+                .await
+                .unwrap();
+            let text = String::from_utf8_lossy(&listed.stdout);
+            if let Some(line) = text.lines().find(|line| line.contains(" ESTABLISHED ")) {
+                return line.split_whitespace().nth(2).unwrap().parse().unwrap();
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
 }
 
 /// Runs `script` with `sh` in the peer's network namespace.
@@ -141,12 +168,15 @@ async fn joined<T>(thread: std::thread::JoinHandle<T>) -> T {
 /// The public ports the relay gives a tunnel at `address`: its first port and how many.
 fn block(address: Ipv4Addr) -> (u16, u16) {
     let k = u16::from(address.octets()[3]) - 2;
-    let first = PUBLIC_PORTS.0 + k * PORTS_PER_TUNNEL;
-    if first + PORTS_PER_TUNNEL - 1 <= PUBLIC_PORTS.1 {
-        (first, PORTS_PER_TUNNEL)
-    } else {
-        (0, 0)
-    }
+    (PUBLIC_PORTS.0 + k * PORTS_PER_TUNNEL, PORTS_PER_TUNNEL)
+}
+
+/// Sends a datagram from `peer` to the tunnel's first public port, and waits for it on the tunnel.
+async fn to_public_port(tunnel: &mut Tunnel, peer: &UdpSocket) {
+    let (address, public, from) = (tunnel.address, tunnel.first_port, peer.local_addr().unwrap().port());
+    within(peer.send_to(b"in", (OUTSIDE, public))).await.unwrap();
+    let arrived = |p: &Packet| from_peer(p, UDP) && p.target == address && p.ports() == (from, public);
+    tunnel.expect("a datagram to a public port under its ceiling", arrived).await;
 }
 
 /// Answers each datagram on the peer's [`UDP_WHO`] with the source address it came from.
@@ -457,8 +487,12 @@ async fn tunnels_reach_a_real_network_and_take_only_answers() {
         .expect("SYN and ACK", |p| from_peer(p, TCP) && p.ports() == (TCP_LISTENER, 40003) && p.payload[13] == 0x12)
         .await;
     assert_eq!(syn_ack.payload[8..12], 1001u32.to_be_bytes(), "the SYN is acknowledged");
+    let theirs = u32::from_be_bytes(syn_ack.payload[4..8].try_into().unwrap());
+    first.send(&whole(me, PEER, TCP, &tcp_acking((me, 40003), (PEER, TCP_LISTENER), (1001, theirs + 1), 0x10))).await;
+    let life = established_life(&["--orig-src", &me.to_string(), "--sport", "40003"]).await;
+    assert!(life <= TCP_OPEN_LIFE, "the host keeps the quiet open connection {life} s");
     first.send(&whole(me, PEER, TCP, &tcp((me, 40003), (PEER, TCP_LISTENER), 1001, 0x04))).await;
-    println!("ok 3: a TCP SYN gets a SYN and ACK");
+    println!("ok 3: a TCP SYN gets a SYN and ACK, and the host keeps the open connection no longer than the relay");
 
     let expiring = ipv4(me, PEER, UDP, 1, (0x4343, 0, false), &udp((me, 40004), (PEER, UDP_WHO), b"ttl"));
     first.send(&expiring).await;
@@ -521,7 +555,6 @@ async fn tunnels_reach_a_real_network_and_take_only_answers() {
     third.send(&udp_packet((held, 40008), (PEER, UDP_SILENT), b"earlier holder")).await;
     sleep(Duration::from_millis(200)).await;
     session.close(third).await;
-    session.close(second).await;
     let mut later = loop {
         let tunnel = session.tunnel().await;
         if tunnel.address == held {
@@ -554,31 +587,36 @@ async fn tunnels_reach_a_real_network_and_take_only_answers() {
     let sent_from = [me, them, held];
     let mut fresh = loop {
         let tunnel = session.tunnel().await;
-        if !sent_from.contains(&tunnel.address) && tunnel.first_port != 0 {
+        if !sent_from.contains(&tunnel.address) {
             break tunnel;
         }
         session.close(tunnel).await;
     };
     let address = fresh.address;
-    for port in 41000..41000 + FLOWS_PER_ADDRESS - 1 {
-        fresh.send(&udp_packet((address, port), (PEER, UDP_WHO), b"who")).await;
-        let answer = |p: &Packet| from_peer(p, UDP) && p.ports() == (UDP_WHO, port);
-        fresh.expect("an answer on a flow under the ceiling", answer).await;
+    // The peer fills the count of connections to the address's public ports, from as many source ports, and the
+    // tunnel's own still pass. The reverse runs on the second tunnel, held open since check 7 left its address with no
+    // connection.
+    let peers: Vec<_> = (0..=FLOWS_PER_ADDRESS).map(|_| peer_socket(0)).collect();
+    for peer in &peers[..usize::from(FLOWS_PER_ADDRESS)] {
+        to_public_port(&mut fresh, peer).await;
     }
-    let peer = peer_socket(0);
-    let public = fresh.first_port;
-    within(peer.send_to(b"in", (OUTSIDE, public))).await.unwrap();
-    let inbound = |p: &Packet| from_peer(p, UDP) && p.target == address && p.ports().1 == public;
-    fresh.expect("a datagram to a public port under the ceiling", inbound).await;
-    for port in 41000 + FLOWS_PER_ADDRESS..41000 + FLOWS_PER_ADDRESS + 2 {
-        fresh.send(&udp_packet((address, port), (PEER, UDP_WHO), b"who")).await;
+    for tunnel in [&mut fresh, &mut second] {
+        let own = tunnel.address;
+        for port in 41000..41000 + FLOWS_PER_ADDRESS {
+            tunnel.send(&udp_packet((own, port), (PEER, UDP_WHO), b"who")).await;
+            let answer = |p: &Packet| from_peer(p, UDP) && p.ports() == (UDP_WHO, port);
+            tunnel.expect("an answer on the tunnel's own flow under its ceiling", answer).await;
+        }
     }
-    within(peer.send_to(b"in", (OUTSIDE, public + 1))).await.unwrap();
-    fresh.quiet("an answer or a datagram to a public port past the ceiling").await;
+    to_public_port(&mut second, &peers[0]).await;
+    fresh.send(&udp_packet((address, 41000 + FLOWS_PER_ADDRESS), (PEER, UDP_WHO), b"who")).await;
+    within(peers[usize::from(FLOWS_PER_ADDRESS)].send_to(b"in", (OUTSIDE, fresh.first_port))).await.unwrap();
+    fresh.quiet("an answer or a datagram to a public port past its ceiling").await;
     println!(
-        "ok 11: the first {FLOWS_PER_ADDRESS} connections of an address, one of them to a public port, pass, the ones \
-         past them do not"
+        "ok 11: an address takes {FLOWS_PER_ADDRESS} connections to its public ports and {FLOWS_PER_ADDRESS} of its \
+         own, either count full leaves the other open, and the next of either does not pass"
     );
+    session.close(second).await;
 
     let before = dropped("refused").await;
     // the relay's own public address, OUTSIDE, the relay drops itself
@@ -591,20 +629,30 @@ async fn tunnels_reach_a_real_network_and_take_only_answers() {
 
     public_ports(&mut session).await;
 
+    let mut last = session.tunnel().await;
+    let address = last.address;
+    // connection tracking calls it invalid, and no address translation applies to such a packet
+    last.send(&whole(address, PEER, TCP, &tcp((address, 40018), (PEER, TCP_LISTENER), 5555, 0x04))).await;
+    sleep(QUIET).await;
+    on_peer("nft list chain ip peer from_pool | grep -q 'counter packets 0 '").await;
+    println!(
+        "ok 18: no packet reached the peer with an address of the pool as its source, nor a TCP RST that starts no \
+         connection"
+    );
+
     // the last check, since the device is gone after it
-    let open = session.tunnel().await;
     let deleted = Command::new("ip").args(["link", "delete", "dev", "webvpn0"]).status();
     assert!(within(deleted).await.unwrap().success(), "the device is deleted");
-    assert_eq!(session.next().await, RelayPacket::Closed { socket: open.socket, code: ErrorCode::OTHER });
+    assert_eq!(session.next().await, RelayPacket::Closed { socket: last.socket, code: ErrorCode::OTHER });
     let id = session.next_id;
     session.send(ClientPacket::IpOpen { id }).await;
     let refused = session.next().await;
     assert!(matches!(refused, RelayPacket::Error { id: of, code: ErrorCode::OTHER, .. } if of == id), "{refused:?}");
-    println!("ok 18: a tunnel ends with its device, and the next is refused");
+    println!("ok 19: a tunnel ends with its device, and the next is refused");
 }
 
 /// The checks of the tunnels' public ports. Every tunnel address is held, so each is known: the tunnels at
-/// 198.18.0.3 and .4 sent little before, and stay far under the ceiling of connections.
+/// 13.0.0.3 and .4 took few connections to their public ports before, and stay far under that ceiling.
 async fn public_ports(session: &mut Session) {
     let mut tunnels = Vec::new();
     for _ in 0..POOL.len() {
@@ -613,9 +661,9 @@ async fn public_ports(session: &mut Session) {
     let mut take = |address: Ipv4Addr| {
         tunnels.iter_mut().find(|held| held.as_ref().is_some_and(|tunnel| tunnel.address == address)).unwrap().take()
     };
-    let (mut one, mut next, mut none) = (take(POOL[1]).unwrap(), take(POOL[2]).unwrap(), take(POOL[4]).unwrap());
+    let (mut one, mut next, mut last) = (take(POOL[1]).unwrap(), take(POOL[2]).unwrap(), take(POOL[4]).unwrap());
     let rest: Vec<_> = tunnels.into_iter().flatten().collect();
-    assert_eq!((one.first_port, next.first_port, none.first_port), (30008, 30016, 0));
+    assert_eq!((one.first_port, next.first_port, last.first_port), (30008, 30016, 30032));
     let me = one.address;
 
     let connected = in_peer(|| std::net::TcpStream::connect_timeout(&SocketAddr::from((OUTSIDE, 30009)), WAIT));
@@ -629,7 +677,12 @@ async fn public_ports(session: &mut Session) {
     assert_eq!(stream.peer_addr().unwrap(), SocketAddr::from((OUTSIDE, 30009)));
     one.expect("the peer's ACK", |p| from_peer(p, TCP) && p.ports() == (port, 30009) && p.payload[13] & 0x10 != 0)
         .await;
-    println!("ok 13: a TCP SYN to a tunnel's public port reaches it on the same port, and its SYN and ACK the peer");
+    let life = established_life(&["--reply-src", &me.to_string(), "--reply-port-src", "30009"]).await;
+    assert!(life <= TCP_OPEN_LIFE, "the host keeps the quiet open connection to a public port {life} s");
+    println!(
+        "ok 13: a TCP SYN to a tunnel's public port reaches it on the same port, its SYN and ACK the peer, and the \
+         host keeps the open connection no longer than the relay"
+    );
 
     let peer = peer_socket(0);
     within(peer.send_to(b"in", (OUTSIDE, 30010))).await.unwrap();
@@ -648,14 +701,14 @@ async fn public_ports(session: &mut Session) {
     println!("ok 15: a port just past a tunnel's block reaches the tunnel that holds it, and not the first");
 
     let before = dropped("unasked").await;
-    within(peer.send_to(b"none", (OUTSIDE, PUBLIC_PORTS.1 + 1))).await.unwrap();
+    within(peer.send_to(b"past", (OUTSIDE, PUBLIC_PORTS.1 + 1))).await.unwrap();
     // straight to another tunnel's address: the host's rule maps only its own addresses, so this is not sent on
-    within(peer.send_to(b"straight", (none.address, 30016))).await.unwrap();
+    within(peer.send_to(b"straight", (last.address, 30016))).await.unwrap();
     on_peer(&format!("socat -u OPEN:/dev/null TCP:{OUTSIDE}:{},connect-timeout=1 || true", PUBLIC_PORTS.1 + 1)).await;
-    none.quiet("a tunnel with no public port").await;
+    last.quiet("a datagram or a SYN to the port just past the range").await;
     next.quiet("a datagram to its public port straight to another tunnel's address").await;
     assert_eq!(dropped("unasked").await, before, "the host's rules drop them before the relay");
-    println!("ok 16: a tunnel with no public port is reached by nothing, and a public port only by the host's address");
+    println!("ok 16: a port past the range reaches no tunnel, and a public port is reached only by the host's address");
 
     let before = dropped("refused").await;
     one.send(&udp_packet((me, 40016), (OUTSIDE, 30016), b"own")).await;
@@ -666,7 +719,7 @@ async fn public_ports(session: &mut Session) {
 
     // held open until here, so that its end reaches no check that waits for quiet
     drop(stream);
-    for tunnel in [one, next, none].into_iter().chain(rest) {
+    for tunnel in [one, next, last].into_iter().chain(rest) {
         session.close(tunnel).await;
     }
 }
