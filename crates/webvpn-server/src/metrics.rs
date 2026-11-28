@@ -75,7 +75,8 @@ pub enum Counter {
     IpDroppedLength,
     /// IP tunnel packets longer than the tunnel's MTU, either way.
     IpDroppedTooLong,
-    /// IP tunnel packets from a client from a source the relay did not give its tunnel.
+    /// IP tunnel packets from a client from a source the relay did not give its tunnel, or ICMP errors about a packet
+    /// not sent to that source.
     IpDroppedSource,
     /// IP tunnel packets from a client with an IPv4 source route or an IPv6 type 0 routing header.
     IpDroppedSourceRoute,

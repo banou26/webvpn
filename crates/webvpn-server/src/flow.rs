@@ -266,7 +266,7 @@ fn echo(protocol: u8, sent: bool) -> u8 {
 
 /// Whether `header` is an ICMP error that quotes a packet: destination unreachable, time exceeded or parameter
 /// problem, and for ICMPv6 packet too big too.
-fn is_error(header: &Header) -> bool {
+pub(crate) fn is_error(header: &Header) -> bool {
     matches!((header.protocol, header.upper.first()), (ICMP, Some(3 | 11 | 12)) | (ICMPV6, Some(1..=4)))
 }
 
