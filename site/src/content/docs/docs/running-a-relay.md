@@ -171,7 +171,7 @@ WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=198.18.0.0/28 WEBVPN_IP_USER=webvpnd sh 
 
 It takes `WEBVPN_IP_DEVICE` (`webvpn0` by default), `WEBVPN_IP_POOL`, `WEBVPN_IP_PORTS` and `WEBVPN_IP_PORTS_PER_TUNNEL` as the relay does, `WEBVPN_IP_USER`, the user the relay runs as, which is required (a device with no owner is open to every local user), `WEBVPN_IP_MTU` (`1500` by default), and `WEBVPN_IP_FLOWS_PER_ADDRESS`, the open connections the kernel tracks that one tunnel address opens, and apart from those, to its public ports (`4096` by default, a little above the 3584 flows the relay keeps for a tunnel, so that the relay's own bound acts first). `up` prints nothing unless something fails. Running it again with the same values changes nothing: it keeps the table it loaded, and with it what the ceilings count and the timeouts of the connections the kernel tracks. With other values it loads the table again, which counts from nothing and puts the connections open at that moment back on the host's timeouts. To change a setting, run `down`, then `up`, with the relay stopped. It:
 
-1. makes the device for its user, gives it the network's first host address, as its only IPv4 address, sets its MTU and a queue of 4096 packets, and brings it up;
+1. makes the device for its user, gives it the network's first host address, as its only IPv4 address, sets its MTU and a queue of 4096 packets, which takes about 8.5 MB of kernel memory when full, outside any container's memory limit, and brings it up;
 2. turns IPv4 forwarding on, when it is off;
 3. loads one nftables table of its own, named after the device, with:
    - packets from the device to the device dropped, so that no tunnel reaches another;
@@ -190,7 +190,11 @@ It takes `WEBVPN_IP_DEVICE` (`webvpn0` by default), `WEBVPN_IP_POOL`, `WEBVPN_IP
 
 The connections the kernel tracks for a tunnel address outlast its tunnel, so `up` refuses a pool whose tunnel addresses times `WEBVPN_IP_FLOWS_PER_ADDRESS`, plus the addresses that hold public ports times it again, take more than half of the host's connection table (`/proc/sys/net/netfilter/nf_conntrack_max`), which every program on the host shares. `up` counts only its own pool: on a host with several relays, size their pools and ceilings so that together they stay under half of `nf_conntrack_max`. That bound is on open connections. Closed TCP connections stay in the table for the host's TIME_WAIT timeout outside the ceiling, as those of every program on the host do. A tunnel that opens and closes connections fast holds more, and so does anyone who opens and closes connections to the host's own ports, such as the WebSocket port. With 262144, the kernel's default on a 64-bit host with more than 4 GiB of memory, and the default ceiling, the largest pool is a `/27`, for 29 tunnels at once, or a `/28`, for 13, when each address holds public ports. With 65536, its default on a host with more than 1 GiB and at most 4 GiB, it is a `/29`, for 5, or a `/30`, for 1, and a host with less memory has a smaller table still. A lower ceiling allows a larger pool. For more tunnels at the same ceiling, raise `nf_conntrack_max` on the host.
 
+The relay itself holds up to 4096 packets for each tunnel while a burst waits for the tunnel's turn, about 6 MB a tunnel at an MTU of 1500. Size the relay's memory for its tunnels times that.
+
 The script needs the right to change the network (`CAP_NET_ADMIN`) and `/dev/net/tun`, and to turn forwarding on, the right to write the system's settings. On a host whose forwarding is already on, as on a Kubernetes node, a container with `CAP_NET_ADMIN` alone and `/dev/net/tun` mounted can run it. The relay's own container then needs only `/dev/net/tun` mounted and no capability.
+
+The script does not raise `net.core.rmem_max`, which the relay's WebTransport socket needs raised to carry tunnels well (see [Ports](#ports)). Set it on the host itself, in `/etc/sysctl.d` so that it outlasts a restart. On Kubernetes that is the node's own configuration, since a container with `CAP_NET_ADMIN` alone cannot write it.
 
 The table does not assume it is the only firewall on the host. Another table that drops forwarded packets, such as a firewall manager's, still drops the tunnels' packets: let packets from and toward the device through there too.
 
@@ -224,7 +228,7 @@ With `--network host`, the relay binds its ports on the host itself, so no `-p` 
 - **Flows are bounded and forgotten when silent.** The relay keeps at most 3584 flows a tunnel, and forgets a flow silent for 2 minutes, 5 for UDP, and 2 hours 4 minutes for an open TCP connection. A client that needs a quiet flow kept sends on it more often than that.
 - **Packets may be dropped.** A tunnel is a link that may drop, when a queue is full or a packet is refused, and nothing is sent again.
 
-`webvpn_ip_packets_total` counts the tunnels' packets by direction, and `webvpn_ip_dropped_total` the relay's drops by reason.
+`webvpn_ip_packets_total` counts the tunnels' packets by direction, and `webvpn_ip_dropped_total` the relay's drops by reason. Packets the device drops when its queue is full reach no counter of the relay: they show as TX dropped in `ip -s link show dev webvpn0`.
 
 ## Health, readiness and metrics
 
