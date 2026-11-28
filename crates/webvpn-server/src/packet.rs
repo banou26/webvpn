@@ -2,6 +2,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
+use crate::flow;
 use crate::metrics::Counter;
 use crate::policy::Proto;
 
@@ -44,7 +45,8 @@ pub(crate) struct Header<'a> {
 
 /// The destination of `packet`, one whole IPv4 or IPv6 packet from a client, and its header, or why it is dropped:
 /// not IP, a header cut short or that cannot be read, an own length that is not the packet's, an IPv4 source route or
-/// IPv6 type 0 routing header, or a source that is not the tunnel's address of its family.
+/// IPv6 type 0 routing header, a source that is not the tunnel's address of its family, or an ICMP error that does
+/// not quote the start of a packet sent to that address.
 pub(crate) fn check(
     packet: &[u8],
     ipv4: Option<Ipv4Addr>,
@@ -57,6 +59,14 @@ pub(crate) fn check(
     };
     if !own {
         return Err(Counter::IpDroppedSource);
+    }
+    // Connection tracking past the forwarder sends an error on as part of the flow its quote names, so an error has
+    // to be about a packet sent to this tunnel: else it would reach the peer of another tunnel's flow.
+    if !header.later_fragment && flow::is_error(&header) {
+        let quoted = header.upper.get(8..).map(|quoted| read(quoted, false));
+        if !matches!(quoted, Some(Ok(quoted)) if quoted.target == header.source) {
+            return Err(Counter::IpDroppedSource);
+        }
     }
     Ok((destination(&header)?, header))
 }
@@ -287,6 +297,46 @@ pub(crate) mod tests {
         assert_eq!(v6_only, Some(Counter::IpDroppedSource));
         let v4_only = check(&v6(CLIENT_V6, SITE_V6, UDP, &ports(53)), Some(CLIENT_V4), None).err();
         assert_eq!(v4_only, Some(Counter::IpDroppedSource));
+    }
+
+    #[test]
+    fn an_icmp_error_passes_only_about_a_packet_sent_to_the_tunnel() {
+        let error_v4 = |kind: u8, code: u8, quoted: &[u8]| {
+            v4(CLIENT_V4, SITE_V4, ICMP, 0, &[], &[&[kind, code, 0, 0, 0, 0, 5, 0xdc][..], quoted].concat())
+        };
+        let error_v6 = |kind: u8, code: u8, quoted: &[u8]| {
+            v6(CLIENT_V6, SITE_V6, 58, &[&[kind, code, 0, 0, 0, 0, 5, 0xdc][..], quoted].concat())
+        };
+        // a datagram to a port nothing listens on, and a segment too long for the next link, sent with don't fragment
+        let datagram = v4(SITE_V4, CLIENT_V4, UDP, 0, &[], &ports(53));
+        let segment = v4(SITE_V4, CLIENT_V4, TCP, 0x4000, &[], &[ports(443), vec![0; 1400]].concat());
+        // an IPv4 error quotes the header and at least 8 bytes past it
+        assert_eq!(checked(&error_v4(3, 3, &datagram[..28])), to(Proto::Other(ICMP), SITE_V4, 0));
+        assert_eq!(checked(&error_v4(3, 4, &segment[..548])), to(Proto::Other(ICMP), SITE_V4, 0));
+        let datagram_v6 = v6(SITE_V6, CLIENT_V6, UDP, &ports(53));
+        let segment_v6 = v6(SITE_V6, CLIENT_V6, TCP, &[ports(443), vec![0; 1400]].concat());
+        assert_eq!(checked(&error_v6(1, 4, &datagram_v6)), to(Proto::Other(58), SITE_V6, 0));
+        assert_eq!(checked(&error_v6(2, 0, &segment_v6[..1232])), to(Proto::Other(58), SITE_V6, 0));
+
+        let to_another_v4 = v4(SITE_V4, Ipv4Addr::new(198, 18, 0, 3), UDP, 0, &[], &ports(53));
+        for kind in [3, 11, 12] {
+            assert_eq!(checked(&error_v4(kind, 0, &to_another_v4[..28])), Err(Counter::IpDroppedSource), "{kind}");
+        }
+        let to_another_v6 = v6(SITE_V6, Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 3), UDP, &ports(53));
+        for kind in 1..=4 {
+            assert_eq!(checked(&error_v6(kind, 0, &to_another_v6)), Err(Counter::IpDroppedSource), "{kind}");
+        }
+        // an error about a packet the tunnel sent itself: a stack quotes only the packets it was given
+        let sent = v4(CLIENT_V4, SITE_V4, UDP, 0, &[], &ports(53));
+        assert_eq!(checked(&error_v4(3, 3, &sent[..28])), Err(Counter::IpDroppedSource));
+
+        assert_eq!(checked(&error_v4(3, 3, &datagram[..19])), Err(Counter::IpDroppedSource), "a quote cut short");
+        assert_eq!(checked(&error_v6(1, 4, &datagram_v6[..39])), Err(Counter::IpDroppedSource), "a quote cut short");
+        let no_quote = v4(CLIENT_V4, SITE_V4, ICMP, 0, &[], &[3, 3, 0, 0]);
+        assert_eq!(checked(&no_quote), Err(Counter::IpDroppedSource), "an error cut short of its quote");
+        // a fragment after the first holds no ICMP header to read
+        let later = v4(CLIENT_V4, SITE_V4, ICMP, MORE_FRAGMENTS | 1, &[], &[3, 3, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(checked(&later), to(Proto::Other(ICMP), SITE_V4, 0));
     }
 
     #[test]

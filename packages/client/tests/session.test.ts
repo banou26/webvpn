@@ -812,6 +812,25 @@ describe('an IP tunnel', () => {
     expect(await relay.next()).toMatchObject({ type: 'ipClose', socket: 12 })
   })
 
+  it('opens the next tunnel only once the relay answered the close of one whose stream did not come', async () => {
+    vi.useFakeTimers()
+    const { relay, session } = await opened(Feature.IP)
+    const opening = outcome(session.ipOpen())
+    await answer(relay, (id) => ({ type: 'ipTunnel', id, socket: 12, mtu: MTU, ...BOTH }))
+    await vi.advanceTimersByTimeAsync(30_000)
+    await opening
+    const reopening = outcome(session.ipOpen())
+    const close = await relay.next()
+    expect(close).toMatchObject({ type: 'ipClose', socket: 12 })
+    await settle()
+    expect(relay.packets.map(({ type }) => type)).toEqual(['hello', 'ipOpen', 'ipClose'])
+    relay.send({ type: 'ok', id: idOf(close) })
+    const reopen = await relay.next()
+    expect(reopen).toEqual({ type: 'ipOpen', id: idOf(reopen) })
+    relay.send({ type: 'error', id: idOf(reopen), code: ErrorCode.CAPACITY, message: 'no address is free' })
+    expect(await reopening).toMatchObject({ code: ErrorCode.CAPACITY })
+  })
+
   it('closes a tunnel the relay gave after the request gave up', async () => {
     vi.useFakeTimers()
     const { relay, session } = await opened(Feature.IP)
@@ -907,6 +926,24 @@ describe('an IP tunnel', () => {
     relay.send({ type: 'ok', id: idOf(request) })
     await closing
     await vi.waitFor(() => expect(stream.seen.finished).toBe(true))
+  })
+
+  it('opens the next tunnel only once the relay answered the close before it', async () => {
+    const { relay, session } = await opened(Feature.IP)
+    const { tunnel } = await tunnelled(relay, session)
+    const closing = tunnel.close()
+    const reopening = outcome(session.ipOpen())
+    const close = await relay.next()
+    expect(close).toEqual({ type: 'ipClose', id: idOf(close), socket: 12 })
+    // the relay counts the tunnel until it answers, so an IpOpen sent now would be refused with CAPACITY
+    await settle()
+    expect(relay.packets.map(({ type }) => type)).toEqual(['hello', 'ipOpen', 'ipClose'])
+    relay.send({ type: 'ok', id: idOf(close) })
+    await closing
+    const reopen = await relay.next()
+    expect(reopen).toEqual({ type: 'ipOpen', id: idOf(reopen) })
+    relay.send({ type: 'error', id: idOf(reopen), code: ErrorCode.CAPACITY, message: 'no address is free' })
+    expect(await reopening).toMatchObject({ code: ErrorCode.CAPACITY })
   })
 
   it('stops at the relay\'s Closed notice', async () => {

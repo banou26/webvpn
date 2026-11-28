@@ -234,12 +234,17 @@ the client's side does not. Then each side repeats:
 A packet is one whole IPv4 or IPv6 packet, with no link header in front of it. A tunnel has two ends and nothing
 between them: there is no gateway address to learn, and a client whose stack wants one makes one up.
 
+The stream lasts as long as the tunnel, and has no half close. A client that finishes or resets its side ends the
+tunnel, which the relay tells with `Closed`. The relay ends its side only once the tunnel ended, and after `IpClose`
+ends it as after `TcpClose`: over WebTransport with a reset of code 0, over the mux with `FIN`.
+
 - **From the client.** The relay forwards a packet as a router does. It drops, and says nothing about, a packet that
   is not IPv4 or IPv6, whose header is cut short, whose own length is not `length`, that is longer than `mtu`, whose
-  source is not an address the relay gave this tunnel, that carries an IPv4 source route or an IPv6 type 0 routing
-  header, or whose destination the relay's rules refuse. A relay applies its egress rules to a packet's destination
-  exactly as to a socket's, with one difference: a packet to one of the relay's own addresses is dropped, since a
-  tunnel does not reach the sockets other sessions bound on the relay.
+  source is not an address the relay gave this tunnel, that is an ICMP error that does not quote a packet sent to that
+  address, that carries an IPv4 source route or an IPv6 type 0 routing header, or whose destination the relay's rules
+  refuse. A relay applies its egress rules to a packet's destination exactly as to a socket's, with one difference: a
+  packet to one of the relay's own addresses is dropped, since a tunnel does not reach the sockets other sessions
+  bound on the relay.
 - **Toward the client.** The relay sends only what answers the tunnel: a packet of a flow the client sent on before
   (the same protocol, the same peer address and, where the packet holds them, the same ports or echo identifier),
   and an ICMP error about a packet the tunnel sent. Whatever else arrives for the tunnel's addresses is dropped, so
@@ -249,11 +254,13 @@ between them: there is no gateway address to learn, and a client whose stack wan
   then names the relay's public address, as others dial it (`public ipv4`, `public ipv6`, all zero bytes for a
   family it has none of), and `ports` ports from `first port` on. A TCP or UDP packet that anyone sends to that
   address on one of those ports reaches the tunnel's own address on the same port, and begins a flow as a packet
-  from the client does. The ports are the tunnel's for as long as it lives. A tunnel with `ports` 0 has none and
-  is reached only by answers.
+  from the client does. A client of the same relay does not reach them: its `TcpConnect` or `UdpConnect` there is
+  answered `REFUSED`, and its datagram or its tunnel's packet there is dropped. The ports are the tunnel's for as
+  long as it lives. A tunnel with `ports` 0 has none and is reached only by answers.
 - **Flows.** A relay bounds the flows one tunnel holds, and forgets a flow that stays silent: after no less than two
   minutes, and for an open TCP connection after no less than two hours. A program that needs a quiet flow kept
-  sends on it more often than that.
+  sends on it more often than that. A new flow that finds the bound reached pushes out first the flows only their
+  peers sent on or that the tunnel only refused, then the ones silent longest, an open TCP connection last.
 - **Loss.** A tunnel is a link that may drop. Each side holds a short queue for the stream and drops the newest
   packet once the queue is full, so neither side waits on the other and what flows through a tunnel paces itself, as
   on any link. Nothing is sent again and nothing is reordered.
@@ -325,7 +332,7 @@ For a client without WebTransport, one WebSocket carries the same streams. Every
 - A client's `RESET` ends both sides of the stream.
 - A UDP socket has one stream toward the client, and its datagrams toward the relay travel as `DATAGRAM` frames. A
   `DATAGRAM` frame's stream is 0.
-- An IP tunnel's stream carries packets both ways, as a TCP socket's carries bytes.
+- An IP tunnel's stream carries packets both ways, and has no half close: the client's `FIN` ends the tunnel.
 - A receiver ignores a message shorter than five bytes and a kind it does not know.
 
 ## Limits

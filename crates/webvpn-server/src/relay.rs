@@ -52,6 +52,9 @@ pub struct Config {
     /// Where IP tunnels send their packets. `None` turns tunnels off: the relay's hello does not offer them, and
     /// `IpOpen` is answered `UNSUPPORTED`.
     pub forwarder: Option<Arc<dyn Forwarder>>,
+    /// IP tunnels one session may hold at once, each also one of its sockets. A forwarder has few addresses and
+    /// public ports to give, and this keeps one session from taking them all.
+    pub max_tunnels_per_session: usize,
     /// The packets one IP tunnel takes from its client each second, past which they are dropped. A packet costs the
     /// relay as much to check and send whatever its size, so bytes alone do not bound it. `None` lifts the ceiling.
     pub max_tunnel_packets_per_second: Option<u32>,
@@ -68,6 +71,7 @@ impl fmt::Debug for Config {
             .field("max_pending_sessions", &self.max_pending_sessions)
             .field("setup_timeout", &self.setup_timeout)
             .field("forwarder", &self.forwarder.is_some())
+            .field("max_tunnels_per_session", &self.max_tunnels_per_session)
             .field("max_tunnel_packets_per_second", &self.max_tunnel_packets_per_second)
             .finish()
     }
@@ -84,6 +88,8 @@ impl Default for Config {
             max_pending_sessions: 256,
             setup_timeout: Duration::from_secs(15),
             forwarder: None,
+            // a page's network stack and a virtual machine each need one
+            max_tunnels_per_session: 1,
             // 20000 packets of 1500 bytes are 240 Mbit/s, more than one client's network stack sends, while 20000
             // tiny ones are a few Mbit/s whose checks and sends one core does in a few milliseconds
             max_tunnel_packets_per_second: Some(20_000),

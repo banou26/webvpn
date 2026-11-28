@@ -179,8 +179,6 @@ async fn run<T: Transport, S: Session>(
                 metrics.count(dropped);
                 continue;
             }
-            metrics.add(Counter::BytesDown, packet.len() as u64);
-            session.policy.relayed(Direction::Down, packet.len()).await;
             // an empty packet still takes a place, so the queue's bytes bound its packets too
             let charge = packet.len().max(1) as u32;
             match budget.clone().try_acquire_many_owned(charge) {
@@ -194,6 +192,11 @@ async fn run<T: Transport, S: Session>(
     let mut writer = Box::pin(async move {
         let mut frame = Vec::new();
         while let Some((packet, _reservation)) = queued.recv().await {
+            // Counted and metered as it leaves the queue, so a packet the full queue drops is neither. While a policy
+            // that paces waits here, the packet keeps its place in the queue, so the queue fills and drops the newest,
+            // and the forwarder's channel stays empty.
+            metrics.add(Counter::BytesDown, packet.len() as u64);
+            session.policy.relayed(Direction::Down, packet.len()).await;
             frame.clear();
             ip::encode(&packet, &mut frame);
             if to_client.write_all(&frame).await.is_err() {
@@ -348,6 +351,8 @@ mod tests {
         asked: Arc<Mutex<Vec<(Proto, SocketAddr)>>>,
         up: Arc<AtomicUsize>,
         down: Arc<AtomicUsize>,
+        /// When set, how long it holds each packet toward the client before letting it move, as a policy that paces.
+        pace_down: Arc<Mutex<Option<Duration>>>,
     }
 
     impl Metered {
@@ -396,7 +401,12 @@ mod tests {
         fn relayed(&self, direction: Direction, bytes: usize) -> impl std::future::Future<Output = ()> + Send {
             let metered = if direction == Direction::Up { &self.up } else { &self.down };
             metered.fetch_add(bytes, Ordering::SeqCst);
-            std::future::ready(())
+            let pace = (*self.pace_down.lock().unwrap()).filter(|_| direction == Direction::Down);
+            async move {
+                if let Some(pace) = pace {
+                    tokio::time::sleep(pace).await;
+                }
+            }
         }
     }
 
@@ -562,11 +572,11 @@ mod tests {
         message
     }
 
-    /// A session on a relay whose forwarder gives each of its 2 tunnels 4 public ports, with `config`.
+    /// A session that may hold both tunnels of a forwarder that gives each of them 4 public ports, with `config`.
     async fn with_ports(config: Config) -> Harness {
         let mut forwarder = TestForwarder::new(MTU, 2);
         forwarder.ports = 4;
-        start(config, Some(forwarder), Auth::None, false).await
+        start(Config { max_tunnels_per_session: 2, ..config }, Some(forwarder), Auth::None, false).await
     }
 
     /// A UDP packet from `SITE` to the forwarder's tunnel `tunnel` at `port`.
@@ -615,6 +625,19 @@ mod tests {
         assert!(check_bind(None, local(PUBLIC_PORTS)).is_ok(), "a relay with no forwarder binds any port");
         let none = TestForwarder::new(MTU, 2);
         assert!(check_bind(Some(&none), local(PUBLIC_PORTS)).is_ok(), "so does one whose tunnels have no ports");
+    }
+
+    #[tokio::test]
+    async fn a_client_of_the_same_relay_does_not_reach_a_tunnel_s_public_port() {
+        let mut harness = with_ports(Config::default()).await;
+        let tunnel = harness.open(1, 0).await;
+        assert_eq!(tunnel.public, (Some(OWN), PUBLIC_PORTS, 4));
+        let remote = SocketAddr::from((OWN, PUBLIC_PORTS));
+        assert_eq!(code(&harness.ask(ClientPacket::TcpConnect { id: 2, remote }).await), (2, ErrorCode::REFUSED));
+        let bind = ClientPacket::UdpBind { id: 3, local: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)) };
+        let RelayPacket::Socket { socket, .. } = harness.ask(bind).await else { panic!("the socket is bound") };
+        let connect = ClientPacket::UdpConnect { id: 4, socket, remote };
+        assert_eq!(code(&harness.ask(connect).await), (4, ErrorCode::REFUSED));
     }
 
     #[tokio::test]
@@ -744,7 +767,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_client_that_reads_nothing_loses_the_newest_packets_and_holds_neither_the_forwarder_nor_the_session() {
-        let mut harness = tunnelling(2).await;
+        let config = Config { max_tunnels_per_session: 2, ..Config::default() };
+        let mut harness = start(config, Some(TestForwarder::new(MTU, 2)), Auth::None, false).await;
         let mut stuck = harness.open(1, 0).await;
         let mut other = harness.open(2, 1).await;
         stuck.send(&udp_from(0)).await;
@@ -754,7 +778,8 @@ mod tests {
         for index in 0..SENT {
             assert!(harness.forwarder.deliver(0, toward_client(0, index, 1400)), "the forwarder waits on no tunnel");
         }
-        eventually(|| harness.policy.metered()[1] == usize::from(SENT) * 1400).await;
+        // every packet was taken from the forwarder, and so queued or dropped: nothing waits between the two
+        eventually(|| harness.forwarder.waiting(0) == 0).await;
         let dropped = harness.count(Counter::IpDroppedQueueFull);
         assert!(dropped > 0);
 
@@ -775,6 +800,30 @@ mod tests {
         assert!(through.windows(2).all(|pair| pair[0] < pair[1]), "{through:?}");
         eventually(|| harness.count(Counter::IpPacketsDown) == u64::from(SENT) - dropped + 1).await;
         assert_eq!(harness.count(Counter::IpDroppedQueueFull), dropped);
+        // only what reached the stream is metered and counted: what got through, and the other tunnel's packet
+        let delivered = (u64::from(SENT) - dropped) * 1400 + 100;
+        assert_eq!((harness.policy.metered()[1] as u64, harness.count(Counter::BytesDown)), (delivered, delivered));
+    }
+
+    #[tokio::test]
+    async fn under_a_policy_that_paces_the_short_queue_fills_and_the_forwarder_s_channel_stays_empty() {
+        let mut harness = tunnelling(1).await;
+        let mut tunnel = harness.open(1, 0).await;
+        tunnel.send(&udp_from(0)).await;
+        harness.forwarder.sent(1).await;
+        // a minute a packet, far longer than the test runs
+        *harness.policy.pace_down.lock().unwrap() = Some(Duration::from_secs(60));
+        const SENT: u16 = 200;
+        for index in 0..SENT {
+            assert!(harness.forwarder.deliver(0, toward_client(0, index, 1400)));
+        }
+        eventually(|| harness.forwarder.waiting(0) == 0).await;
+        // the packet the policy holds keeps its place in the queue, so the queue drops the newest at once
+        let fitted = (QUEUE_BYTES / 1400) as u64;
+        assert_eq!(harness.count(Counter::IpDroppedQueueFull), u64::from(SENT) - fitted);
+        // and only that packet is metered and counted yet
+        eventually(|| harness.policy.metered()[1] == 1400).await;
+        assert_eq!(harness.count(Counter::BytesDown), 1400);
     }
 
     #[tokio::test]
@@ -811,6 +860,25 @@ mod tests {
         let mut tunnel = harness.open(1, 0).await;
         tunnel.send.shutdown().await.unwrap();
         let closed = RelayPacket::Closed { socket: tunnel.socket, code: ErrorCode::OTHER };
+        assert_eq!(harness.control.next().await, Some(closed));
+        harness.forwarder.holds(0).await;
+        harness.permits(0).await;
+        // no half close: the relay's side ended with the tunnel
+        assert_eq!(read_frame(&mut tunnel.recv).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_whose_client_stops_reading_its_stream_ends_and_gives_everything_back() {
+        let mut harness = tunnelling(1).await;
+        let mut tunnel = harness.open(1, 0).await;
+        // a packet out first, so that its answer passes the flow table and the relay writes it
+        tunnel.send(&udp_from(0)).await;
+        harness.forwarder.sent(1).await;
+        // the side the client sends on stays open, so only the failed write can end the tunnel
+        let Tunnel { socket, send: _sending, recv, .. } = tunnel;
+        drop(recv);
+        assert!(harness.forwarder.deliver(0, toward_client(0, 1, 100)));
+        let closed = RelayPacket::Closed { socket, code: ErrorCode::OTHER };
         assert_eq!(harness.control.next().await, Some(closed));
         harness.forwarder.holds(0).await;
         harness.permits(0).await;
@@ -860,7 +928,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_tunnel_counts_as_one_of_the_session_s_sockets_and_takes_only_its_own_requests() {
-        let config = Config { max_sockets_per_session: 1, ..Config::default() };
+        let config = Config { max_sockets_per_session: 1, max_tunnels_per_session: 2, ..Config::default() };
         let mut harness = start(config, Some(TestForwarder::new(MTU, 2)), Auth::None, false).await;
         let mut tunnel = harness.open(1, 0).await;
         assert_eq!(code(&harness.ask(ClientPacket::IpOpen { id: 2 }).await), (2, ErrorCode::CAPACITY));
@@ -873,6 +941,57 @@ mod tests {
         }
         tunnel.send(&udp_to(SITE)).await;
         assert_eq!(harness.forwarder.sent(1).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_session_holds_one_tunnel_by_default_and_one_past_its_ceiling_takes_nothing() {
+        let mut harness = tunnelling(2).await;
+        let tunnel = harness.open(1, 0).await;
+        assert_eq!(code(&harness.ask(ClientPacket::IpOpen { id: 2 }).await), (2, ErrorCode::CAPACITY));
+        // refused before the policy and the forwarder are asked
+        assert_eq!(*harness.policy.kinds.lock().unwrap(), [SocketKind::IpTunnel]);
+        assert_eq!((harness.policy.held(), harness.forwarder.held()), (1, 1));
+
+        let close = ClientPacket::IpClose { id: 3, socket: tunnel.socket };
+        assert_eq!(harness.ask(close).await, RelayPacket::Ok { id: 3 });
+        harness.permits(0).await;
+        let _reopened = harness.open(4, 0).await;
+        // the ceiling counts tunnels only
+        let bind = ClientPacket::UdpBind { id: 5, local: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)) };
+        assert!(matches!(harness.ask(bind).await, RelayPacket::Socket { id: 5, .. }));
+
+        let config = Config { max_tunnels_per_session: 2, ..Config::default() };
+        let mut two = start(config, Some(TestForwarder::new(MTU, 3)), Auth::None, false).await;
+        let _held = (two.open(1, 0).await, two.open(2, 1).await);
+        assert_eq!(code(&two.ask(ClientPacket::IpOpen { id: 3 }).await), (3, ErrorCode::CAPACITY));
+        assert_eq!((two.policy.held(), two.forwarder.held()), (2, 2));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_client_that_opens_and_closes_tunnels_without_reading_holds_one_tunnel_s_addresses_at_most() {
+        // A tunnel asked to close still holds its addresses until its task ends, and the task may first wait on the
+        // client, here on a control stream nobody reads. So the ceiling counts it until then.
+        const PAIRS: u32 = 3000;
+        let forwarder = TestForwarder::new(MTU, PAIRS as usize);
+        let mut harness = start(Config::default(), Some(forwarder), Auth::None, false).await;
+        let sent = Duration::from_millis(300);
+        let mut most = 0;
+        for pair in 0..PAIRS {
+            let open = harness.control.send(ClientPacket::IpOpen { id: 2 * pair });
+            if timeout(sent, open).await.is_err() {
+                break;
+            }
+            let close = harness.control.send(ClientPacket::IpClose { id: 2 * pair + 1, socket: pair });
+            if timeout(sent, close).await.is_err() {
+                break;
+            }
+            most = most.max(harness.forwarder.held());
+        }
+        for _ in 0..500 {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            most = most.max(harness.forwarder.held());
+        }
+        assert!(most <= 1, "one session held the addresses of {most} tunnels at once");
     }
 
     #[tokio::test]

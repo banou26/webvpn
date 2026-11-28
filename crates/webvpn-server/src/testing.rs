@@ -271,7 +271,7 @@ impl TestForwarder {
     }
 
     pub(crate) fn addresses(index: usize) -> (Ipv4Addr, Ipv6Addr) {
-        let host = 2 + index as u8;
+        let host = (2 + index) as u8;
         (Ipv4Addr::new(198, 18, 0, host), Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, host.into()))
     }
 
@@ -293,6 +293,12 @@ impl TestForwarder {
     /// Hands `packet` to tunnel `index` as a forwarder does, without waiting: false when its channel is full or gone.
     pub(crate) fn deliver(&self, index: usize, packet: Vec<u8>) -> bool {
         self.ends.lock().unwrap().get(index).is_some_and(|end| end.try_send(packet).is_ok())
+    }
+
+    /// The packets in tunnel `index`'s channel that the relay has not taken yet.
+    pub(crate) fn waiting(&self, index: usize) -> usize {
+        let ends = self.ends.lock().unwrap();
+        ends[index].max_capacity() - ends[index].capacity()
     }
 
     /// Ends tunnel `index` from the forwarder's side.

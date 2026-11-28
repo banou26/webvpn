@@ -35,9 +35,10 @@ level (`info` by default).
 | `WEBVPN_MIN_BIND_PORT` | `1024` | The lowest port a client may bind. Port 0, any free port, always passes. |
 | `WEBVPN_CREDENTIALS` | none | When set, a client must present one of these credentials before it opens a socket. Unset, the relay is open to every client. |
 | `WEBVPN_IP_DEVICE` | none | The TUN device IP tunnels go through, which a setup step made for the relay's user (see `ip-tunnel-setup.sh`). Unset, the relay carries no tunnels. Linux only. |
-| `WEBVPN_IP_POOL` | none | The device's IPv4 network, such as `198.18.0.0/16`. Required with `WEBVPN_IP_DEVICE`, refused without it. Linux only. |
+| `WEBVPN_IP_POOL` | none | The device's IPv4 network, such as `198.18.0.0/28`. Required with `WEBVPN_IP_DEVICE`, refused without it. Linux only. |
 | `WEBVPN_MAX_TUNNEL_PACKETS_PER_SECOND` | `20000` | The packets one IP tunnel takes from its client each second. `0` lifts the ceiling. Linux only. |
-| `WEBVPN_IP_PORTS` | none | The tunnels' public ports, a range written `first-last` such as `20000-29999`, which the setup step maps with the same setting. Each tunnel address holds its block of them (see `ip-tunnel-setup.sh`). Needs an IPv4 address in `WEBVPN_OWN_ADDRESSES`, which tunnels are told as the public one. Unset, tunnels have none. Linux only. |
+| `WEBVPN_MAX_TUNNELS_PER_SESSION` | `1` | The IP tunnels one session may hold at once, at least 1. Each is also one of its sockets. Linux only. |
+| `WEBVPN_IP_PORTS` | none | The tunnels' public ports, a range written `first-last` such as `20000-29999`, which the setup step maps with the same setting. Each tunnel address holds its block of them (see `ip-tunnel-setup.sh`), and a pool with more tunnel addresses than blocks stops the program at start. Needs an IPv4 address in `WEBVPN_OWN_ADDRESSES`, which tunnels are told as the public one. Refused when it holds `WEBVPN_WEBTRANSPORT_PORT`, `WEBVPN_WEBSOCKET_PORT` or `WEBVPN_HTTP_PORT`, or starts under `WEBVPN_MIN_BIND_PORT`. Unset, tunnels have none. Linux only. |
 | `WEBVPN_IP_PORTS_PER_TUNNEL` | `8` | The size of a tunnel address's block of public ports, the same as the setup step's. Linux only. |
 | `WEBVPN_DRAIN_SECONDS` | `5` | On SIGTERM or SIGINT the relay takes no new session and tells the open ones it is stopping. They keep their sockets this long, then the relay closes them and the program exits with code 0. |
 
@@ -48,9 +49,9 @@ host's rules, and the relay opens it with no privilege. [IP tunnels](https://web
 in the guide explains both halves and the setup script.
 
 `sh crates/webvpnd/tests/ip-tunnel.sh`, from the repository's root, runs IP tunnels over a real TUN device and a real
-network, in namespaces of its own, with no change to the host. When a check fails, it prints the relay's counters, the
-connections the kernel tracks, the rules and the neighbours. Set `WEBVPN_TEST_CAPTURE` to a directory to also capture
-every interface the tunnels' packets cross there, with tcpdump:
+network, in namespaces of its own, with no change to the host. When a check fails, it prints the relay's log and
+counters, the connections the kernel tracks, the rules and the neighbours. Set `WEBVPN_TEST_CAPTURE` to a directory to
+also capture every interface the tunnels' packets cross there, with tcpdump:
 
 ```sh
 WEBVPN_TEST_CAPTURE=target/ip-tunnel-capture sh crates/webvpnd/tests/ip-tunnel.sh

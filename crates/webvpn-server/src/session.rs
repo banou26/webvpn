@@ -155,7 +155,11 @@ pub(crate) async fn run<T: Transport, S: Session>(
     let lookup_slots = relay.dns.as_ref().map(|dns| dns.visitor_slots(transport.remote_ip()));
     let (register, mut register_queue) = mpsc::channel(100);
     let mut state = State {
-        sockets: Registry::new(relay.config.max_sockets_per_session, relay.metrics.clone()),
+        sockets: Registry::new(
+            relay.config.max_sockets_per_session,
+            relay.config.max_tunnels_per_session,
+            relay.metrics.clone(),
+        ),
         handle: Arc::new(SessionHandle {
             transport,
             policy: Arc::new(policy),
@@ -580,6 +584,8 @@ struct Registry<P> {
     task_sockets: HashMap<task::Id, u32>,
     next_id: u32,
     max: usize,
+    /// The IP tunnels among the sockets, at most.
+    max_tunnels: usize,
     metrics: Arc<Metrics>,
 }
 
@@ -593,17 +599,29 @@ struct Entry<P> {
 }
 
 impl<P> Registry<P> {
-    fn new(max: usize, metrics: Arc<Metrics>) -> Self {
-        Self { sockets: HashMap::new(), tasks: JoinSet::new(), task_sockets: HashMap::new(), next_id: 0, max, metrics }
+    fn new(max: usize, max_tunnels: usize, metrics: Arc<Metrics>) -> Self {
+        Self {
+            sockets: HashMap::new(),
+            tasks: JoinSet::new(),
+            task_sockets: HashMap::new(),
+            next_id: 0,
+            max,
+            max_tunnels,
+            metrics,
+        }
     }
 
-    /// Takes a socket in under the next id, or refuses it when the session holds as many sockets as it allows, the
-    /// policy refuses a permit, or the ids are spent. A refusal calls `refused` before what `run` holds is dropped,
-    /// and leaves the session as it was.
+    /// Takes a socket in under the next id, or refuses it when the session holds as many sockets, or for a tunnel as
+    /// many tunnels, as it allows, the policy refuses a permit, or the ids are spent. A refusal calls `refused` before
+    /// what `run` holds is dropped, and leaves the session as it was.
     fn register<S: Session<Permit = P>>(&mut self, policy: &S, register: RegisterSocket) -> Result<u32, Refusal> {
         let RegisterSocket { kind, requests, datagrams, run, refused } = register;
         let admitted = if self.sockets.len() >= self.max {
             Err(Refusal::new(ErrorCode::CAPACITY, "the session holds as many sockets as it allows"))
+        } else if kind == SocketKind::IpTunnel
+            && self.sockets.values().filter(|entry| entry.kind == kind).count() >= self.max_tunnels
+        {
+            Err(Refusal::new(ErrorCode::CAPACITY, "the session holds as many IP tunnels as it allows"))
         } else {
             policy.open_socket(kind).and_then(|permit| {
                 let socket =
@@ -1296,7 +1314,7 @@ mod tests {
     #[tokio::test]
     async fn socket_ids_rise_and_are_never_used_twice() {
         let policy = Probe::opening(8);
-        let mut registry = Registry::new(8, Arc::default());
+        let mut registry = Registry::new(8, 0, Arc::default());
         let first = registry.register(&policy, pending()).unwrap();
         let second = registry.register(&policy, pending()).unwrap();
         assert_eq!((first, second), (0, 1));
@@ -1307,7 +1325,7 @@ mod tests {
     #[tokio::test]
     async fn an_exhausted_id_space_refuses_only_the_new_socket() {
         let policy = Probe::opening(8);
-        let mut registry = Registry::new(8, Arc::default());
+        let mut registry = Registry::new(8, 0, Arc::default());
         registry.next_id = u32::MAX - 1;
         assert_eq!(registry.register(&policy, pending()).unwrap(), u32::MAX - 1);
         // Twice, since the ids stay spent.
@@ -1323,7 +1341,7 @@ mod tests {
     #[tokio::test]
     async fn the_session_s_ceiling_refuses_one_socket_more_without_asking_the_policy() {
         let policy = Probe::opening(8);
-        let mut registry = Registry::new(2, Arc::default());
+        let mut registry = Registry::new(2, 0, Arc::default());
         for _ in 0..2 {
             registry.register(&policy, pending()).unwrap();
         }
@@ -1341,7 +1359,7 @@ mod tests {
     #[tokio::test]
     async fn a_permit_the_policy_refuses_is_told_while_the_socket_is_still_whole() {
         let policy = Probe::opening(0);
-        let mut registry = Registry::new(8, Arc::default());
+        let mut registry = Registry::new(8, 0, Arc::default());
         let dropped = Arc::new(AtomicBool::new(false));
         let (probe, seen) = (DropProbe(dropped.clone()), dropped.clone());
         let (tell, mut told) = oneshot::channel();
@@ -1363,7 +1381,7 @@ mod tests {
     #[tokio::test]
     async fn aborting_a_socket_drops_its_future_and_its_permit_once_reaped() {
         let policy = Probe::opening(8);
-        let mut registry = Registry::new(8, Arc::default());
+        let mut registry = Registry::new(8, 0, Arc::default());
         let dropped = Arc::new(AtomicBool::new(false));
         let probe = DropProbe(dropped.clone());
         let run: Box<dyn FnOnce(u32) -> SocketFuture + Send> = Box::new(move |_| {
@@ -1390,7 +1408,7 @@ mod tests {
     async fn a_full_request_queue_answers_busy_and_keeps_the_socket_or_aborts_it_for_a_close() {
         let policy = Probe::opening(8);
         let metrics = Metrics::default();
-        let mut registry = Registry::new(8, Arc::default());
+        let mut registry = Registry::new(8, 0, Arc::default());
         let (requests, mut queue) = mpsc::channel(1);
         let socket = registry.register(&policy, RegisterSocket { requests, ..pending() }).unwrap();
         let disconnect = |id| ClientPacket::UdpDisconnect { id, socket };
@@ -1420,7 +1438,7 @@ mod tests {
         let policy = Probe::opening(8);
         let metrics = Metrics::default();
         let budget = Arc::new(Semaphore::new(1024));
-        let mut registry = Registry::new(8, Arc::default());
+        let mut registry = Registry::new(8, 0, Arc::default());
         let (datagrams, mut queue) = mpsc::channel(1);
         let socket = registry.register(&policy, RegisterSocket { datagrams, ..pending() }).unwrap();
         let packet = UdpPacket { socket, remote: None, data: b"data" };

@@ -69,9 +69,9 @@ impl Ipv4Pool {
 ///
 /// The k-th tunnel address of the network, counting from 0 at the network's second host address (the device holds
 /// the first), holds the k-th block: the ports from `first + k * per_tunnel` to `first + (k + 1) * per_tunnel - 1`.
-/// An address whose block would pass `last` holds none, and so does every address when `per_tunnel` is 0. The setup
-/// step maps the same blocks on the node, so a TCP or UDP packet to one of the node's own addresses on a port of a
-/// block reaches the address that holds it, on the same port.
+/// [`TunForwarder::open`] refuses a network with more tunnel addresses than blocks, so every address holds one. The
+/// setup step maps the same blocks on the node, so a TCP or UDP packet to one of the node's own addresses on a port of
+/// a block reaches the address that holds it, on the same port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PortBlocks {
     pub first: u16,
@@ -128,8 +128,8 @@ impl FromStr for Ipv4Pool {
 /// A packet the device holds for an address goes to the tunnel given it, and is dropped when that tunnel's channel is
 /// full or no tunnel holds the address. A packet a tunnel sends is written to the device without waiting, and dropped
 /// when the device takes none now. The device is read on a thread of its own, which ends within a second of the
-/// forwarder being dropped, or once the device fails, which ends every tunnel. Nothing it logs or returns names an
-/// address or holds a packet.
+/// forwarder being dropped, or once the device fails, which is logged and ends every tunnel: new ones are refused from
+/// then on. Nothing it logs or returns names an address or holds a packet.
 ///
 /// Linux only, with the `tun` feature.
 pub struct TunForwarder {
@@ -155,10 +155,26 @@ impl TunForwarder {
     /// Opens the TUN device named `device`, whose network is `ipv4`, and starts reading it. With `ports`, each tunnel
     /// is given the public ports of its address's block.
     ///
-    /// An error says what to check: the device does not exist, belongs to another user or is not a TUN device,
-    /// `/dev/net/tun` is missing or cannot be opened, or the device's MTU is under 1280. It names the device and never
-    /// an address.
+    /// An error says what to check: `ipv4` has more tunnel addresses than `ports` has blocks, the device does not
+    /// exist, belongs to another user or is not a TUN device, `/dev/net/tun` is missing or cannot be opened, the
+    /// device's MTU is under 1280, or its IPv4 address is not the first host address of `ipv4` with its prefix length.
+    /// It names the device and never an address.
     pub fn open(device: &str, ipv4: Ipv4Pool, ports: Option<PortBlocks>) -> io::Result<Self> {
+        if let Some(PortBlocks { first, last, per_tunnel }) = ports {
+            // the walk gives every address in turn, so an address past the last block would get none on an idle relay
+            let addresses = ipv4.size() - 3;
+            let span = (u32::from(last) + 1).saturating_sub(u32::from(first));
+            let blocks = span.checked_div(u32::from(per_tunnel)).unwrap_or(0);
+            if blocks < addresses {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "the pool holds {addresses} tunnel addresses and the public ports only {blocks} blocks: make \
+                         the pool smaller or the range larger, so that every address holds a block"
+                    ),
+                ));
+            }
+        }
         let name =
             CString::new(device).ok().filter(|name| name.as_bytes().len() < libc::IFNAMSIZ).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, format!("{device:?} is not a network device's name"))
@@ -199,6 +215,13 @@ impl TunForwarder {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("the MTU of {device} is {mtu}, under the 1280 a tunnel carries: raise it"),
+            ));
+        }
+        // The setup step's rules hold its own pool: a tunnel outside it would leave the node untranslated.
+        if read_network(&name) != Some((ipv4.device_address(), Ipv4Addr::from(ipv4.mask()))) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("the TUN device {device} does not hold the relay's network: give the setup step the same pool"),
             ));
         }
         let tunnels = Mutex::new(Tunnels { walk: Walk::new(ipv4), ends: HashMap::new(), failed: false });
@@ -254,6 +277,10 @@ fn read(shared: Weak<Shared>) {
             continue;
         }
         if poll.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            tracing::error!(
+                "the TUN device failed, removed while the relay ran for example: IP tunnels are refused until the \
+                 relay restarts"
+            );
             let mut tunnels = shared.tunnels.lock().unwrap();
             tunnels.failed = true;
             tunnels.ends.clear();
@@ -304,7 +331,8 @@ fn attach(fd: &OwnedFd, name: &CString) -> io::Result<()> {
     Ok(())
 }
 
-fn read_mtu(name: &CString) -> io::Result<libc::c_int> {
+/// The device's `ifreq` as the `SIOCGIF*` request `what` fills it, which needs no privilege.
+fn read_ifreq(name: &CString, what: libc::Ioctl) -> io::Result<libc::ifreq> {
     // SAFETY: plain socket creation.
     let socket = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
     if socket < 0 {
@@ -314,11 +342,25 @@ fn read_mtu(name: &CString) -> io::Result<libc::c_int> {
     let socket = unsafe { OwnedFd::from_raw_fd(socket) };
     let mut request = request(name);
     // SAFETY: `request` is a valid ifreq that outlives the call.
-    if unsafe { libc::ioctl(socket.as_raw_fd(), libc::SIOCGIFMTU, &mut request) } < 0 {
+    if unsafe { libc::ioctl(socket.as_raw_fd(), what, &mut request) } < 0 {
         return Err(io::Error::last_os_error());
     }
+    Ok(request)
+}
+
+fn read_mtu(name: &CString) -> io::Result<libc::c_int> {
     // SAFETY: SIOCGIFMTU filled the MTU.
-    Ok(unsafe { request.ifr_ifru.ifru_mtu })
+    Ok(unsafe { read_ifreq(name, libc::SIOCGIFMTU)?.ifr_ifru.ifru_mtu })
+}
+
+/// The device's IPv4 address and netmask, or `None` when it has no IPv4 address or they cannot be read.
+fn read_network(name: &CString) -> Option<(Ipv4Addr, Ipv4Addr)> {
+    let ipv4 = |what| {
+        // SAFETY: SIOCGIFADDR and SIOCGIFNETMASK fill an AF_INET sockaddr, whose address is bytes 2 to 5 of its data.
+        let data = unsafe { read_ifreq(name, what).ok()?.ifr_ifru.ifru_addr.sa_data };
+        Some(Ipv4Addr::new(data[2] as u8, data[3] as u8, data[4] as u8, data[5] as u8))
+    };
+    Some((ipv4(libc::SIOCGIFADDR)?, ipv4(libc::SIOCGIFNETMASK)?))
 }
 
 /// The walk through a network's host addresses that gives each tunnel its address.
@@ -439,5 +481,15 @@ mod tests {
         let error = TunForwarder::open("webvpn-none0", pool("198.18.0.0/16"), None).err().unwrap().to_string();
         assert!(error.contains("webvpn-none0 does not exist"), "{error}");
         assert!(!error.contains("198.18"), "{error}");
+    }
+
+    #[test]
+    fn a_pool_with_more_tunnel_addresses_than_blocks_of_ports_is_refused() {
+        let blocks = Some(PortBlocks { first: 20000, last: 29999, per_tunnel: 8 });
+        let error = TunForwarder::open("webvpn-none0", pool("198.18.0.0/16"), blocks).err().unwrap().to_string();
+        assert!(error.contains("65533") && error.contains("1250"), "{error}");
+        assert!(!error.contains("198.18"), "{error}");
+        let error = TunForwarder::open("webvpn-none0", pool("198.18.0.0/22"), blocks).err().unwrap().to_string();
+        assert!(error.contains("does not exist"), "a pool the blocks cover is taken: {error}");
     }
 }

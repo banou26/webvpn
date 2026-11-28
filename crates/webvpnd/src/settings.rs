@@ -87,6 +87,8 @@ impl Settings {
             own_addresses: vars.list("WEBVPN_OWN_ADDRESSES")?,
             #[cfg(target_os = "linux")]
             max_tunnel_packets_per_second: vars.tunnel_packets(defaults.max_tunnel_packets_per_second)?,
+            #[cfg(target_os = "linux")]
+            max_tunnels_per_session: vars.tunnels_per_session(defaults.max_tunnels_per_session)?,
             ..defaults
         };
         let basic = Basic::default();
@@ -97,7 +99,7 @@ impl Settings {
             min_bind_port: vars.or("WEBVPN_MIN_BIND_PORT", basic.min_bind_port)?,
             ..basic
         };
-        Ok(Self {
+        let settings = Self {
             address: vars.or("WEBVPN_ADDRESS", Ipv4Addr::UNSPECIFIED.into())?,
             webtransport_port: vars.or("WEBVPN_WEBTRANSPORT_PORT", 4433)?,
             websocket_port: vars.or("WEBVPN_WEBSOCKET_PORT", 8443)?,
@@ -112,15 +114,32 @@ impl Settings {
             #[cfg(target_os = "linux")]
             ip_tunnel: vars.ip_tunnel(&config)?,
             config,
-        })
+        };
+        // The node sends each new TCP and UDP packet on a public port to a tunnel, whatever listens there.
+        #[cfg(target_os = "linux")]
+        if let Some(blocks) = settings.ip_tunnel.as_ref().and_then(|tunnel| tunnel.ports) {
+            let own = [
+                ("WEBVPN_WEBTRANSPORT_PORT", settings.webtransport_port),
+                ("WEBVPN_WEBSOCKET_PORT", settings.websocket_port),
+                ("WEBVPN_HTTP_PORT", settings.http_port),
+            ];
+            if let Some((name, _)) = own.iter().find(|&&(_, port)| (blocks.first..=blocks.last).contains(&port)) {
+                bail!("WEBVPN_IP_PORTS holds {name}, which the node sends to a tunnel: move the range clear of it");
+            }
+            if blocks.first < settings.policy.min_bind_port {
+                bail!("WEBVPN_IP_PORTS starts under WEBVPN_MIN_BIND_PORT, where no tunnel is given a port");
+            }
+        }
+        Ok(settings)
     }
 }
 
 /// The settings of IP tunnels, which only Linux has.
-const IP_TUNNEL_VARIABLES: [&str; 5] = [
+const IP_TUNNEL_VARIABLES: [&str; 6] = [
     "WEBVPN_IP_DEVICE",
     "WEBVPN_IP_POOL",
     "WEBVPN_MAX_TUNNEL_PACKETS_PER_SECOND",
+    "WEBVPN_MAX_TUNNELS_PER_SESSION",
     "WEBVPN_IP_PORTS",
     "WEBVPN_IP_PORTS_PER_TUNNEL",
 ];
@@ -161,6 +180,16 @@ impl<F: Fn(&str) -> Result<String, VarError>> Vars<F> {
         Ok((ceiling > 0).then_some(ceiling))
     }
 
+    /// The tunnels one session may hold, at least 1: 0 would refuse every tunnel the relay offers.
+    #[cfg(target_os = "linux")]
+    fn tunnels_per_session(&self, default: usize) -> Result<usize> {
+        let name = IP_TUNNEL_VARIABLES[3];
+        match self.or(name, default)? {
+            0 => bail!("{name} is 0: a relay without tunnels leaves {} unset", IP_TUNNEL_VARIABLES[0]),
+            tunnels => Ok(tunnels),
+        }
+    }
+
     #[cfg(not(target_os = "linux"))]
     fn refuse_ip_tunnels(&self) -> Result<()> {
         for name in IP_TUNNEL_VARIABLES {
@@ -173,14 +202,14 @@ impl<F: Fn(&str) -> Result<String, VarError>> Vars<F> {
 
     #[cfg(target_os = "linux")]
     fn ip_tunnel(&self, config: &Config) -> Result<Option<IpTunnel>> {
-        let [device, pool, _, ports, _] = IP_TUNNEL_VARIABLES;
+        let [device, pool, _, _, ports, _] = IP_TUNNEL_VARIABLES;
         let blocks = self.port_blocks()?;
         if blocks.is_some() && !config.own_addresses.iter().any(IpAddr::is_ipv4) {
             bail!("{ports} needs the relay's public IPv4 address in WEBVPN_OWN_ADDRESSES, which tunnels are told");
         }
         match (self.get(device)?, self.parsed(pool)?) {
             (Some(device), Some(pool)) => Ok(Some(IpTunnel { device, pool, ports: blocks })),
-            (Some(_), None) => bail!("{device} is set without {pool}: set the device's network, such as 198.18.0.0/16"),
+            (Some(_), None) => bail!("{device} is set without {pool}: set the device's network, such as 198.18.0.0/28"),
             (None, Some(_)) => bail!("{pool} is set without {device}: set both for IP tunnels, or neither"),
             (None, None) if blocks.is_some() => bail!("{ports} is set without {device}"),
             (None, None) => Ok(None),
@@ -198,7 +227,7 @@ impl<F: Fn(&str) -> Result<String, VarError>> Vars<F> {
             bail!("{name} does not parse: write a range of ports from 1 to 65535 as first-last, such as 20000-29999");
         };
         if per_tunnel == 0 || u32::from(per_tunnel) > u32::from(last - first) + 1 {
-            bail!("{} is 0 or more than the ports of {name}", IP_TUNNEL_VARIABLES[4]);
+            bail!("{} is 0 or more than the ports of {name}", IP_TUNNEL_VARIABLES[5]);
         }
         Ok(Some(PortBlocks { first, last, per_tunnel }))
     }
@@ -266,6 +295,7 @@ mod tests {
         #[cfg(target_os = "linux")]
         assert!(settings.ip_tunnel.is_none());
         assert_eq!(settings.config.max_tunnel_packets_per_second, config.max_tunnel_packets_per_second);
+        assert_eq!(settings.config.max_tunnels_per_session, config.max_tunnels_per_session);
     }
 
     #[test]
@@ -368,16 +398,21 @@ mod tests {
             ("WEBVPN_IP_DEVICE", "webvpn0"),
             ("WEBVPN_IP_POOL", "198.18.0.0/16"),
             ("WEBVPN_MAX_TUNNEL_PACKETS_PER_SECOND", "500"),
+            ("WEBVPN_MAX_TUNNELS_PER_SESSION", "4"),
         ])
         .unwrap();
         let tunnel = settings.ip_tunnel.unwrap();
         assert_eq!(tunnel.device, "webvpn0");
         assert_eq!((tunnel.pool.network(), tunnel.pool.prefix()), (Ipv4Addr::new(198, 18, 0, 0), 16));
         assert_eq!(settings.config.max_tunnel_packets_per_second, Some(500));
+        assert_eq!(settings.config.max_tunnels_per_session, 4);
 
         let lifted = parse(&[("WEBVPN_MAX_TUNNEL_PACKETS_PER_SECOND", "0")]).unwrap();
         assert_eq!(lifted.config.max_tunnel_packets_per_second, None, "0 lifts the ceiling");
         assert_eq!(tunnel.ports, None, "no public ports by default");
+        // unlike the packets a second, 0 tunnels would refuse every one
+        let said = refusal(&[("WEBVPN_MAX_TUNNELS_PER_SESSION", "0")]);
+        assert_eq!(said, "WEBVPN_MAX_TUNNELS_PER_SESSION is 0: a relay without tunnels leaves WEBVPN_IP_DEVICE unset");
     }
 
     #[cfg(target_os = "linux")]
@@ -415,12 +450,31 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn public_ports_stay_clear_of_the_relays_own_ports() {
+        for (range, name) in [
+            ("4000-4999", "WEBVPN_WEBTRANSPORT_PORT"),
+            ("8440-8450", "WEBVPN_WEBSOCKET_PORT"),
+            ("8080-8087", "WEBVPN_HTTP_PORT"),
+            ("1000-1999", "WEBVPN_MIN_BIND_PORT"),
+        ] {
+            let said = refusal(&[&TUNNELS[..], &[("WEBVPN_IP_PORTS", range)]].concat());
+            assert!(said.starts_with("WEBVPN_IP_PORTS") && said.contains(name), "{range}: {said}");
+        }
+        assert!(parse(&[&TUNNELS[..], &[("WEBVPN_IP_PORTS", "1024-1999")]].concat()).is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn a_device_without_its_network_or_a_network_without_its_device_is_refused() {
         let alone = refusal(&[("WEBVPN_IP_DEVICE", "webvpn0")]);
         assert!(alone.starts_with("WEBVPN_IP_DEVICE is set without WEBVPN_IP_POOL"), "{alone}");
         let alone = refusal(&[("WEBVPN_IP_POOL", "198.18.0.0/16")]);
         assert!(alone.starts_with("WEBVPN_IP_POOL is set without WEBVPN_IP_DEVICE"), "{alone}");
-        for (name, value) in [("WEBVPN_IP_POOL", "198.51.0.0/33"), ("WEBVPN_MAX_TUNNEL_PACKETS_PER_SECOND", "-4")] {
+        for (name, value) in [
+            ("WEBVPN_IP_POOL", "198.51.0.0/33"),
+            ("WEBVPN_MAX_TUNNEL_PACKETS_PER_SECOND", "-4"),
+            ("WEBVPN_MAX_TUNNELS_PER_SESSION", "many"),
+        ] {
             let said = refusal(&[("WEBVPN_IP_DEVICE", "webvpn0"), ("WEBVPN_IP_POOL", "198.18.0.0/16"), (name, value)]);
             assert!(said.starts_with(&format!("{name} does not parse")), "{said}");
             assert!(!said.contains(value), "{said:?} repeats the value of {name}");
