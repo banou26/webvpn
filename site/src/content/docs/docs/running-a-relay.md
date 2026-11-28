@@ -164,14 +164,15 @@ On another system than Linux, any of the three stops the program at start, with 
 WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=198.18.0.0/16 WEBVPN_IP_USER=webvpnd sh ip-tunnel-setup.sh up
 ```
 
-It takes `WEBVPN_IP_DEVICE` (`webvpn0` by default) and `WEBVPN_IP_POOL` as the relay does, `WEBVPN_IP_USER`, the user the relay runs as, which is required (a device with no owner is open to every local user), and `WEBVPN_IP_MTU` (`1500` by default). `up` prints nothing unless something fails, and running it again changes nothing. It:
+It takes `WEBVPN_IP_DEVICE` (`webvpn0` by default) and `WEBVPN_IP_POOL` as the relay does, `WEBVPN_IP_USER`, the user the relay runs as, which is required (a device with no owner is open to every local user), `WEBVPN_IP_MTU` (`1500` by default), and `WEBVPN_IP_FLOWS_PER_ADDRESS`, the connections the kernel tracks for one tunnel address (`4096` by default, a little above the 3584 flows the relay keeps for a tunnel, so that the relay's own bound acts first). `up` prints nothing unless something fails, and running it again changes nothing. It:
 
 1. makes the device for its user, gives it the network's first host address, sets its MTU and brings it up;
 2. turns IPv4 forwarding on;
 3. loads one nftables table of its own, named after the device, with:
    - packets from the device to the device dropped, so that no tunnel reaches another;
+   - IPv6 packets from the device dropped, until tunnels have IPv6 addresses;
    - packets from the device to private, loopback, link-local, shared, multicast and reserved addresses dropped, the same list as the relay's own rule, as a second layer under it;
-   - a ceiling on the connections the kernel tracks for one tunnel address, set a little above the 3584 flows the relay keeps for a tunnel;
+   - a ceiling on the connections the kernel tracks for one tunnel address, `WEBVPN_IP_FLOWS_PER_ADDRESS`, past which a new one is dropped;
    - every other packet from the device accepted;
    - packets toward the device accepted only when they belong to, or relate to, a connection that began from the device, and every other packet toward the device dropped;
    - nothing from the device accepted for the host itself;

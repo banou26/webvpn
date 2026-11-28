@@ -13,16 +13,16 @@
 #   WEBVPN_IP_USER     the user the relay runs as, a name or a number, which owns the device. Required for up: a
 #                      device with no owner is open to every local user.
 #   WEBVPN_IP_MTU      the device's MTU, at least 1280. Default: 1500
+#   WEBVPN_IP_FLOWS_PER_ADDRESS
+#                      the connections the kernel tracks for one tunnel address, past which a new one is dropped.
+#                      Default: 4096. The relay keeps at most 3584 flows a tunnel and forgets the oldest past that, so
+#                      an answer on a forgotten flow never reaches the client anyway: the default sits a little above,
+#                      so that the relay's own bound acts first and this one only keeps the kernel's table bounded.
 #
 # up loads one nftables table of its own, named after the device. It does not assume it is the only firewall on the
 # host: another table that drops forwarded packets still drops the tunnels' packets, and has to let them through.
 
 set -eu
-
-# The connections the kernel tracks for one tunnel address. The relay keeps at most 3584 flows a tunnel and forgets
-# the oldest past that, so an answer on a forgotten flow never reaches the client anyway: this sits a little above,
-# so that the relay's own bound acts first and this one only keeps the kernel's table bounded.
-FLOWS_PER_ADDRESS=4096
 
 device=${WEBVPN_IP_DEVICE:-webvpn0}
 table=webvpn_$(printf %s "$device" | tr -c 'A-Za-z0-9_' '_')
@@ -36,6 +36,10 @@ up() {
 	pool=${WEBVPN_IP_POOL:?WEBVPN_IP_POOL is required, such as 198.18.0.0/16}
 	user=${WEBVPN_IP_USER:?WEBVPN_IP_USER is required: the user the relay runs as}
 	mtu=${WEBVPN_IP_MTU:-1500}
+	flows=${WEBVPN_IP_FLOWS_PER_ADDRESS:-4096}
+	case $flows in
+	'' | *[!0-9]*) fail "WEBVPN_IP_FLOWS_PER_ADDRESS is not a number" ;;
+	esac
 	case $pool in
 	*.*.*.*/*) ;;
 	*) fail "WEBVPN_IP_POOL is not an IPv4 network written with its prefix length" ;;
@@ -75,8 +79,10 @@ table inet $table {
 	chain forward {
 		type filter hook forward priority filter; policy accept;
 		iifname "$device" oifname "$device" drop
+		# until tunnels have IPv6 addresses. The relay sends no IPv6 packet until then, so no test reaches this rule
+		iifname "$device" meta nfproto ipv6 drop
 		iifname "$device" ip daddr @reserved drop
-		iifname "$device" ct state new add @flows { ip saddr ct count over $FLOWS_PER_ADDRESS } drop
+		iifname "$device" ct state new add @flows { ip saddr ct count over $flows } drop
 		iifname "$device" accept
 		oifname "$device" ct state established,related accept
 		oifname "$device" drop
