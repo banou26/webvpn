@@ -236,10 +236,11 @@ between them: there is no gateway address to learn, and a client whose stack wan
 
 - **From the client.** The relay forwards a packet as a router does. It drops, and says nothing about, a packet that
   is not IPv4 or IPv6, whose header is cut short, whose own length is not `length`, that is longer than `mtu`, whose
-  source is not an address the relay gave this tunnel, that carries an IPv4 source route or an IPv6 type 0 routing
-  header, or whose destination the relay's rules refuse. A relay applies its egress rules to a packet's destination
-  exactly as to a socket's, with one difference: a packet to one of the relay's own addresses is dropped, since a
-  tunnel does not reach the sockets other sessions bound on the relay.
+  source is not an address the relay gave this tunnel, that is an ICMP error that does not quote a packet sent to that
+  address, that carries an IPv4 source route or an IPv6 type 0 routing header, or whose destination the relay's rules
+  refuse. A relay applies its egress rules to a packet's destination exactly as to a socket's, with one difference: a
+  packet to one of the relay's own addresses is dropped, since a tunnel does not reach the sockets other sessions
+  bound on the relay.
 - **Toward the client.** The relay sends only what answers the tunnel: a packet of a flow the client sent on before
   (the same protocol, the same peer address and, where the packet holds them, the same ports or echo identifier),
   and an ICMP error about a packet the tunnel sent. Whatever else arrives for the tunnel's addresses is dropped, so
