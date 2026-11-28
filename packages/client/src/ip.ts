@@ -2,8 +2,8 @@ import type { ClosedBy, Context, SocketStream } from './context'
 import type { RelayPacket } from './protocol'
 
 import { formatIp } from './address'
-import { framed, noop, ok, unexpected } from './context'
-import { decodeIpFrame, encodeIpFrame } from './protocol'
+import { framed, noop, ok, unexpected, WebVpnError } from './context'
+import { decodeIpFrame, encodeIpFrame, ErrorCode, MIN_MTU } from './protocol'
 
 // the relay holds as much toward the client (QUEUE_BYTES in its tunnel.rs): a link's short queue, about 44 packets of
 // 1500 bytes, so that what flows through the tunnel learns of a slow path from loss within a few dozen milliseconds
@@ -50,7 +50,9 @@ export type IpTunnel = {
   readable: ReadableStream<Uint8Array>,
   /**
    * Sends one packet and never waits. `false` when the packet was dropped: it is empty or longer than `mtu`, the
-   * tunnel stopped, or the short queue toward the relay is full, as a busy link's would be.
+   * tunnel stopped, or the short queue toward the relay is full, as a busy link's would be. Over the WebSocket, that
+   * queue also counts the bytes the session's other sockets have not sent yet, so a tunnel drops every packet while
+   * one of them uploads.
    */
   send: (packet: Uint8Array) => boolean,
   /** Resolves once the tunnel stopped, with who stopped it. Never rejects. */
@@ -63,6 +65,10 @@ export type IpTunnel = {
 export const ipTunnel = async (context: Context, reply: RelayPacket): Promise<IpTunnel> => {
   if (reply.type !== 'ipTunnel') throw unexpected(reply)
   const { socket, mtu } = reply
+  if (mtu < MIN_MTU) {
+    context.release('ip', socket)
+    throw new WebVpnError(ErrorCode.OTHER, `the relay gave the tunnel an mtu of ${mtu}, under ${MIN_MTU}`)
+  }
   let done = false
   let closing: Promise<void> | undefined
   let finish!: (by: ClosedBy) => void
@@ -153,7 +159,11 @@ export const ipTunnel = async (context: Context, reply: RelayPacket): Promise<Ip
   const send = (packet: Uint8Array) => {
     if (done || !packet.byteLength || packet.byteLength > mtu) return false
     const frame = encodeIpFrame(packet)
-    if (queued + frame.byteLength > QUEUE_BYTES) return false
+    // a frame leaves `queued` once the carrier took it, and the WebSocket mux takes up to 1 MiB it did not send yet,
+    // so that counts too. It holds what the session's other sockets send as well: while their uploads keep it past
+    // 64 KiB, the tunnel drops every packet. Counting only the tunnel's own bytes there would take much more code,
+    // and a page that sends only through the tunnel has no such uploads.
+    if (queued + (context.carrier.buffered?.() ?? 0) + frame.byteLength > QUEUE_BYTES) return false
     queued += frame.byteLength
     writer.write(frame).catch(noop).finally(() => { queued -= frame.byteLength })
     return true

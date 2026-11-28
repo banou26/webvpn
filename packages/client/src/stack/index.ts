@@ -46,15 +46,20 @@ export type StackOptions = {
  *
  * What differs from a session: `tcpListen` takes one of the tunnel's public ports (port 0 takes a free one, another
  * port must be one of them, or it rejects with `ADDRESS_NOT_AVAILABLE`), rejects with `UNSUPPORTED` on a tunnel with
- * none, and names the relay's public address, which a peer dials. `udpBind` on port 0 takes a free public port while
- * the tunnel has one, and a private port otherwise, which only answers reach; its local address says which. A name
- * is looked up by the resolver in `StackOptions`, through the tunnel. Each socket's buffers are fixed when it is made,
- * and the options that cannot change them (`sendBufferSize`, `recvBufferSize`, broadcast and multicast) reject with
- * `UNSUPPORTED`. A UDP datagram must fit the tunnel's MTU, since the stack does not fragment.
+ * none, and names the relay's public address, which a peer dials. Its listener holds at most `backlog` connections that
+ * open or wait to be taken, and refuses one more with a reset. `udpBind` on port 0 takes a free public port while the
+ * tunnel has one, and a private port otherwise, which only answers reach; its local address says which. A name is
+ * looked up by the resolver in `StackOptions`, through the tunnel, and a connect by name takes its first A record, or
+ * its first AAAA record on a tunnel without IPv4. Each socket's buffers are fixed when it is made, and the options that
+ * cannot change them (`sendBufferSize`, `recvBufferSize`, broadcast and multicast) reject with `UNSUPPORTED`. A UDP
+ * datagram must fit the tunnel's MTU, since the stack does not fragment.
  *
  * The stack owns the tunnel: it reads every packet from `tunnel.readable` and sends with `tunnel.send`, whose dropped
  * packets its TCP treats as loss on the path. When the tunnel ends, whoever ended it, every socket ends as a
- * session's sockets do when the session ends, and `closed` resolves with the tunnel's `ClosedBy`.
+ * session's sockets do when the session ends, and `closed` resolves with the tunnel's `ClosedBy`. If the stack itself
+ * fails (its WebAssembly module traps, for example when its memory cannot grow), it closes the tunnel: `closed`
+ * resolves with `{ by: 'client' }` as after `close()`, and the sockets end as at a tunnel end, their errors with
+ * `OTHER` and 'the stack failed'.
  */
 export type Stack = Pick<Session, 'tcpConnect' | 'tcpListen' | 'udpBind' | 'lookup'> & {
   /** Resolves once the tunnel stopped, with who stopped it. Never rejects. */
@@ -95,14 +100,16 @@ export const openStack = async (tunnel: IpTunnel, options: StackOptions = {}): P
     return parseIp((isPublic(port) && (opens[0] ?? opens[1])) || owns[0] || owns[1]!)!
   }
 
-  const lookup = (query: Uint8Array) => stackLookup(engine, resolver, query, lookupTimeoutMs, udp)
+  const lookup = (query: Uint8Array) => stackLookup(engine, resolver, query, lookupTimeoutMs, udp, isPublic)
 
   return {
     closed: tunnel.closed,
     close: () => tunnel.close(),
     tcpConnect: async (target) => {
       if (!('name' in target)) return stackConnect(engine, target, tcp)
-      const ip = dnsAddresses(await lookup(dnsQuery(target.name, 'A'))).find((address) => address.byteLength === 4)
+      const v4 = Boolean(tunnel.ipv4)
+      const answer = await lookup(dnsQuery(target.name, v4 ? 'A' : 'AAAA'))
+      const ip = dnsAddresses(answer).find((address) => address.byteLength === (v4 ? 4 : 16))
       if (!ip) throw stackError(ErrorCode.NAME_NOT_FOUND, 'the name has no address')
       return stackConnect(engine, { ip, port: target.port }, tcp)
     },

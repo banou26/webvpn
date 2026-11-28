@@ -7,9 +7,11 @@ import { parseIp } from '../../src/address'
 import { openStack } from '../../src/stack'
 
 export const CLIENT = '10.0.0.2'
+export const CLIENT_V6 = 'fd00::2'
 export const CLIENT_PUBLIC = '203.0.113.9'
 export const FIRST_PORT = 40000
 export const SITE = '192.0.2.1'
+export const SITE_V6 = '2001:db8::1'
 
 export const at = (text: string, port: number): Address => ({ ip: parseIp(text)!, port })
 
@@ -84,6 +86,22 @@ export const unreachable = (packet: Uint8Array, code: number) => {
   return out
 }
 
+/** An IPv4 UDP packet from `from` to `to` that carries `data`, with no UDP checksum, which IPv4 allows. */
+export const udpPacket = (from: Address, to: Address, data: Uint8Array) => {
+  const out = new Uint8Array(28 + data.byteLength)
+  const view = new DataView(out.buffer)
+  out.set([0x45, 0, 0, 0, 0, 0, 0, 0, 64, 17])
+  view.setUint16(2, out.byteLength)
+  out.set(from.ip, 12)
+  out.set(to.ip, 16)
+  view.setUint16(10, checksum(out.subarray(0, 20)))
+  view.setUint16(20, from.port)
+  view.setUint16(22, to.port)
+  view.setUint16(24, 8 + data.byteLength)
+  out.set(data, 28)
+  return out
+}
+
 export type Toward = 'site' | 'client'
 
 /** How the pipe between the two tunnels behaves, which a test may change at any time. */
@@ -102,9 +120,9 @@ export type Pipe = {
 type Setup = { client?: StackOptions, site?: StackOptions, ports?: number, mtu?: number }
 
 /**
- * The client's stack on a tunnel, and a second stack that plays the internet as `SITE` on a tunnel of its own,
- * joined by a pipe that translates the client's address to its public one both ways, as a relay does. The site may
- * listen and bind on any port below the private ones.
+ * The client's stack on a tunnel, and a second stack that plays the internet as `SITE` and `SITE_V6` on a tunnel of
+ * its own, joined by a pipe that translates the client's IPv4 address to its public one both ways, as a relay does,
+ * and carries IPv6 as it is. The site may listen and bind on any port below the private ones.
  */
 export const internet = async ({ client: clientOptions, site: siteOptions, ports = 8, mtu = 1500 }: Setup = {}) => {
   const pipe: Pipe = {
@@ -124,7 +142,7 @@ export const internet = async ({ client: clientOptions, site: siteOptions, ports
     else target.deliver(moved)
   }
   const client = fakeTunnel(
-    { id: 1, ipv4: CLIENT, ipv6: 'fd00::2', mtu, publicIpv4: CLIENT_PUBLIC, firstPort: FIRST_PORT, ports },
+    { id: 1, ipv4: CLIENT, ipv6: CLIENT_V6, mtu, publicIpv4: CLIENT_PUBLIC, firstPort: FIRST_PORT, ports },
     (packet) => {
       if (pipe.refuse(packet)) {
         pipe.counts.refused++
@@ -137,7 +155,7 @@ export const internet = async ({ client: clientOptions, site: siteOptions, ports
     },
   )
   const site = fakeTunnel(
-    { id: 2, ipv4: SITE, mtu, publicIpv4: SITE, firstPort: 1, ports: 49151 },
+    { id: 2, ipv4: SITE, ipv6: SITE_V6, mtu, publicIpv4: SITE, firstPort: 1, ports: 49151 },
     (packet) => {
       carry('client', packet)
       return true
@@ -166,9 +184,12 @@ export const readAll = async (readable: ReadableStream<Uint8Array>) => {
   return all
 }
 
-/** A whole DNS answer to `query` with the A records of `ips`, or no records and the truncated bit. */
+/** A whole DNS answer to `query` with an A or AAAA record for each of `ips`, or no records and the truncated bit. */
 export const dnsAnswer = (query: Uint8Array, ips: string[], truncated = false) => {
-  const records = truncated ? [] : ips.map((text) => [0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, ...parseIp(text)!])
+  const records = truncated ? [] : ips.map((text) => {
+    const ip = parseIp(text)!
+    return [0xc0, 12, 0, ip.byteLength === 4 ? 1 : 28, 0, 1, 0, 0, 0, 60, 0, ip.byteLength, ...ip]
+  })
   const answer = new Uint8Array(query.byteLength + records.flat().length)
   answer.set(query)
   answer.set(records.flat(), query.byteLength)

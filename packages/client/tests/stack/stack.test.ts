@@ -1,12 +1,29 @@
 import type { TcpListener, TcpSocket, UdpSocket } from '../../src'
 import type { Stack } from '../../src/stack'
+import type { Pipe } from './internet'
 
-import { describe, expect, it } from 'vite-plus/test'
+import { afterEach, describe, expect, it, vi } from 'vite-plus/test'
 
 import { formatIp } from '../../src/address'
 import { dnsAddresses, dnsQuery } from '../../src/dns'
 import { ErrorCode } from '../../src/protocol'
-import { at, CLIENT, CLIENT_PUBLIC, dnsAnswer, FIRST_PORT, internet, pattern, readAll, SITE, unreachable } from './internet'
+import { openStack } from '../../src/stack'
+import {
+  at,
+  CLIENT,
+  CLIENT_PUBLIC,
+  CLIENT_V6,
+  dnsAnswer,
+  fakeTunnel,
+  FIRST_PORT,
+  internet,
+  pattern,
+  readAll,
+  SITE,
+  SITE_V6,
+  udpPacket,
+  unreachable,
+} from './internet'
 
 const ANY = at('0.0.0.0', 0)
 const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes)
@@ -53,6 +70,18 @@ const resolver = async (site: Stack, answer: (query: Uint8Array, count: number) 
   return { socket, count: () => count }
 }
 
+/** The TTL of each packet of `protocol` (6 TCP, 17 UDP) the client sends from now on, and the bytes it carries. */
+const sent = (pipe: Pipe, protocol: number) => {
+  const packets: { ttl: number, length: number }[] = []
+  pipe.drop = (toward, packet) => {
+    if (toward !== 'site' || packet[9] !== protocol) return false
+    const header = 20 + (protocol === 6 ? (packet[32]! >> 4) * 4 : 8)
+    packets.push({ ttl: packet[8]!, length: packet.byteLength - header })
+    return false
+  }
+  return packets
+}
+
 describe('TCP over a tunnel', () => {
   it('connects to an address and carries bytes both ways, with the addresses each side sees', async () => {
     const { client, site } = await internet()
@@ -80,6 +109,51 @@ describe('TCP over a tunnel', () => {
     expect(named(socket.remote)).toBe(`${SITE}:443`)
     expect(named((await accept(listener)).remote)).toBe(`${CLIENT_PUBLIC}:${socket.local.port}`)
     expect(count()).toBe(1)
+  })
+
+  it('connects and carries bytes over IPv6, and a reset from the peer reads as a reset', async () => {
+    const { client, site } = await internet()
+    const listener = await site.tcpListen(at('::', 80))
+    const socket = await client.tcpConnect(at(SITE_V6, 80))
+    const peer = await accept(listener)
+    expect(named(socket.remote)).toBe(`${SITE_V6}:80`)
+    expect(named(socket.local)).toBe(`${CLIENT_V6}:${socket.local.port}`)
+    expect(named(peer.remote)).toBe(named(socket.local))
+    await socket.writable.getWriter().write(bytes('over IPv6'))
+    expect(text((await peer.readable.getReader().read()).value!)).toBe('over IPv6')
+    const read = outcome(socket.readable.getReader().read())
+    await peer.reset()
+    expect(await read).toMatchObject({ code: ErrorCode.CONNECTION_RESET })
+  })
+
+  it('connects to a name by its first AAAA record on a tunnel without IPv4', async () => {
+    const client = fakeTunnel({ id: 1, ipv6: CLIENT_V6, mtu: 1500, firstPort: FIRST_PORT, ports: 0 }, (packet) => {
+      site.deliver(packet)
+      return true
+    })
+    const site = fakeTunnel(
+      { id: 2, ipv6: SITE_V6, publicIpv6: SITE_V6, mtu: 1500, firstPort: 1, ports: 49151 },
+      (packet) => {
+        client.deliver(packet)
+        return true
+      },
+    )
+    const [clientStack, siteStack] = await Promise.all([
+      openStack(client.tunnel, { resolver: at(SITE_V6, 53) }),
+      openStack(site.tunnel),
+    ])
+    const types: number[] = []
+    // the question's type is the u16 before its class, at the end of the query
+    await resolver(siteStack, (query) => {
+      const type = new DataView(query.buffer, query.byteOffset).getUint16(query.byteLength - 4)
+      types.push(type)
+      return dnsAnswer(query, [type === 28 ? SITE_V6 : SITE])
+    })
+    const listener = await siteStack.tcpListen(at('::', 443))
+    const socket = await clientStack.tcpConnect({ name: 'example.test', port: 443 })
+    expect(named(socket.remote)).toBe(`${SITE_V6}:443`)
+    expect(named((await accept(listener)).remote)).toBe(`${CLIENT_V6}:${socket.local.port}`)
+    expect(types).toEqual([28])
   })
 
   it('rejects a name with no A record with NAME_NOT_FOUND', async () => {
@@ -160,6 +234,49 @@ describe('TCP over a tunnel', () => {
     expect(await outcome(writer.write(bytes('late')))).toMatchObject({ code: ErrorCode.CONNECTION_RESET })
   })
 
+  it('a reset from the peer fails a write that waits for room with CONNECTION_RESET, with nobody reading', async () => {
+    const { client, site } = await internet({ client: { tcpSendBuffer: 16 * 1024 } })
+    const { socket, peer } = await connect(client, site)
+    const write = outcome(socket.writable.getWriter().write(pattern(1024 * 1024)))
+    await wait(200)
+    await peer.reset()
+    expect(await write).toMatchObject({ code: ErrorCode.CONNECTION_RESET })
+  })
+
+  it('a peer silent through keep-alive errors the reader and a write with CONNECTION_RESET, as a session', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    try {
+      const { client, site, pipe } = await internet()
+      const { socket } = await connect(client, site)
+      pipe.drop = () => true
+      await socket.setOption({ type: 'keepAlive', enabled: true, initialDelaySeconds: 1 })
+      const read = outcome(socket.readable.getReader().read())
+      // the idle second, then 9 probes 75 seconds apart
+      await vi.advanceTimersByTimeAsync(1000 + 9 * 75_000)
+      expect(await read).toMatchObject({ code: ErrorCode.CONNECTION_RESET })
+      const writer = socket.writable.getWriter()
+      expect(await outcome(writer.write(bytes('late')))).toMatchObject({ code: ErrorCode.CONNECTION_RESET })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a peer silent through keep-alive fails a write with CONNECTION_RESET, the reader cancelled', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    try {
+      const { client, site, pipe } = await internet()
+      const { socket } = await connect(client, site)
+      await socket.readable.cancel()
+      pipe.drop = () => true
+      await socket.setOption({ type: 'keepAlive', enabled: true, initialDelaySeconds: 1 })
+      await vi.advanceTimersByTimeAsync(1000 + 9 * 75_000)
+      const writer = socket.writable.getWriter()
+      expect(await outcome(writer.write(bytes('late')))).toMatchObject({ code: ErrorCode.CONNECTION_RESET })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('close() sends what this side holds, then ends; reset() ends at once with a reset', async () => {
     const { client, site } = await internet()
     const first = await connect(client, site, 80)
@@ -173,13 +290,53 @@ describe('TCP over a tunnel', () => {
     expect(await outcome(second.peer.readable.getReader().read())).toMatchObject({ code: ErrorCode.CONNECTION_RESET })
   })
 
-  it('answers the options it has, and UNSUPPORTED for the buffer sizes', async () => {
+  it('sends with the TTL it is given, and a small write while the last is unacknowledged with noDelay', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    try {
+      const { client, site, pipe } = await internet()
+      const { socket } = await connect(client, site)
+      const segments = sent(pipe, 6)
+      pipe.delayMs = 50
+      const writer = socket.writable.getWriter()
+      // two small writes 10 ms apart, which the first one's acknowledgement comes long after
+      const smallWrites = async () => {
+        segments.splice(0)
+        await writer.write(bytes('a'))
+        await vi.advanceTimersByTimeAsync(10)
+        await writer.write(bytes('b'))
+        await vi.advanceTimersByTimeAsync(10)
+        const carrying = segments.filter(({ length }) => length > 0)
+        await vi.advanceTimersByTimeAsync(500)
+        return carrying
+      }
+      expect(await smallWrites()).toEqual([{ ttl: 64, length: 1 }])
+      await socket.setOption({ type: 'noDelay', value: true })
+      await socket.setOption({ type: 'ttl', value: 32 })
+      expect(await smallWrites()).toEqual([{ ttl: 32, length: 1 }, { ttl: 32, length: 1 }])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('probes an idle connection with keep-alive', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    try {
+      const { client, site, pipe } = await internet()
+      const { socket } = await connect(client, site)
+      const segments = sent(pipe, 6)
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(segments).toEqual([])
+      await socket.setOption({ type: 'keepAlive', enabled: true, initialDelaySeconds: 1 })
+      await vi.advanceTimersByTimeAsync(2500)
+      expect(segments.length).toBeGreaterThanOrEqual(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('answers UNSUPPORTED for the buffer sizes', async () => {
     const { client, site } = await internet()
     const { socket } = await connect(client, site)
-    await socket.setOption({ type: 'noDelay', value: true })
-    await socket.setOption({ type: 'ttl', value: 32 })
-    await socket.setOption({ type: 'keepAlive', enabled: true, initialDelaySeconds: 30 })
-    await socket.setOption({ type: 'keepAlive', enabled: false, initialDelaySeconds: 0 })
     expect(await outcome(socket.setOption({ type: 'sendBufferSize', value: 1 }))).toMatchObject({ code: ErrorCode.UNSUPPORTED })
     expect(await outcome(socket.setOption({ type: 'recvBufferSize', value: 1 }))).toMatchObject({ code: ErrorCode.UNSUPPORTED })
   })
@@ -216,19 +373,19 @@ describe('listening over a tunnel', () => {
     expect(await outcome(client.tcpListen(ANY))).toMatchObject({ code: ErrorCode.UNSUPPORTED })
   })
 
-  it('takes several connections at once and hands them over in order', async () => {
+  it('holds several connections at once and hands them over in the order they came', async () => {
     const { client, site } = await internet()
     const listener = await client.tcpListen(ANY)
-    const dialed = await Promise.all(Array.from({ length: 6 }, () => site.tcpConnect(listener.local)))
+    const dialed: TcpSocket[] = []
+    for (let count = 0; count < 6; count++) dialed.push(await site.tcpConnect(listener.local))
     const reader = listener.connections.getReader()
     const accepted: TcpSocket[] = []
     for (const _ of dialed) accepted.push((await reader.read()).value!)
-    expect(accepted.map(({ remote }) => remote.port).sort()).toEqual(dialed.map(({ local }) => local.port).sort())
-    await Promise.all(dialed.map(async (socket, index) => {
+    expect(accepted.map(({ remote }) => remote.port)).toEqual(dialed.map(({ local }) => local.port))
+    await Promise.all(dialed.map(async (socket) => {
       const writer = socket.writable.getWriter()
       await writer.write(bytes(`from ${socket.local.port}`))
       await writer.close()
-      expect(index).toBeGreaterThanOrEqual(0)
     }))
     for (const socket of accepted) expect(text(await readAll(socket.readable))).toBe(`from ${socket.remote.port}`)
   })
@@ -242,6 +399,36 @@ describe('listening over a tunnel', () => {
     expect(await listener.closed).toEqual({ by: 'client' })
     expect(await dialed.readable.getReader().read()).toEqual({ done: true, value: undefined })
     expect(await outcome(site.tcpConnect(listener.local))).toMatchObject({ code: ErrorCode.CONNECTION_REFUSED })
+  })
+
+  it('refuses what its backlog has no room for while nobody takes a connection, until one is taken', async () => {
+    const { client, site } = await internet({ client: { backlog: 2 } })
+    const listener = await client.tcpListen(ANY)
+    await site.tcpConnect(listener.local)
+    await site.tcpConnect(listener.local)
+    expect(await outcome(site.tcpConnect(listener.local))).toMatchObject({ code: ErrorCode.CONNECTION_REFUSED })
+    await accept(listener)
+    await site.tcpConnect(listener.local)
+  })
+
+  it('holds 8 connections nobody took by default and refuses a 9th', async () => {
+    const { client, site } = await internet()
+    const listener = await client.tcpListen(ANY)
+    for (let count = 0; count < 8; count++) await site.tcpConnect(listener.local)
+    expect(await outcome(site.tcpConnect(listener.local))).toMatchObject({ code: ErrorCode.CONNECTION_REFUSED })
+  })
+
+  it('closes a connection that came after its connections were cancelled during a read, once it stops', async () => {
+    const { client, site } = await internet()
+    const listener = await client.tcpListen(ANY)
+    const reader = listener.connections.getReader()
+    const read = reader.read()
+    await reader.cancel()
+    expect(await read).toEqual({ done: true, value: undefined })
+    const dialed = await site.tcpConnect(listener.local)
+    await wait(50)
+    await listener.close()
+    expect(await dialed.readable.getReader().read()).toEqual({ done: true, value: undefined })
   })
 })
 
@@ -281,6 +468,16 @@ describe('UDP over a tunnel', () => {
     expect(text((await next(socket)).data)).toBe('unasked')
   })
 
+  it('carries datagrams over IPv6', async () => {
+    const { client, site } = await internet()
+    const seen = await echo(site)
+    const socket = await client.udpBind(at('::', 0))
+    await socket.writable.getWriter().write({ remote: at(SITE_V6, 7), data: bytes('ping') })
+    const { remote, data } = await next(socket)
+    expect([named(remote), text(data)]).toEqual([`${SITE_V6}:7`, 'ping'])
+    expect(seen).toEqual([`${CLIENT_V6}:${socket.local.port}`])
+  })
+
   it('binds a private port once every public one is taken, and says so in its address', async () => {
     const { client, site } = await internet({ ports: 1 })
     await echo(site)
@@ -308,13 +505,19 @@ describe('UDP over a tunnel', () => {
     expect(text((await next(socket)).data)).toBe('heard now')
   })
 
-  it('fails a datagram longer than the tunnel carries, and answers the options it has', async () => {
-    const { client } = await internet()
+  it('fails a datagram longer than the tunnel carries, and sends with the TTL it is given', async () => {
+    const { client, pipe } = await internet()
+    const datagrams = sent(pipe, 17)
     const socket = await client.udpBind(ANY)
+    const writer = socket.writable.getWriter()
+    await writer.write({ remote: at(SITE, 7), data: bytes('first') })
+    await vi.waitFor(() => expect(datagrams).toEqual([{ ttl: 64, length: 5 }]))
     await socket.setOption({ type: 'ttl', value: 8 })
+    await writer.write({ remote: at(SITE, 7), data: bytes('then') })
+    await vi.waitFor(() => expect(datagrams).toEqual([{ ttl: 64, length: 5 }, { ttl: 8, length: 4 }]))
     expect(await outcome(socket.setOption({ type: 'broadcast', value: true }))).toMatchObject({ code: ErrorCode.UNSUPPORTED })
-    const write = socket.writable.getWriter().write({ remote: at(SITE, 7), data: new Uint8Array(1473) })
-    expect(await outcome(write)).toMatchObject({ code: ErrorCode.OTHER })
+    const long = writer.write({ remote: at(SITE, 7), data: new Uint8Array(1473) })
+    expect(await outcome(long)).toMatchObject({ code: ErrorCode.OTHER })
   })
 })
 
@@ -351,6 +554,48 @@ describe('names over a tunnel', () => {
       await writer.write(framed.subarray(5))
     })()
     expect(dnsAddresses(await client.lookup(QUERY)).map(formatIp)).toEqual([SITE, '192.0.2.2'])
+  })
+
+  it('drops an answer that does not match the query, and asks from a random private port and id', async () => {
+    const ELSEWHERE = '198.51.100.66'
+    // the public ports reach halfway into the private ones, so a port taken at random is often a public one
+    const ports = 49152 + 8192 - FIRST_PORT
+    const { client, site, pipe, clientTunnel } = await internet({ client: { lookupTimeoutMs: 1000 }, ports })
+    // the real resolver gives the name back in another case, which still answers the query
+    await resolver(site, (query) => {
+      const answer = dnsAnswer(query, [SITE])
+      answer.set(bytes('EXAMPLE'), 13)
+      return answer
+    })
+    const sent: { port: number, id: number }[] = []
+    pipe.drop = (toward, packet) => {
+      const view = new DataView(packet.buffer, packet.byteOffset)
+      if (toward !== 'site' || packet[9] !== 17 || view.getUint16(22) !== 53) return false
+      const [port, query] = [view.getUint16(20), packet.slice(28)]
+      sent.push({ port, id: view.getUint16(28) })
+      // answers from the resolver's address that come first: with id 0, without the answer bit, and to another name
+      // of the same length
+      const zero = dnsAnswer(query, [ELSEWHERE])
+      zero.set([0, 0])
+      const unanswered = dnsAnswer(query, [ELSEWHERE])
+      unanswered[2] = 0x01
+      const other = dnsAnswer(dnsQuery('another.test'), [ELSEWHERE])
+      other.set(query.subarray(0, 2))
+      queueMicrotask(() => {
+        for (const data of [zero, unanswered, other]) {
+          clientTunnel.deliver(udpPacket(at(SITE, 53), at(CLIENT, port), data))
+        }
+      })
+      return false
+    }
+    for (let count = 0; count < 8; count++) {
+      const answer = await client.lookup(QUERY)
+      expect(dnsAddresses(answer).map(formatIp)).toEqual([SITE])
+      expect([...answer.subarray(0, 2)]).toEqual([0, 0])
+    }
+    expect(sent.some(({ id }) => id !== 0)).toBe(true)
+    expect(sent.slice(1).some(({ port }, index) => port !== sent[index]!.port + 1)).toBe(true)
+    for (const { port } of sent) expect(port).toBeGreaterThanOrEqual(FIRST_PORT + ports)
   })
 
   it('gives up with LOOKUP_FAILED at its limit when the resolver never answers', async () => {
@@ -414,11 +659,147 @@ describe('the tunnel ending', () => {
     expect(await outcome(client.udpBind(ANY))).toMatchObject({ message: 'the tunnel closed' })
   })
 
+  it('ends what waits on it: a connect, a lookup, a write that waits for room and a UDP read', async () => {
+    const { client, site, pipe, clientTunnel } = await internet({ client: { tcpSendBuffer: 16 * 1024 } })
+    const { socket } = await connect(client, site)
+    pipe.drop = () => true
+    // what is still pending a second later, as nothing else ends it that soon
+    const settled = <T>(promise: Promise<T>) => Promise.race([outcome(promise), wait(1000).then(() => 'pending')])
+    const write = settled(socket.writable.getWriter().write(pattern(1024 * 1024)))
+    const read = settled((await client.udpBind(ANY)).readable.getReader().read())
+    const connecting = settled(client.tcpConnect(at(SITE, 80)))
+    const lookup = settled(client.lookup(dnsQuery('example.test', 'A')))
+    await wait(100)
+    clientTunnel.end({ by: 'relay', code: ErrorCode.CAPACITY })
+    expect(await write).toMatchObject({ message: 'the tunnel closed' })
+    expect(await read).toEqual({ done: true, value: undefined })
+    expect(await connecting).toMatchObject({ message: 'the tunnel closed' })
+    expect(await lookup).toMatchObject({ message: 'the tunnel closed' })
+  })
+
   it('close() closes the tunnel, and so every socket', async () => {
     const { client, site } = await internet()
     const { socket } = await connect(client, site)
     await client.close()
     expect(await client.closed).toEqual({ by: 'client' })
     expect(await outcome(socket.readable.getReader().read())).toMatchObject({ message: 'the tunnel closed' })
+  })
+
+  it('ends the stack and closes the tunnel when a call into the module throws, and calls it no more', async () => {
+    const instantiate = WebAssembly.instantiate.bind(WebAssembly)
+    let broken = false
+    let callsAfter = 0
+    // an instance's exports are frozen, so the engine gets a copy whose functions throw as a trap does once broken
+    vi.spyOn(WebAssembly, 'instantiate').mockImplementationOnce((async (module: WebAssembly.Module) => {
+      const { exports } = await instantiate(module)
+      return {
+        exports: Object.fromEntries(Object.entries(exports).map(([name, value]) => [
+          name,
+          typeof value !== 'function' ? value : (...args: number[]) => {
+            if (!broken) return value(...args)
+            callsAfter++
+            throw new WebAssembly.RuntimeError('unreachable')
+          },
+        ])),
+      }
+    }) as never)
+    try {
+      const { tunnel } = fakeTunnel(
+        { id: 1, ipv4: CLIENT, mtu: 1500, publicIpv4: CLIENT_PUBLIC, firstPort: FIRST_PORT, ports: 8 },
+        () => true,
+      )
+      const stack = await openStack(tunnel)
+      const listener = await stack.tcpListen(ANY)
+      const udp = await stack.udpBind(ANY)
+      const read = outcome(udp.readable.getReader().read())
+      const lookup = outcome(stack.lookup(dnsQuery('example.test', 'A')))
+      // nothing answers the SYN, so the next call into the module is the poll of its retransmission, from a timer
+      const connecting = outcome(stack.tcpConnect(at(SITE, 80)))
+      await wait(50)
+      broken = true
+      expect(await connecting).toMatchObject({ code: ErrorCode.OTHER, message: 'the stack failed' })
+      expect(await lookup).toMatchObject({ code: ErrorCode.OTHER, message: 'the stack failed' })
+      expect(await read).toEqual({ done: true, value: undefined })
+      expect(await listener.closed).toEqual({ by: 'session' })
+      expect(await tunnel.closed).toEqual({ by: 'client' })
+      expect(await outcome(stack.tcpListen(ANY))).toMatchObject({ message: 'the stack failed' })
+      expect(await outcome(stack.udpBind(ANY))).toMatchObject({ message: 'the stack failed' })
+      expect(callsAfter).toBe(1)
+    } finally {
+      vi.restoreAllMocks()
+    }
+  })
+
+  describe('a trap in a close', () => {
+    // what is still pending half a second later, as nothing else ends it that soon
+    const settled = <T>(promise: Promise<T>) => Promise.race([outcome(promise), wait(500).then(() => 'pending')])
+
+    /** Makes the module of each stack opened from now on trap once, at the next call of the export it is given. */
+    const trapping = () => {
+      const instantiate = WebAssembly.instantiate.bind(WebAssembly)
+      let next: string | undefined
+      vi.spyOn(WebAssembly, 'instantiate').mockImplementation((async (module: WebAssembly.Module) => {
+        const { exports } = await instantiate(module)
+        return {
+          exports: Object.fromEntries(Object.entries(exports).map(([name, value]) => [
+            name,
+            typeof value !== 'function' ? value : (...args: number[]) => {
+              if (name !== next) return value(...args)
+              next = undefined
+              throw new WebAssembly.RuntimeError('unreachable')
+            },
+          ])),
+        }
+      }) as never)
+      return (name: string) => { next = name }
+    }
+
+    const lone = () => openStack(fakeTunnel(
+      { id: 1, ipv4: CLIENT, mtu: 1500, publicIpv4: CLIENT_PUBLIC, firstPort: FIRST_PORT, ports: 8 },
+      () => true,
+    ).tunnel)
+
+    afterEach(() => {
+      vi.restoreAllMocks()
+    })
+
+    for (const name of ['tcp_accept', 'stack_release']) {
+      it(`ends a listener's waiting read and its closed when ${name} traps`, async () => {
+        const trap = trapping()
+        const listener = await (await lone()).tcpListen(ANY)
+        const read = listener.connections.getReader().read()
+        await wait(20)
+        trap(name)
+        expect(await settled(listener.close())).toMatchObject({ message: 'the stack failed' })
+        expect(await settled(read)).toEqual({ done: true, value: undefined })
+        expect(await settled(listener.closed)).toEqual({ by: 'client' })
+      })
+    }
+
+    it('ends a UDP socket\'s waiting read and its closed when stack_release traps', async () => {
+      const trap = trapping()
+      const udp = await (await lone()).udpBind(ANY)
+      const read = udp.readable.getReader().read()
+      await wait(20)
+      trap('stack_release')
+      expect(await settled(udp.close())).toMatchObject({ message: 'the stack failed' })
+      expect(await settled(read)).toEqual({ done: true, value: undefined })
+      expect(await settled(udp.closed)).toEqual({ by: 'client' })
+    })
+
+    it('ends a TCP socket\'s waiting read and write when stack_release traps', async () => {
+      const trap = trapping()
+      const { client, site } = await internet()
+      const { socket } = await connect(client, site)
+      const read = socket.readable.getReader().read()
+      // the peer never reads, so the write waits for room once both buffers are full
+      const write = socket.writable.getWriter().write(new Uint8Array(4 * 1024 * 1024))
+      await wait(300)
+      expect(await settled(write)).toBe('pending')
+      trap('stack_release')
+      expect(await settled(socket.close())).toMatchObject({ message: 'the stack failed' })
+      expect(await settled(read)).toEqual({ done: true, value: undefined })
+      expect(await settled(write)).toMatchObject({ message: 'the stack failed' })
+    })
   })
 })

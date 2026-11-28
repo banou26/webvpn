@@ -2,7 +2,7 @@ import type { IpTunnel } from '../ip'
 import type { Address } from '../protocol'
 
 import { parseIp } from '../address'
-import { WebVpnError } from '../context'
+import { noop, WebVpnError } from '../context'
 import { ErrorCode } from '../protocol'
 import wasm from './wasm.js'
 
@@ -58,6 +58,7 @@ type Calls = {
 
 /** One stack, in a WebAssembly instance of its own, driven over one tunnel. */
 export type Engine = {
+  /** The module's exports. Once the stack ended, each throws its error and does not reach the module. */
   calls: Calls,
   /** The shared buffer. A fresh view each time, since the instance's memory may grow under an older one. */
   buffer: () => Uint8Array,
@@ -69,7 +70,7 @@ export type Engine = {
   kick: () => void,
   /** Calls `wake` when the socket or listener `id` changed, and once when the tunnel ended, until the call it returns. */
   watch: (id: number, wake: () => void) => () => void,
-  /** The error of whatever the tunnel's end made fail, once it ended. */
+  /** The error of whatever the stack's end made fail, once it ended: the tunnel closed, or the stack failed. */
   ended: () => WebVpnError | undefined,
 }
 
@@ -91,18 +92,41 @@ let compiled: Promise<WebAssembly.Module> | undefined
 /**
  * Starts a stack on `tunnel`: reads every packet the tunnel gives into it, sends every packet it makes with
  * `tunnel.send`, and polls it on a timer at the time it asks for, and after each packet in and each socket call.
- * It stops when the tunnel ends.
+ * It stops when the tunnel ends, or when a call into the module throws, which closes the tunnel.
  */
 export const startEngine = async (tunnel: IpTunnel, connectTimeoutMs: number): Promise<Engine> => {
   compiled ??= WebAssembly.compile(decode(wasm))
   const instance = await WebAssembly.instantiate(await compiled)
-  const calls = instance.exports as unknown as Calls
-  const at = calls.stack_buffer()
-  const buffer = () => new Uint8Array(calls.memory.buffer, at, BUFFER_BYTES)
   const watchers = new Map<number, () => void>()
   let ended: WebVpnError | undefined
   let timer: ReturnType<typeof setTimeout> | undefined
   let kicked = false
+
+  const end = (error = new WebVpnError(ErrorCode.OTHER, 'the tunnel closed')) => {
+    if (ended) return
+    ended = error
+    clearTimeout(timer)
+    for (const wake of [...watchers.values()]) wake()
+    watchers.clear()
+  }
+
+  // a trap (a panic, or memory that cannot grow) does not unwind, so the module's state is lost and every later call
+  // traps too: the first one ends the stack and closes the tunnel, and no call reaches the module after it
+  const calls = Object.fromEntries(Object.entries(instance.exports).map(([name, value]) => [
+    name,
+    typeof value !== 'function' ? value : (...args: number[]) => {
+      if (ended) throw ended
+      try {
+        return value(...args)
+      } catch {
+        end(new WebVpnError(ErrorCode.OTHER, 'the stack failed'))
+        tunnel.close().catch(noop)
+        throw ended
+      }
+    },
+  ])) as unknown as Calls
+  const at = calls.stack_buffer()
+  const buffer = () => new Uint8Array(calls.memory.buffer, at, BUFFER_BYTES)
 
   const setup = buffer()
   setup.fill(0, 0, 20)
@@ -114,13 +138,20 @@ export const startEngine = async (tunnel: IpTunnel, connectTimeoutMs: number): P
   const poll = () => {
     kicked = false
     if (ended) return
-    const delay = calls.stack_poll(performance.now())
-    for (let length = calls.stack_output(); length; length = calls.stack_output()) tunnel.send(buffer().slice(0, length))
-    const view = new DataView(calls.memory.buffer, at, calls.stack_events() * 4)
-    const changed = Array.from({ length: view.byteLength / 4 }, (_, index) => view.getUint32(index * 4))
-    clearTimeout(timer)
-    timer = delay >= 0 ? setTimeout(poll, delay) : undefined
-    for (const id of changed) watchers.get(id)?.()
+    try {
+      const delay = calls.stack_poll(performance.now())
+      for (let length = calls.stack_output(); length; length = calls.stack_output()) {
+        tunnel.send(buffer().slice(0, length))
+      }
+      const view = new DataView(calls.memory.buffer, at, calls.stack_events() * 4)
+      const changed = Array.from({ length: view.byteLength / 4 }, (_, index) => view.getUint32(index * 4))
+      clearTimeout(timer)
+      timer = delay >= 0 ? setTimeout(poll, delay) : undefined
+      for (const id of changed) watchers.get(id)?.()
+    } catch (error) {
+      // a trap ended the stack already, and nothing above a timer or a microtask would catch it
+      if (error !== ended) throw error
+    }
   }
 
   const kick = () => {
@@ -129,14 +160,7 @@ export const startEngine = async (tunnel: IpTunnel, connectTimeoutMs: number): P
     queueMicrotask(poll)
   }
 
-  const end = () => {
-    if (ended) return
-    ended = new WebVpnError(ErrorCode.OTHER, 'the tunnel closed')
-    clearTimeout(timer)
-    for (const wake of [...watchers.values()]) wake()
-    watchers.clear()
-  }
-  tunnel.closed.then(end)
+  tunnel.closed.then(() => end())
 
   void (async () => {
     const reader = tunnel.readable.getReader()

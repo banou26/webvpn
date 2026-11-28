@@ -564,6 +564,23 @@ describe('a TCP listener', () => {
       else await vi.waitFor(() => expect(closes(), way).toEqual([9, 10]))
     }
   })
+
+  it('closes a connection that came after its connections were cancelled during a read, once it stops', async () => {
+    const { relay, session } = await opened(Feature.LISTEN)
+    const listener = await listening(relay, session)
+    const reader = listener.connections.getReader()
+    const read = reader.read()
+    await reader.cancel()
+    expect(await read).toEqual({ done: true, value: undefined })
+    relay.open(9)
+    relay.send({ type: 'accepted', listener: 4, socket: 9, local: v4('192.0.2.1', 4000), remote: SITE })
+    await settle()
+    const closing = listener.close()
+    await answer(relay, (id) => ({ type: 'ok', id }))
+    await closing
+    const closes = () => relay.packets.flatMap((packet) => packet.type === 'tcpClose' ? [packet.socket] : [])
+    await vi.waitFor(() => expect(closes()).toEqual([9]))
+  })
 })
 
 describe('a UDP socket over WebTransport', () => {
@@ -753,6 +770,22 @@ describe('an IP tunnel', () => {
     const opening = outcome(session.ipOpen())
     await answer(relay, (id) => ({ type: 'error', id, code: ErrorCode.CAPACITY, message: 'no address is free' }))
     expect(await opening).toMatchObject({ code: ErrorCode.CAPACITY, message: 'no address is free' })
+  })
+
+  it('refuses a tunnel under 1280 bytes and closes it at the relay', async () => {
+    const { relay, session } = await opened(Feature.IP)
+    const opening = outcome(session.ipOpen())
+    await answer(relay, (id) => ({ type: 'ipTunnel', id, socket: 12, mtu: 1279, ...BOTH }))
+    await settle()
+    relay.open(12)
+    expect(await opening).toMatchObject({ code: ErrorCode.OTHER })
+    expect(await relay.next()).toMatchObject({ type: 'ipClose', socket: 12 })
+
+    const next = session.ipOpen()
+    await answer(relay, (id) => ({ type: 'ipTunnel', id, socket: 13, mtu: 1280, ...BOTH }))
+    await settle()
+    relay.open(13)
+    expect((await next).mtu).toBe(1280)
   })
 
   it('waits for the reply when its stream comes first', async () => {

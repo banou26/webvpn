@@ -1,5 +1,8 @@
 const HEADER_BYTES = 2
 
+/** The least `mtu` a tunnel carries, the 1280 bytes every IPv6 link carries, as `webvpn_proto::ip::MIN_MTU`. */
+export const MIN_MTU = 1280
+
 /** One packet behind the `u16` length an IP tunnel's stream carries it with. */
 export const encodeIpFrame = (packet: Uint8Array) => {
   if (packet.byteLength > 0xffff) throw new TypeError(`a tunnel frame holds at most 65535 bytes, not ${packet.byteLength}`)

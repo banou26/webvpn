@@ -239,7 +239,8 @@ class Socket extends Duplex {
 
   /**
    * Node's keep-alive, as arguments or as Node 26's options object. The relay takes `enable` and `initialDelay` (in
-   * whole seconds); Node's `interval` and `count` have no counterpart, so the relay's system defaults apply.
+   * whole seconds); Node's `interval` and `count` have no counterpart, so the relay's system defaults apply, or on a
+   * stack from `openStack` its 75 seconds and 9 probes.
    */
   setKeepAlive(enable?: boolean | { enable?: boolean, initialDelay?: number }, initialDelay?: number): this {
     const options = typeof enable === 'object' && enable !== null ? enable : { enable, initialDelay }

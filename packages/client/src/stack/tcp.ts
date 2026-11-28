@@ -31,14 +31,18 @@ export const stackTcpSocket = (engine: Engine, id: number, local: Address, remot
   const release = () => {
     if (released || engine.ended()) return
     released = true
-    unwatch()
     calls.stack_release(id)
+    // unwatched after the call, so the end that a trap in it makes still wakes this socket
+    unwatch()
     kick()
   }
 
-  // a connection that ended both ways and was read to its end is let go of even when nobody closes it
+  // a connection that ended both ways and was read to its end is let go of even when nobody closes it. The reset that
+  // ended it is kept first for the writes, since a reader that had finished never reads it.
   const settle = () => {
-    if (readDone && !engine.ended() && calls.tcp_state(id) === TcpState.CLOSED) release()
+    if (!readDone || engine.ended() || calls.tcp_state(id) !== TcpState.CLOSED) return
+    if (calls.tcp_error(id) === ErrorCode.CONNECTION_RESET) reset ??= stackError(ErrorCode.CONNECTION_RESET)
+    release()
   }
 
   const unwatch = engine.watch(id, () => {
