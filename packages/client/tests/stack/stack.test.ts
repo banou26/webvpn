@@ -304,19 +304,19 @@ describe('listening over a tunnel', () => {
     expect(await outcome(client.tcpListen(ANY))).toMatchObject({ code: ErrorCode.UNSUPPORTED })
   })
 
-  it('takes several connections at once and hands them over in order', async () => {
+  it('holds several connections at once and hands them over in the order they came', async () => {
     const { client, site } = await internet()
     const listener = await client.tcpListen(ANY)
-    const dialed = await Promise.all(Array.from({ length: 6 }, () => site.tcpConnect(listener.local)))
+    const dialed: TcpSocket[] = []
+    for (let count = 0; count < 6; count++) dialed.push(await site.tcpConnect(listener.local))
     const reader = listener.connections.getReader()
     const accepted: TcpSocket[] = []
     for (const _ of dialed) accepted.push((await reader.read()).value!)
-    expect(accepted.map(({ remote }) => remote.port).sort()).toEqual(dialed.map(({ local }) => local.port).sort())
-    await Promise.all(dialed.map(async (socket, index) => {
+    expect(accepted.map(({ remote }) => remote.port)).toEqual(dialed.map(({ local }) => local.port))
+    await Promise.all(dialed.map(async (socket) => {
       const writer = socket.writable.getWriter()
       await writer.write(bytes(`from ${socket.local.port}`))
       await writer.close()
-      expect(index).toBeGreaterThanOrEqual(0)
     }))
     for (const socket of accepted) expect(text(await readAll(socket.readable))).toBe(`from ${socket.remote.port}`)
   })
