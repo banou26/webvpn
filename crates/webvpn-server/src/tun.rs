@@ -156,8 +156,8 @@ impl TunForwarder {
     /// is given the public ports of its address's block.
     ///
     /// An error says what to check: the device does not exist, belongs to another user or is not a TUN device,
-    /// `/dev/net/tun` is missing or cannot be opened, or the device's MTU is under 1280. It names the device and never
-    /// an address.
+    /// `/dev/net/tun` is missing or cannot be opened, the device's MTU is under 1280, or its IPv4 address is not the
+    /// first host address of `ipv4` with its prefix length. It names the device and never an address.
     pub fn open(device: &str, ipv4: Ipv4Pool, ports: Option<PortBlocks>) -> io::Result<Self> {
         let name =
             CString::new(device).ok().filter(|name| name.as_bytes().len() < libc::IFNAMSIZ).ok_or_else(|| {
@@ -199,6 +199,13 @@ impl TunForwarder {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("the MTU of {device} is {mtu}, under the 1280 a tunnel carries: raise it"),
+            ));
+        }
+        // The setup step's rules hold its own pool: a tunnel outside it would leave the node untranslated.
+        if read_network(&name) != Some((ipv4.device_address(), Ipv4Addr::from(ipv4.mask()))) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("the TUN device {device} does not hold the relay's network: give the setup step the same pool"),
             ));
         }
         let tunnels = Mutex::new(Tunnels { walk: Walk::new(ipv4), ends: HashMap::new(), failed: false });
@@ -304,7 +311,8 @@ fn attach(fd: &OwnedFd, name: &CString) -> io::Result<()> {
     Ok(())
 }
 
-fn read_mtu(name: &CString) -> io::Result<libc::c_int> {
+/// The device's `ifreq` as the `SIOCGIF*` request `what` fills it, which needs no privilege.
+fn read_ifreq(name: &CString, what: libc::Ioctl) -> io::Result<libc::ifreq> {
     // SAFETY: plain socket creation.
     let socket = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
     if socket < 0 {
@@ -314,11 +322,25 @@ fn read_mtu(name: &CString) -> io::Result<libc::c_int> {
     let socket = unsafe { OwnedFd::from_raw_fd(socket) };
     let mut request = request(name);
     // SAFETY: `request` is a valid ifreq that outlives the call.
-    if unsafe { libc::ioctl(socket.as_raw_fd(), libc::SIOCGIFMTU, &mut request) } < 0 {
+    if unsafe { libc::ioctl(socket.as_raw_fd(), what, &mut request) } < 0 {
         return Err(io::Error::last_os_error());
     }
+    Ok(request)
+}
+
+fn read_mtu(name: &CString) -> io::Result<libc::c_int> {
     // SAFETY: SIOCGIFMTU filled the MTU.
-    Ok(unsafe { request.ifr_ifru.ifru_mtu })
+    Ok(unsafe { read_ifreq(name, libc::SIOCGIFMTU)?.ifr_ifru.ifru_mtu })
+}
+
+/// The device's IPv4 address and netmask, or `None` when it has no IPv4 address or they cannot be read.
+fn read_network(name: &CString) -> Option<(Ipv4Addr, Ipv4Addr)> {
+    let ipv4 = |what| {
+        // SAFETY: SIOCGIFADDR and SIOCGIFNETMASK fill an AF_INET sockaddr, whose address is bytes 2 to 5 of its data.
+        let data = unsafe { read_ifreq(name, what).ok()?.ifr_ifru.ifru_addr.sa_data };
+        Some(Ipv4Addr::new(data[2] as u8, data[3] as u8, data[4] as u8, data[5] as u8))
+    };
+    Some((ipv4(libc::SIOCGIFADDR)?, ipv4(libc::SIOCGIFNETMASK)?))
 }
 
 /// The walk through a network's host addresses that gives each tunnel its address.

@@ -162,6 +162,15 @@ else
 	set --
 	echo "webvpnd runs as root of the namespace: this system gives the namespace no other user"
 fi
+# A relay given another network than the device's, or the same one with another prefix length, does not start.
+for pool in 198.18.0.8/29 198.18.0.0/28; do
+	timeout 5 env -i WEBVPN_ADDRESS=127.0.0.1 WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=$pool "$@" "$work/run/webvpnd" \
+		>"$work/refused" 2>&1 || true
+	grep -q "does not hold the relay's network" "$work/refused" || { cat "$work/refused" >&2; exit 1; }
+	! grep -q "198\.18" "$work/refused" || { echo "the refusal names an address" >&2; exit 1; }
+done
+echo "ok: a relay given another pool than the device's does not start"
+
 # The test's one session holds all five tunnel addresses at once.
 env -i RUST_LOG=error WEBVPN_ADDRESS=127.0.0.1 WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=198.18.0.0/29 \
 	WEBVPN_IP_PORTS=30000-30031 WEBVPN_OWN_ADDRESSES=11.0.0.1 WEBVPN_ALLOW_PRIVATE_TARGETS=true \
