@@ -41,9 +41,12 @@ export const stackTcpSocket = (engine: Engine, id: number, local: Address, remot
     kick()
   }
 
-  // a connection that ended both ways and was read to its end is let go of even when nobody closes it
+  // a connection that ended both ways and was read to its end is let go of even when nobody closes it. The reset or
+  // timeout that ended it is kept first for the writes, since a reader that had finished never reads it.
   const settle = () => {
-    if (readDone && !engine.ended() && calls.tcp_state(id) === TcpState.CLOSED) release()
+    if (!readDone || engine.ended() || calls.tcp_state(id) !== TcpState.CLOSED) return
+    failed ??= failure(calls.tcp_error(id))
+    release()
   }
 
   const unwatch = engine.watch(id, () => {
