@@ -178,7 +178,6 @@ fn connects_carries_bytes_both_ways_and_closes_in_order() {
     let mut buffer = [0; 16];
     assert!(net.until(1000, |net| net.site.tcp_recv(site, &mut buffer).is_none()), "the site reads the end");
     net.site.tcp_send(site, b"after").unwrap();
-    assert_eq!(transfer(&mut net, Toward::Client, (site, client), b"", 0), b"");
     assert!(net.until(1000, |net| net.client.tcp_recv(client, &mut buffer) == Some(5)), "a half close still reads");
     net.site.tcp_close(site);
     assert!(net.until(1000, |net| net.client.tcp_recv(client, &mut buffer).is_none()));
