@@ -243,7 +243,7 @@ describe('TCP over a tunnel', () => {
     expect(await write).toMatchObject({ code: ErrorCode.CONNECTION_RESET })
   })
 
-  it('a peer silent through keep-alive\'s probes errors the reader and the next write with TIMED_OUT', async () => {
+  it('a peer silent through keep-alive errors the reader and a write with CONNECTION_RESET, as a session', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
     try {
       const { client, site, pipe } = await internet()
@@ -253,15 +253,15 @@ describe('TCP over a tunnel', () => {
       const read = outcome(socket.readable.getReader().read())
       // the idle second, then 9 probes 75 seconds apart
       await vi.advanceTimersByTimeAsync(1000 + 9 * 75_000)
-      expect(await read).toMatchObject({ code: ErrorCode.TIMED_OUT })
+      expect(await read).toMatchObject({ code: ErrorCode.CONNECTION_RESET })
       const writer = socket.writable.getWriter()
-      expect(await outcome(writer.write(bytes('late')))).toMatchObject({ code: ErrorCode.TIMED_OUT })
+      expect(await outcome(writer.write(bytes('late')))).toMatchObject({ code: ErrorCode.CONNECTION_RESET })
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it('a peer silent through keep-alive\'s probes fails a write with TIMED_OUT, the reader cancelled', async () => {
+  it('a peer silent through keep-alive fails a write with CONNECTION_RESET, the reader cancelled', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
     try {
       const { client, site, pipe } = await internet()
@@ -271,7 +271,7 @@ describe('TCP over a tunnel', () => {
       await socket.setOption({ type: 'keepAlive', enabled: true, initialDelaySeconds: 1 })
       await vi.advanceTimersByTimeAsync(1000 + 9 * 75_000)
       const writer = socket.writable.getWriter()
-      expect(await outcome(writer.write(bytes('late')))).toMatchObject({ code: ErrorCode.TIMED_OUT })
+      expect(await outcome(writer.write(bytes('late')))).toMatchObject({ code: ErrorCode.CONNECTION_RESET })
     } finally {
       vi.useRealTimers()
     }

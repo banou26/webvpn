@@ -13,10 +13,6 @@ export type Buffers = { receive: number, send: number }
 
 const closed = () => stackError(ErrorCode.UNKNOWN_SOCKET)
 
-// the two ways the stack ends an open connection on its own: the peer's reset, and a peer that stopped answering
-const failure = (code: number) =>
-  code === ErrorCode.CONNECTION_RESET || code === ErrorCode.TIMED_OUT ? stackError(code) : undefined
-
 /**
  * The `TcpSocket` of a connection the stack holds as `id`. Its streams are paced by the stack's buffers: `readable`
  * takes bytes only as it is read, so a slow reader closes the window the peer sees, and a write waits for room in the
@@ -28,7 +24,7 @@ export const stackTcpSocket = (engine: Engine, id: number, local: Address, remot
   let stopped = false
   let released = false
   let readDone = false
-  let failed: WebVpnError | undefined
+  let reset: WebVpnError | undefined
   let ending: Promise<void> | undefined
   let controller!: ReadableStreamDefaultController<Uint8Array>
 
@@ -41,11 +37,11 @@ export const stackTcpSocket = (engine: Engine, id: number, local: Address, remot
     kick()
   }
 
-  // a connection that ended both ways and was read to its end is let go of even when nobody closes it. The reset or
-  // timeout that ended it is kept first for the writes, since a reader that had finished never reads it.
+  // a connection that ended both ways and was read to its end is let go of even when nobody closes it. The reset that
+  // ended it is kept first for the writes, since a reader that had finished never reads it.
   const settle = () => {
     if (!readDone || engine.ended() || calls.tcp_state(id) !== TcpState.CLOSED) return
-    failed ??= failure(calls.tcp_error(id))
+    if (calls.tcp_error(id) === ErrorCode.CONNECTION_RESET) reset ??= stackError(ErrorCode.CONNECTION_RESET)
     release()
   }
 
@@ -78,8 +74,8 @@ export const stackTcpSocket = (engine: Engine, id: number, local: Address, remot
         }
         if (length < 0) {
           // kept for the writes, since a connection that ended is let go of
-          failed = failure(calls.tcp_error(id))
-          return finish(failed)
+          if (calls.tcp_error(id) === ErrorCode.CONNECTION_RESET) reset = stackError(ErrorCode.CONNECTION_RESET)
+          return finish(reset)
         }
         await next()
       }
@@ -102,11 +98,11 @@ export const stackTcpSocket = (engine: Engine, id: number, local: Address, remot
         const error = engine.ended()
         if (error) throw error
         if (stopped) throw closed()
-        if (failed) throw failed
+        if (reset) throw reset
         const length = Math.min(chunk.byteLength - at, CHUNK_BYTES)
         engine.buffer().set(chunk.subarray(at, at + length))
         const taken = calls.tcp_send(id, length)
-        if (taken < 0) throw failure(-taken) ?? closed()
+        if (taken < 0) throw -taken === ErrorCode.CONNECTION_RESET ? stackError(-taken) : closed()
         at += taken
         kick()
         if (!taken) await next()

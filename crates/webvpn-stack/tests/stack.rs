@@ -526,7 +526,7 @@ fn what_a_silent_peer_never_acknowledges_times_out_after_15_minutes() {
             net.client.tcp_send(client, b"lost").unwrap();
         }
         assert_eq!(alone_until_closed(&mut net, client), 900_000, "half close {half_close}");
-        assert_eq!(net.client.tcp_error(client), Some(ErrorCode::TIMED_OUT), "half close {half_close}");
+        assert_eq!(net.client.tcp_error(client), Some(ErrorCode::CONNECTION_RESET), "half close {half_close}");
     }
 }
 
@@ -537,7 +537,7 @@ fn keep_alive_ends_a_connection_whose_peer_went_silent_as_linux_does() {
     net.client.tcp_set_keep_alive(client, Some(30)).unwrap();
     // 30 seconds idle, then 9 probes 75 seconds apart
     assert_eq!(alone_until_closed(&mut net, client), 705_000);
-    assert_eq!(net.client.tcp_error(client), Some(ErrorCode::TIMED_OUT));
+    assert_eq!(net.client.tcp_error(client), Some(ErrorCode::CONNECTION_RESET));
 }
 
 #[test]

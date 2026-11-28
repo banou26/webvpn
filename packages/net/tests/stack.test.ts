@@ -1,6 +1,6 @@
 import type { Server, Socket } from 'node:net'
 
-import { describe, expect, it } from 'vite-plus/test'
+import { describe, expect, it, vi } from 'vite-plus/test'
 
 import { at, CLIENT_PUBLIC, dnsAnswer, FIRST_PORT, internet, SITE } from '../../client/tests/stack/internet'
 import { createNet } from '../src'
@@ -47,6 +47,30 @@ describe('net on a stack over a tunnel', () => {
     const socket = createNet(client).connect(81, SITE)
     const error = await once<Error>(socket, 'error')
     expect(error).toMatchObject({ code: 'ECONNREFUSED', syscall: 'connect', address: SITE, port: 81 })
+  })
+
+  it('a peer silent through keep-alive destroys the socket with Node\'s ECONNRESET', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    try {
+      const { client, site, pipe } = await internet()
+      await echo(site, 7)
+      const socket = createNet(client).connect(7, SITE)
+      await once(socket, 'connect')
+      const error = once<Error>(socket, 'error')
+      socket.setKeepAlive(true, 1000)
+      await vi.advanceTimersByTimeAsync(50)
+      pipe.drop = () => true
+      // the idle second, then 9 probes 75 seconds apart
+      await vi.advanceTimersByTimeAsync(1000 + 9 * 75_000 + 1000)
+      expect(await error).toMatchObject({
+        message: 'read ECONNRESET',
+        errno: -104,
+        code: 'ECONNRESET',
+        syscall: 'read',
+      })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('connects to a name the stack looks up through the tunnel', async () => {

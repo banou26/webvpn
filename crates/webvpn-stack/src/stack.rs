@@ -467,8 +467,8 @@ impl Stack {
     /// Why the connection failed or ended abnormally: `CONNECTION_REFUSED` for a reset or an ICMP port unreachable
     /// in answer to the opening packet, `TIMED_OUT` for a connect that got no answer in time, `HOST_UNREACHABLE` or
     /// `NETWORK_UNREACHABLE` for an ICMP error about the opening packet, `CONNECTION_RESET` for a later reset.
-    /// `TIMED_OUT` also ends a connection whose peer stayed silent while bytes or the end waited 15 minutes for its
-    /// acknowledgement, or for the time `tcp_set_keep_alive` gives it.
+    /// `CONNECTION_RESET` also ends a connection whose peer stayed silent while bytes or the end waited 15 minutes for
+    /// its acknowledgement, or for the time `tcp_set_keep_alive` gives it, as a session reports it.
     pub fn tcp_error(&self, id: u32) -> Option<ErrorCode> {
         self.tcp(id)?.error
     }
@@ -521,9 +521,9 @@ impl Stack {
     }
 
     /// Turns keep-alive on, for a connection idle `seconds` (0 for the usual two hours), or off with `None`. A peer
-    /// silent that long and then for 9 probes 75 seconds apart is given up on with `TIMED_OUT`, as Linux behind the
-    /// relay gives up. smoltcp probes at one pace, so the probes go out every 75 seconds the connection is idle, or
-    /// every `seconds` when that is shorter.
+    /// silent that long and then for 9 probes 75 seconds apart is given up on with `CONNECTION_RESET`, as Linux behind
+    /// the relay gives up and a session reports it. smoltcp probes at one pace, so the probes go out every 75 seconds
+    /// the connection is idle, or every `seconds` when that is shorter.
     pub fn tcp_set_keep_alive(&mut self, id: u32, seconds: Option<u32>) -> Result<()> {
         let idle = seconds.map(|seconds| match seconds {
             0 => Duration::from_secs(KEEP_ALIVE_DEFAULT_SECONDS),
@@ -802,7 +802,7 @@ impl Stack {
                     }
                     match tcp.patience(socket) {
                         Some(patience) if now >= *tcp.silent_since.get_or_insert(now) + patience => {
-                            tcp.error = Some(ErrorCode::TIMED_OUT);
+                            tcp.error = Some(ErrorCode::CONNECTION_RESET);
                             socket.abort();
                         }
                         Some(_) => {}
