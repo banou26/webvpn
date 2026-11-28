@@ -182,9 +182,12 @@ export const readAll = async (readable: ReadableStream<Uint8Array>) => {
   return all
 }
 
-/** A whole DNS answer to `query` with the A records of `ips`, or no records and the truncated bit. */
+/** A whole DNS answer to `query` with an A or AAAA record for each of `ips`, or no records and the truncated bit. */
 export const dnsAnswer = (query: Uint8Array, ips: string[], truncated = false) => {
-  const records = truncated ? [] : ips.map((text) => [0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, ...parseIp(text)!])
+  const records = truncated ? [] : ips.map((text) => {
+    const ip = parseIp(text)!
+    return [0xc0, 12, 0, ip.byteLength === 4 ? 1 : 28, 0, 1, 0, 0, 0, 60, 0, ip.byteLength, ...ip]
+  })
   const answer = new Uint8Array(query.byteLength + records.flat().length)
   answer.set(query)
   answer.set(records.flat(), query.byteLength)

@@ -96,6 +96,37 @@ describe('TCP over a tunnel', () => {
     expect(count()).toBe(1)
   })
 
+  it('connects to a name by its first AAAA record on a tunnel without IPv4', async () => {
+    const SITE_V6 = '2001:db8::1'
+    const client = fakeTunnel({ id: 1, ipv6: 'fd00::2', mtu: 1500, firstPort: FIRST_PORT, ports: 0 }, (packet) => {
+      site.deliver(packet)
+      return true
+    })
+    const site = fakeTunnel(
+      { id: 2, ipv6: SITE_V6, publicIpv6: SITE_V6, mtu: 1500, firstPort: 1, ports: 49151 },
+      (packet) => {
+        client.deliver(packet)
+        return true
+      },
+    )
+    const [clientStack, siteStack] = await Promise.all([
+      openStack(client.tunnel, { resolver: at(SITE_V6, 53) }),
+      openStack(site.tunnel),
+    ])
+    const types: number[] = []
+    // the question's type is the u16 before its class, at the end of the query
+    await resolver(siteStack, (query) => {
+      const type = new DataView(query.buffer, query.byteOffset).getUint16(query.byteLength - 4)
+      types.push(type)
+      return dnsAnswer(query, [type === 28 ? SITE_V6 : SITE])
+    })
+    const listener = await siteStack.tcpListen(at('::', 443))
+    const socket = await clientStack.tcpConnect({ name: 'example.test', port: 443 })
+    expect(named(socket.remote)).toBe(`${SITE_V6}:443`)
+    expect(named((await accept(listener)).remote)).toBe(`fd00::2:${socket.local.port}`)
+    expect(types).toEqual([28])
+  })
+
   it('rejects a name with no A record with NAME_NOT_FOUND', async () => {
     const { client, site } = await internet()
     await resolver(site, (query) => dnsAnswer(query, []))

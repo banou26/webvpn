@@ -48,9 +48,10 @@ export type StackOptions = {
  * port must be one of them, or it rejects with `ADDRESS_NOT_AVAILABLE`), rejects with `UNSUPPORTED` on a tunnel with
  * none, and names the relay's public address, which a peer dials. `udpBind` on port 0 takes a free public port while
  * the tunnel has one, and a private port otherwise, which only answers reach; its local address says which. A name
- * is looked up by the resolver in `StackOptions`, through the tunnel. Each socket's buffers are fixed when it is made,
- * and the options that cannot change them (`sendBufferSize`, `recvBufferSize`, broadcast and multicast) reject with
- * `UNSUPPORTED`. A UDP datagram must fit the tunnel's MTU, since the stack does not fragment.
+ * is looked up by the resolver in `StackOptions`, through the tunnel, and a connect by name takes its first A record,
+ * or its first AAAA record on a tunnel without IPv4. Each socket's buffers are fixed when it is made, and the options
+ * that cannot change them (`sendBufferSize`, `recvBufferSize`, broadcast and multicast) reject with `UNSUPPORTED`. A
+ * UDP datagram must fit the tunnel's MTU, since the stack does not fragment.
  *
  * The stack owns the tunnel: it reads every packet from `tunnel.readable` and sends with `tunnel.send`, whose dropped
  * packets its TCP treats as loss on the path. When the tunnel ends, whoever ended it, every socket ends as a
@@ -102,7 +103,9 @@ export const openStack = async (tunnel: IpTunnel, options: StackOptions = {}): P
     close: () => tunnel.close(),
     tcpConnect: async (target) => {
       if (!('name' in target)) return stackConnect(engine, target, tcp)
-      const ip = dnsAddresses(await lookup(dnsQuery(target.name, 'A'))).find((address) => address.byteLength === 4)
+      const v4 = Boolean(tunnel.ipv4)
+      const answer = await lookup(dnsQuery(target.name, v4 ? 'A' : 'AAAA'))
+      const ip = dnsAddresses(answer).find((address) => address.byteLength === (v4 ? 4 : 16))
       if (!ip) throw stackError(ErrorCode.NAME_NOT_FOUND, 'the name has no address')
       return stackConnect(engine, { ip, port: target.port }, tcp)
     },
