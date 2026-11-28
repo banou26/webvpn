@@ -128,8 +128,8 @@ impl FromStr for Ipv4Pool {
 /// A packet the device holds for an address goes to the tunnel given it, and is dropped when that tunnel's channel is
 /// full or no tunnel holds the address. A packet a tunnel sends is written to the device without waiting, and dropped
 /// when the device takes none now. The device is read on a thread of its own, which ends within a second of the
-/// forwarder being dropped, or once the device fails, which ends every tunnel. Nothing it logs or returns names an
-/// address or holds a packet.
+/// forwarder being dropped, or once the device fails, which is logged and ends every tunnel: new ones are refused from
+/// then on. Nothing it logs or returns names an address or holds a packet.
 ///
 /// Linux only, with the `tun` feature.
 pub struct TunForwarder {
@@ -261,6 +261,10 @@ fn read(shared: Weak<Shared>) {
             continue;
         }
         if poll.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            tracing::error!(
+                "the TUN device failed, removed while the relay ran for example: IP tunnels are refused until the \
+                 relay restarts"
+            );
             let mut tunnels = shared.tunnels.lock().unwrap();
             tunnels.failed = true;
             tunnels.ends.clear();

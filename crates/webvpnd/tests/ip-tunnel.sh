@@ -10,9 +10,10 @@
 #
 #   sh crates/webvpnd/tests/ip-tunnel.sh
 #
-# When a check fails, the script prints the relay's counters, the connections the kernel tracks (with conntrack, when
-# it is installed), the rules with their counters, the neighbours and the peer's sockets. With WEBVPN_TEST_CAPTURE set
-# to a directory, it also captures, with tcpdump, every interface the tunnels' packets cross, into one file each there:
+# When a check fails, the script prints the relay's log and counters, the connections the kernel tracks (with
+# conntrack, when it is installed), the rules with their counters, the neighbours and the peer's sockets. With
+# WEBVPN_TEST_CAPTURE set to a directory, it also captures, with tcpdump, every interface the tunnels' packets cross,
+# into one file each there:
 #
 #   WEBVPN_TEST_CAPTURE=target/ip-tunnel-capture sh crates/webvpnd/tests/ip-tunnel.sh
 
@@ -49,9 +50,11 @@ fi
 peer=
 relay=
 captures=
-# What the host held when a check failed: the relay's counters, the connections the kernel tracks, the rules with
-# their counters, the neighbours and the peer's sockets.
+# What the host held when a check failed: the relay's log and counters, the connections the kernel tracks, the rules
+# with their counters, the neighbours and the peer's sockets.
 evidence() {
+	echo "--- the relay's log"
+	cat "$work/relay.log" 2>/dev/null || true
 	echo "--- the relay's counters"
 	# the sleep keeps the request's side open: the relay drops a connection whose client closed its half
 	{ printf 'GET /metrics HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n' && sleep 1; } |
@@ -174,7 +177,7 @@ echo "ok: a relay given another pool than the device's does not start"
 # The test's one session holds all five tunnel addresses at once.
 env -i RUST_LOG=error WEBVPN_ADDRESS=127.0.0.1 WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=198.18.0.0/29 \
 	WEBVPN_IP_PORTS=30000-30031 WEBVPN_OWN_ADDRESSES=11.0.0.1 WEBVPN_ALLOW_PRIVATE_TARGETS=true \
-	WEBVPN_MAX_TUNNELS_PER_SESSION=5 "$@" "$work/run/webvpnd" &
+	WEBVPN_MAX_TUNNELS_PER_SESSION=5 "$@" "$work/run/webvpnd" >"$work/relay.log" 2>&1 &
 relay=$!
 
 tries=0
@@ -187,3 +190,14 @@ done
 
 WEBVPN_TEST_PEER_NETNS=/proc/$peer/ns/net WEBVPN_TEST_SINK=$work/sink "$WEBVPN_TEST_BINARY" --ignored --nocapture \
 	--test-threads=1 2>&1
+
+# The device removed while the relay runs: the relay says so, since it refuses tunnels from then on, and serves on.
+sh "$setup" down
+tries=0
+until grep -q "the TUN device failed" "$work/relay.log"; do
+	tries=$((tries + 1))
+	[ "$tries" -lt 30 ] || { echo "the relay did not log the device's loss" >&2; exit 1; }
+	sleep 0.1
+done
+kill -0 "$relay" 2>/dev/null || { echo "webvpnd stopped with its device" >&2; exit 1; }
+echo "ok: a device removed while the relay runs is logged"
