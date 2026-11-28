@@ -166,7 +166,7 @@ On another system than Linux, any of these stops the program at start, with a me
 WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=198.18.0.0/16 WEBVPN_IP_USER=webvpnd sh ip-tunnel-setup.sh up
 ```
 
-It takes `WEBVPN_IP_DEVICE` (`webvpn0` by default), `WEBVPN_IP_POOL`, `WEBVPN_IP_PORTS` and `WEBVPN_IP_PORTS_PER_TUNNEL` as the relay does, `WEBVPN_IP_USER`, the user the relay runs as, which is required (a device with no owner is open to every local user), `WEBVPN_IP_MTU` (`1500` by default), and `WEBVPN_IP_FLOWS_PER_ADDRESS`, the connections the kernel tracks for one tunnel address (`4096` by default, a little above the 3584 flows the relay keeps for a tunnel, so that the relay's own bound acts first). `up` prints nothing unless something fails, and running it again changes nothing. It:
+It takes `WEBVPN_IP_DEVICE` (`webvpn0` by default), `WEBVPN_IP_POOL`, `WEBVPN_IP_PORTS` and `WEBVPN_IP_PORTS_PER_TUNNEL` as the relay does, `WEBVPN_IP_USER`, the user the relay runs as, which is required (a device with no owner is open to every local user), `WEBVPN_IP_MTU` (`1500` by default), and `WEBVPN_IP_FLOWS_PER_ADDRESS`, the connections the kernel tracks that one tunnel address opens, and apart from those, to its public ports (`4096` by default, a little above the 3584 flows the relay keeps for a tunnel, so that the relay's own bound acts first). `up` prints nothing unless something fails, and running it again changes nothing. It:
 
 1. makes the device for its user, gives it the network's first host address, sets its MTU and brings it up;
 2. turns IPv4 forwarding on, when it is off;
@@ -174,10 +174,10 @@ It takes `WEBVPN_IP_DEVICE` (`webvpn0` by default), `WEBVPN_IP_POOL`, `WEBVPN_IP
    - packets from the device to the device dropped, so that no tunnel reaches another;
    - IPv6 packets from the device dropped, until tunnels have IPv6 addresses;
    - packets from the device to private, loopback, link-local, shared, multicast and reserved addresses dropped, the same list as the relay's own rule, as a second layer under it;
-   - a ceiling on the connections the kernel tracks for one tunnel address, `WEBVPN_IP_FLOWS_PER_ADDRESS`, past which a new one is dropped;
+   - a ceiling on the connections the kernel tracks that one tunnel address opens, `WEBVPN_IP_FLOWS_PER_ADDRESS`, past which a new one is dropped;
    - packets from the device that connection tracking calls invalid dropped, such as a TCP segment outside its connection's window: no address translation applies to them, and they would leave with the network's own address as their source;
    - every other packet from the device accepted;
-   - packets toward the device accepted only when they belong to, or relate to, a connection that began from the device, or with `WEBVPN_IP_PORTS`, a new connection to a public port that the rule below sent there, which counts toward `WEBVPN_IP_FLOWS_PER_ADDRESS` as the tunnel's own connections do; every other packet toward the device dropped;
+   - packets toward the device accepted only when they belong to, or relate to, a connection that began from the device, or with `WEBVPN_IP_PORTS`, a new connection to a public port that the rule below sent there, which counts toward a ceiling of `WEBVPN_IP_FLOWS_PER_ADDRESS` for each tunnel address apart from the tunnel's own connections, so that what others send to its ports does not stop them; every other packet toward the device dropped;
    - with `WEBVPN_IP_PORTS`, a TCP or UDP packet that does not come from the device, to one of the host's own addresses on a public port, sent to the tunnel address that holds the port, on the same port;
    - nothing from the device accepted for the host itself;
    - the network's addresses translated to the host's where packets leave by any other interface.
