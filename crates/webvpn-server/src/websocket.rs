@@ -95,6 +95,9 @@ pub async fn serve<P: Policy>(relay: Relay<P>, listener: TcpListener, options: O
         if relay.stopping() {
             return;
         }
+        // A mux frame is written whole and sent at once. Held back until the client acknowledges the frame before it,
+        // a small one costs its request another round trip.
+        let _ = tcp.set_nodelay(true);
         // Turned away before a task or a buffer is spent on it; the client's retry recovers.
         let Some(setup) = relay.pending() else {
             continue;
