@@ -30,7 +30,7 @@ export const dnsQuery = (name: string, type: keyof typeof TYPES = 'A'): Uint8Arr
 }
 
 // a name is walked by its length bytes and never read, and a pointer always ends one
-const pastName = (message: Uint8Array, at: number) => {
+export const pastName = (message: Uint8Array, at: number) => {
   while (at < message.byteLength) {
     const length = message[at]!
     if (length === 0) return at + 1

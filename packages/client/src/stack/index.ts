@@ -95,7 +95,7 @@ export const openStack = async (tunnel: IpTunnel, options: StackOptions = {}): P
     return parseIp((isPublic(port) && (opens[0] ?? opens[1])) || owns[0] || owns[1]!)!
   }
 
-  const lookup = (query: Uint8Array) => stackLookup(engine, resolver, query, lookupTimeoutMs, udp)
+  const lookup = (query: Uint8Array) => stackLookup(engine, resolver, query, lookupTimeoutMs, udp, isPublic)
 
   return {
     closed: tunnel.closed,

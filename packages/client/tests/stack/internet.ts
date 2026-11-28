@@ -84,6 +84,22 @@ export const unreachable = (packet: Uint8Array, code: number) => {
   return out
 }
 
+/** An IPv4 UDP packet from `from` to `to` that carries `data`, with no UDP checksum, which IPv4 allows. */
+export const udpPacket = (from: Address, to: Address, data: Uint8Array) => {
+  const out = new Uint8Array(28 + data.byteLength)
+  const view = new DataView(out.buffer)
+  out.set([0x45, 0, 0, 0, 0, 0, 0, 0, 64, 17])
+  view.setUint16(2, out.byteLength)
+  out.set(from.ip, 12)
+  out.set(to.ip, 16)
+  view.setUint16(10, checksum(out.subarray(0, 20)))
+  view.setUint16(20, from.port)
+  view.setUint16(22, to.port)
+  view.setUint16(24, 8 + data.byteLength)
+  out.set(data, 28)
+  return out
+}
+
 export type Toward = 'site' | 'client'
 
 /** How the pipe between the two tunnels behaves, which a test may change at any time. */

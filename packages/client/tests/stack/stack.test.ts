@@ -6,7 +6,19 @@ import { describe, expect, it } from 'vite-plus/test'
 import { formatIp } from '../../src/address'
 import { dnsAddresses, dnsQuery } from '../../src/dns'
 import { ErrorCode } from '../../src/protocol'
-import { at, CLIENT, CLIENT_PUBLIC, dnsAnswer, FIRST_PORT, internet, pattern, readAll, SITE, unreachable } from './internet'
+import {
+  at,
+  CLIENT,
+  CLIENT_PUBLIC,
+  dnsAnswer,
+  FIRST_PORT,
+  internet,
+  pattern,
+  readAll,
+  SITE,
+  udpPacket,
+  unreachable,
+} from './internet'
 
 const ANY = at('0.0.0.0', 0)
 const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes)
@@ -374,6 +386,48 @@ describe('names over a tunnel', () => {
       await writer.write(framed.subarray(5))
     })()
     expect(dnsAddresses(await client.lookup(QUERY)).map(formatIp)).toEqual([SITE, '192.0.2.2'])
+  })
+
+  it('drops an answer that does not match the query, and asks from a random private port and id', async () => {
+    const ELSEWHERE = '198.51.100.66'
+    // the public ports reach halfway into the private ones, so a port taken at random is often a public one
+    const ports = 49152 + 8192 - FIRST_PORT
+    const { client, site, pipe, clientTunnel } = await internet({ client: { lookupTimeoutMs: 1000 }, ports })
+    // the real resolver gives the name back in another case, which still answers the query
+    await resolver(site, (query) => {
+      const answer = dnsAnswer(query, [SITE])
+      answer.set(bytes('EXAMPLE'), 13)
+      return answer
+    })
+    const sent: { port: number, id: number }[] = []
+    pipe.drop = (toward, packet) => {
+      const view = new DataView(packet.buffer, packet.byteOffset)
+      if (toward !== 'site' || packet[9] !== 17 || view.getUint16(22) !== 53) return false
+      const [port, query] = [view.getUint16(20), packet.slice(28)]
+      sent.push({ port, id: view.getUint16(28) })
+      // answers from the resolver's address that come first: with id 0, without the answer bit, and to another name
+      // of the same length
+      const zero = dnsAnswer(query, [ELSEWHERE])
+      zero.set([0, 0])
+      const unanswered = dnsAnswer(query, [ELSEWHERE])
+      unanswered[2] = 0x01
+      const other = dnsAnswer(dnsQuery('another.test'), [ELSEWHERE])
+      other.set(query.subarray(0, 2))
+      queueMicrotask(() => {
+        for (const data of [zero, unanswered, other]) {
+          clientTunnel.deliver(udpPacket(at(SITE, 53), at(CLIENT, port), data))
+        }
+      })
+      return false
+    }
+    for (let count = 0; count < 8; count++) {
+      const answer = await client.lookup(QUERY)
+      expect(dnsAddresses(answer).map(formatIp)).toEqual([SITE])
+      expect([...answer.subarray(0, 2)]).toEqual([0, 0])
+    }
+    expect(sent.some(({ id }) => id !== 0)).toBe(true)
+    expect(sent.slice(1).some(({ port }, index) => port !== sent[index]!.port + 1)).toBe(true)
+    for (const { port } of sent) expect(port).toBeGreaterThanOrEqual(FIRST_PORT + ports)
   })
 
   it('gives up with LOOKUP_FAILED at its limit when the resolver never answers', async () => {
