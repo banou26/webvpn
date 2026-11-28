@@ -354,6 +354,27 @@ fn a_released_connection_still_sends_what_it_held_and_ends() {
 }
 
 #[test]
+fn a_released_id_never_names_another_socket() {
+    let mut net = Net::new();
+    let (old, site) = net.connect(80);
+    net.site.tcp_close(site);
+    let mut chunk = [0; 64];
+    assert!(net.until(1000, |net| net.client.tcp_recv(old, &mut chunk).is_none()));
+    net.client.tcp_close(old);
+    assert!(net.until(1000, |net| net.client.tcp_state(old) == Some(State::Closed)));
+    net.client.release(old);
+    net.tick();
+    let new = net.client.tcp_connect(SocketAddr::new(SITE.into(), 80), BUFFERS).unwrap();
+    assert!(net.established(new));
+    assert_ne!(new, old, "a new connection takes a new id");
+    net.client.tcp_close(old);
+    net.client.tcp_abort(old);
+    assert_eq!(net.client.tcp_set_ttl(old, 7), Err(ErrorCode::UNKNOWN_SOCKET));
+    assert_eq!(net.client.tcp_send(old, b"stale"), Err(ErrorCode::UNKNOWN_SOCKET));
+    assert_eq!(net.client.tcp_state(new), Some(State::Established), "the stale calls left the new connection alone");
+}
+
+#[test]
 fn udp_carries_datagrams_both_ways_from_private_and_public_ports() {
     let mut net = Net::new();
     let site = net.site.udp_bind(53, BUFFERS).unwrap();

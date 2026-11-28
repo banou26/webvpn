@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::ops::RangeInclusive;
 
@@ -156,7 +156,9 @@ pub struct Stack {
     link: Link,
     interface: Interface,
     sockets: SocketSet<'static>,
-    entries: Vec<Option<Entry>>,
+    /// By id. Ids rise and are not given again, so a stale one names nothing.
+    entries: BTreeMap<u32, Entry>,
+    last_id: u32,
     events: VecDeque<u32>,
     now: Instant,
     next_port: u32,
@@ -318,7 +320,8 @@ impl Stack {
             link,
             interface,
             sockets: SocketSet::new(Vec::new()),
-            entries: Vec::new(),
+            entries: BTreeMap::new(),
+            last_id: 0,
             events: VecDeque::new(),
             now,
             next_port,
@@ -391,7 +394,7 @@ impl Stack {
         if port == 0 {
             return Err(ErrorCode::ADDRESS_NOT_AVAILABLE);
         }
-        if self.entries.iter().flatten().any(|entry| matches!(&entry.kind, Kind::Listener(l) if l.port == port)) {
+        if self.entries.values().any(|entry| matches!(&entry.kind, Kind::Listener(l) if l.port == port)) {
             return Err(ErrorCode::ADDRESS_IN_USE);
         }
         let mut listener = Listener { port, backlog: backlog.max(1), buffers, waiting: Vec::new(), accepted: VecDeque::new() };
@@ -544,18 +547,17 @@ impl Stack {
         Ok(())
     }
 
-    /// Lets go of a socket or a listener, whose id is no longer used. A UDP socket and a listener's waiting sockets
-    /// close at once, and the connections it accepted that nobody took are reset. A TCP connection is left to end as
-    /// `tcp_close` or `tcp_abort` ended it, the peer's bytes dropped meanwhile, and is reset if it has not ended a
-    /// minute later.
+    /// Lets go of a socket or a listener, whose id never names a socket again. A UDP socket and a listener's waiting
+    /// sockets close at once, and the connections it accepted that nobody took are reset. A TCP connection is left to
+    /// end as `tcp_close` or `tcp_abort` ended it, the peer's bytes dropped meanwhile, and is reset if it has not
+    /// ended a minute later.
     pub fn release(&mut self, id: u32) {
         let now = self.now;
-        let Some(entry) = id.checked_sub(1).and_then(|index| self.entries.get_mut(index as usize)) else { return };
-        let Some(Entry { kind, seen }) = entry.take() else { return };
+        let Some(Entry { kind, seen }) = self.entries.remove(&id) else { return };
         match kind {
             Kind::Tcp(mut tcp) => {
                 tcp.released_at.get_or_insert(now);
-                *entry = Some(Entry { kind: Kind::Tcp(tcp), seen });
+                self.entries.insert(id, Entry { kind: Kind::Tcp(tcp), seen });
             }
             Kind::Listener(listener) => {
                 for handle in listener.waiting {
@@ -587,19 +589,17 @@ impl Stack {
         self.insert(Kind::Tcp(tcp));
     }
 
+    // ids run from 1, as 0 is none, to i32::MAX, as the page reads a negative one as an error; past it they start
+    // again at 1, skipping what is still held
     fn insert(&mut self, kind: Kind) -> u32 {
-        let entry = Some(Entry { kind, seen: UNSEEN });
-        let index = match self.entries.iter().position(Option::is_none) {
-            Some(index) => {
-                self.entries[index] = entry;
-                index
+        loop {
+            self.last_id = self.last_id % i32::MAX as u32 + 1;
+            if !self.entries.contains_key(&self.last_id) {
+                break;
             }
-            None => {
-                self.entries.push(entry);
-                self.entries.len() - 1
-            }
-        };
-        index as u32 + 1
+        }
+        self.entries.insert(self.last_id, Entry { kind, seen: UNSEEN });
+        self.last_id
     }
 
     // a socket the page took from may look as it did at the last poll once more arrives, so the next poll tells it
@@ -610,11 +610,11 @@ impl Stack {
     }
 
     fn entry(&self, id: u32) -> Option<&Entry> {
-        self.entries.get(id.checked_sub(1)? as usize)?.as_ref()
+        self.entries.get(&id)
     }
 
     fn entry_mut(&mut self, id: u32) -> Option<&mut Entry> {
-        self.entries.get_mut(id.checked_sub(1)? as usize)?.as_mut()
+        self.entries.get_mut(&id)
     }
 
     fn tcp(&self, id: u32) -> Option<&Tcp> {
@@ -637,7 +637,7 @@ impl Stack {
     }
 
     fn in_use(&self, protocol: Protocol, port: u16) -> bool {
-        self.entries.iter().flatten().any(|entry| match (&entry.kind, protocol) {
+        self.entries.values().any(|entry| match (&entry.kind, protocol) {
             (Kind::Tcp(tcp), Protocol::Tcp) => {
                 let socket = self.sockets.get::<tcp::Socket>(tcp.handle);
                 socket.local_endpoint().is_some_and(|local| local.port == port)
@@ -664,18 +664,19 @@ impl Stack {
         None
     }
 
-    fn find_tcp(&self, local: SocketAddr, remote: SocketAddr) -> Option<usize> {
-        self.entries.iter().position(|entry| match entry.as_ref().map(|entry| &entry.kind) {
-            Some(Kind::Tcp(tcp)) => {
+    fn find_tcp(&self, local: SocketAddr, remote: SocketAddr) -> Option<u32> {
+        let (&id, _) = self.entries.iter().find(|(_, entry)| match &entry.kind {
+            Kind::Tcp(tcp) => {
                 let socket = self.sockets.get::<tcp::Socket>(tcp.handle);
                 socket.local_endpoint() == Some(endpoint(local)) && socket.remote_endpoint() == Some(endpoint(remote))
             }
             _ => false,
-        })
+        })?;
+        Some(id)
     }
 
-    fn tcp_at(&mut self, index: usize) -> Option<&mut Tcp> {
-        match &mut self.entries.get_mut(index)?.as_mut()?.kind {
+    fn tcp_at(&mut self, id: u32) -> Option<&mut Tcp> {
+        match &mut self.entries.get_mut(&id)?.kind {
             Kind::Tcp(tcp) => Some(tcp),
             _ => None,
         }
@@ -689,7 +690,7 @@ impl Stack {
             TCP if outer.payload.get(13).is_some_and(|flags| flags & RST != 0) => {
                 let Some((from, to)) = ports(outer.payload) else { return };
                 let (local, remote) = (SocketAddr::new(outer.destination, to), SocketAddr::new(outer.source, from));
-                if let Some(tcp) = self.find_tcp(local, remote).and_then(|index| self.tcp_at(index)) {
+                if let Some(tcp) = self.find_tcp(local, remote).and_then(|id| self.tcp_at(id)) {
                     tcp.reset = true;
                 }
             }
@@ -701,14 +702,14 @@ impl Stack {
                     return;
                 }
                 let (local, remote) = (SocketAddr::new(quoted.source, from), SocketAddr::new(quoted.destination, to));
-                let Some(index) = self.find_tcp(local, remote) else { return };
-                let Some(handle) = self.tcp_at(index).map(|tcp| tcp.handle) else { return };
+                let Some(id) = self.find_tcp(local, remote) else { return };
+                let Some(handle) = self.tcp_at(id).map(|tcp| tcp.handle) else { return };
                 let socket = self.sockets.get_mut::<tcp::Socket>(handle);
                 if socket.state() != tcp::State::SynSent {
                     return;
                 }
                 socket.abort();
-                if let Some(tcp) = self.tcp_at(index) {
+                if let Some(tcp) = self.tcp_at(id) {
                     tcp.error = Some(error);
                 }
             }
@@ -719,8 +720,7 @@ impl Stack {
     fn maintain(&mut self) {
         let now = self.now;
         let mut accepted = Vec::new();
-        for (index, entry) in self.entries.iter_mut().enumerate() {
-            let Some(entry) = entry else { continue };
+        for (&id, entry) in self.entries.iter_mut() {
             match &mut entry.kind {
                 Kind::Tcp(tcp) => {
                     let socket = self.sockets.get_mut::<tcp::Socket>(tcp.handle);
@@ -737,13 +737,13 @@ impl Stack {
                 }
                 Kind::Listener(listener) => {
                     for handle in listener.turn(&mut self.sockets) {
-                        accepted.push((index, handle));
+                        accepted.push((id, handle));
                     }
                 }
                 Kind::Udp { .. } => {}
             }
         }
-        for (index, handle) in accepted {
+        for (listener_id, handle) in accepted {
             let state = self.sockets.get::<tcp::Socket>(handle).state();
             let tcp = Tcp {
                 handle,
@@ -755,15 +755,15 @@ impl Stack {
                 released_at: None,
             };
             let id = self.insert(Kind::Tcp(tcp));
-            if let Some(Some(Entry { kind: Kind::Listener(listener), .. })) = self.entries.get_mut(index) {
+            if let Some(Entry { kind: Kind::Listener(listener), .. }) = self.entries.get_mut(&listener_id) {
                 listener.accepted.push_back(id);
             }
         }
     }
 
     fn settle(&mut self) {
-        for (index, slot) in self.entries.iter_mut().enumerate() {
-            let Some(entry) = slot else { continue };
+        let mut gone = Vec::new();
+        for (&id, entry) in self.entries.iter_mut() {
             let seen = match &mut entry.kind {
                 Kind::Tcp(tcp) => {
                     let socket = self.sockets.get::<tcp::Socket>(tcp.handle);
@@ -780,7 +780,7 @@ impl Stack {
                     if tcp.released_at.is_some() {
                         if state == tcp::State::Closed {
                             self.sockets.remove(tcp.handle);
-                            *slot = None;
+                            gone.push(id);
                         }
                         continue;
                     }
@@ -794,14 +794,17 @@ impl Stack {
             };
             if seen != entry.seen {
                 entry.seen = seen;
-                self.events.push_back(index as u32 + 1);
+                self.events.push_back(id);
             }
+        }
+        for id in gone {
+            self.entries.remove(&id);
         }
     }
 
     fn delay(&mut self) -> Option<u64> {
         let mut next = self.interface.poll_at(self.now, &self.sockets);
-        for entry in self.entries.iter().flatten() {
+        for entry in self.entries.values() {
             let Kind::Tcp(tcp) = &entry.kind else { continue };
             let connecting = tcp.connect_by.filter(|_| tcp.state == tcp::State::SynSent);
             let released = tcp.released_at.map(|at| at + Duration::from_millis(RELEASED_MS as u64));
