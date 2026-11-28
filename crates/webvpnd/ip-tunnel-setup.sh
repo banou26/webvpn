@@ -8,8 +8,9 @@
 #   ip-tunnel-setup.sh up      makes the device and its rules
 #   ip-tunnel-setup.sh down    removes them
 #
-# Both are safe to run again. Run down only with the relay stopped: a relay whose device went away refuses every new
-# tunnel until it restarts, even once up made the device again. Set with variables:
+# Both are safe to run again: up keeps a table it loaded, and what that table counts, so to change a setting, run down,
+# then up, with the relay stopped. Run down only with the relay stopped: a relay whose device went away refuses every
+# new tunnel until it restarts, even once up made the device again. Set with variables:
 #
 #   WEBVPN_IP_DEVICE   the TUN device's name, as the relay is given it. Default: webvpn0
 #   WEBVPN_IP_POOL     the device's IPv4 network, as the relay is given it, such as 198.18.0.0/28. Required for up.
@@ -95,11 +96,12 @@ a lower ceiling or fewer public ports, or raise nf_conntrack_max"
 	# only when it is off: where it is on already, the step then needs no more than the right to change the network
 	[ "$(cat /proc/sys/net/ipv4/ip_forward)" = 1 ] || echo 1 >/proc/sys/net/ipv4/ip_forward
 
+	# Only when it is missing: a table loaded again counts the ceilings from nothing, and the kernel takes the old
+	# one's timeout policy off every connection that holds it, which then gets the node's timeout, 5 days by default,
+	# at its next packet.
 	# The reserved destinations are the relay's own egress rule (crates/webvpn-server/src/egress.rs), held again here
 	# so that a relay set to reach them still does not reach them through a tunnel.
-	nft -f - <<EOF
-table inet $table {}
-delete table inet $table
+	nft list table inet "$table" >/dev/null 2>&1 || nft -f - <<EOF
 table inet $table {
 	set reserved {
 		type ipv4_addr

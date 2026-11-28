@@ -165,6 +165,14 @@ echo "ok: a pool whose ceilings pass half of the connection table is refused"
 WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=13.0.0.0/29 WEBVPN_IP_USER=1 WEBVPN_IP_FLOWS_PER_ADDRESS=8 \
 	WEBVPN_IP_PORTS=30000-30039 sh "$setup" up
 
+# Running up again changes nothing: it keeps the table, and with it what the ceilings count and the timeout policy of
+# the connections the kernel tracks.
+loaded=$(nft -a list table inet webvpn_webvpn0)
+WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=13.0.0.0/29 WEBVPN_IP_USER=1 WEBVPN_IP_FLOWS_PER_ADDRESS=8 \
+	WEBVPN_IP_PORTS=30000-30039 sh "$setup" up
+[ "$(nft -a list table inet webvpn_webvpn0)" = "$loaded" ] || { echo "running up again changed the table" >&2; exit 1; }
+echo "ok: running up again changes nothing"
+
 if [ -n "${WEBVPN_TEST_CAPTURE:-}" ]; then
 	for at in host:webvpn0 host:out0 host:out1 peer:peer0 peer:peer1; do
 		device=${at#*:}
