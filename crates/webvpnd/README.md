@@ -45,6 +45,15 @@ On Linux the relay can carry whole IP packets through a TUN device: a privileged
 host's rules, and the relay opens it with no privilege. [IP tunnels](https://webvpn.dev/docs/running-a-relay/#ip-tunnels)
 in the guide explains both halves and the setup script.
 
+`sh crates/webvpnd/tests/ip-tunnel.sh`, from the repository's root, runs IP tunnels over a real TUN device and a real
+network, in namespaces of its own, with no change to the host. When a check fails, it prints the relay's counters, the
+connections the kernel tracks, the rules and the neighbours. Set `WEBVPN_TEST_CAPTURE` to a directory to also capture
+every interface the tunnels' packets cross there, with tcpdump:
+
+```sh
+WEBVPN_TEST_CAPTURE=target/ip-tunnel-capture sh crates/webvpnd/tests/ip-tunnel.sh
+```
+
 ## On macOS
 
 The relay builds, serves and passes its tests on macOS too. A client can see these differences there:

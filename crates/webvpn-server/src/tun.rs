@@ -226,7 +226,7 @@ fn read(shared: Weak<Shared>) {
         loop {
             // SAFETY: the device is open and non-blocking, and `buf` is valid for its length.
             let read = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-            let Ok(length) = usize::try_from(read) else { break };
+            let Ok(length @ 1..) = usize::try_from(read) else { break };
             let packet = &buf[..length];
             if packet.len() < 20 || packet[0] >> 4 != 4 {
                 continue;
