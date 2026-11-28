@@ -1,5 +1,6 @@
 import type { TcpListener, TcpSocket, UdpSocket } from '../../src'
 import type { Stack } from '../../src/stack'
+import type { Pipe } from './internet'
 
 import { describe, expect, it, vi } from 'vite-plus/test'
 
@@ -67,6 +68,18 @@ const resolver = async (site: Stack, answer: (query: Uint8Array, count: number) 
     }
   })()
   return { socket, count: () => count }
+}
+
+/** The TTL of each packet of `protocol` (6 TCP, 17 UDP) the client sends from now on, and the bytes it carries. */
+const sent = (pipe: Pipe, protocol: number) => {
+  const packets: { ttl: number, length: number }[] = []
+  pipe.drop = (toward, packet) => {
+    if (toward !== 'site' || packet[9] !== protocol) return false
+    const header = 20 + (protocol === 6 ? (packet[32]! >> 4) * 4 : 8)
+    packets.push({ ttl: packet[8]!, length: packet.byteLength - header })
+    return false
+  }
+  return packets
 }
 
 describe('TCP over a tunnel', () => {
@@ -261,13 +274,53 @@ describe('TCP over a tunnel', () => {
     expect(await outcome(second.peer.readable.getReader().read())).toMatchObject({ code: ErrorCode.CONNECTION_RESET })
   })
 
-  it('answers the options it has, and UNSUPPORTED for the buffer sizes', async () => {
+  it('sends with the TTL it is given, and a small write while the last is unacknowledged with noDelay', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    try {
+      const { client, site, pipe } = await internet()
+      const { socket } = await connect(client, site)
+      const segments = sent(pipe, 6)
+      pipe.delayMs = 50
+      const writer = socket.writable.getWriter()
+      // two small writes 10 ms apart, which the first one's acknowledgement comes long after
+      const smallWrites = async () => {
+        segments.splice(0)
+        await writer.write(bytes('a'))
+        await vi.advanceTimersByTimeAsync(10)
+        await writer.write(bytes('b'))
+        await vi.advanceTimersByTimeAsync(10)
+        const carrying = segments.filter(({ length }) => length > 0)
+        await vi.advanceTimersByTimeAsync(500)
+        return carrying
+      }
+      expect(await smallWrites()).toEqual([{ ttl: 64, length: 1 }])
+      await socket.setOption({ type: 'noDelay', value: true })
+      await socket.setOption({ type: 'ttl', value: 32 })
+      expect(await smallWrites()).toEqual([{ ttl: 32, length: 1 }, { ttl: 32, length: 1 }])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('probes an idle connection with keep-alive', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    try {
+      const { client, site, pipe } = await internet()
+      const { socket } = await connect(client, site)
+      const segments = sent(pipe, 6)
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(segments).toEqual([])
+      await socket.setOption({ type: 'keepAlive', enabled: true, initialDelaySeconds: 1 })
+      await vi.advanceTimersByTimeAsync(2500)
+      expect(segments.length).toBeGreaterThanOrEqual(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('answers UNSUPPORTED for the buffer sizes', async () => {
     const { client, site } = await internet()
     const { socket } = await connect(client, site)
-    await socket.setOption({ type: 'noDelay', value: true })
-    await socket.setOption({ type: 'ttl', value: 32 })
-    await socket.setOption({ type: 'keepAlive', enabled: true, initialDelaySeconds: 30 })
-    await socket.setOption({ type: 'keepAlive', enabled: false, initialDelaySeconds: 0 })
     expect(await outcome(socket.setOption({ type: 'sendBufferSize', value: 1 }))).toMatchObject({ code: ErrorCode.UNSUPPORTED })
     expect(await outcome(socket.setOption({ type: 'recvBufferSize', value: 1 }))).toMatchObject({ code: ErrorCode.UNSUPPORTED })
   })
@@ -429,13 +482,19 @@ describe('UDP over a tunnel', () => {
     expect(text((await next(socket)).data)).toBe('heard now')
   })
 
-  it('fails a datagram longer than the tunnel carries, and answers the options it has', async () => {
-    const { client } = await internet()
+  it('fails a datagram longer than the tunnel carries, and sends with the TTL it is given', async () => {
+    const { client, pipe } = await internet()
+    const datagrams = sent(pipe, 17)
     const socket = await client.udpBind(ANY)
+    const writer = socket.writable.getWriter()
+    await writer.write({ remote: at(SITE, 7), data: bytes('first') })
+    await vi.waitFor(() => expect(datagrams).toEqual([{ ttl: 64, length: 5 }]))
     await socket.setOption({ type: 'ttl', value: 8 })
+    await writer.write({ remote: at(SITE, 7), data: bytes('then') })
+    await vi.waitFor(() => expect(datagrams).toEqual([{ ttl: 64, length: 5 }, { ttl: 8, length: 4 }]))
     expect(await outcome(socket.setOption({ type: 'broadcast', value: true }))).toMatchObject({ code: ErrorCode.UNSUPPORTED })
-    const write = socket.writable.getWriter().write({ remote: at(SITE, 7), data: new Uint8Array(1473) })
-    expect(await outcome(write)).toMatchObject({ code: ErrorCode.OTHER })
+    const long = writer.write({ remote: at(SITE, 7), data: new Uint8Array(1473) })
+    expect(await outcome(long)).toMatchObject({ code: ErrorCode.OTHER })
   })
 })
 
