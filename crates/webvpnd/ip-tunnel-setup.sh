@@ -80,7 +80,8 @@ up() {
 
 	# without connection tracking timeout policies the kernel refuses the whole table, and nft would not say why. The
 	# probe loads connection tracking too, whose size is read next.
-	nft -f - <<EOF || fail "the kernel has no connection tracking timeout policies (CONFIG_NF_CONNTRACK_TIMEOUT)"
+	nft -f - <<EOF || fail "nft could not load a connection tracking timeout policy: run up as root, with nftables \
+installed, on a kernel with CONFIG_NF_CONNTRACK_TIMEOUT"
 table inet ${table}_probe { ct timeout probe { protocol tcp; l3proto ip; }; }
 delete table inet ${table}_probe
 EOF
