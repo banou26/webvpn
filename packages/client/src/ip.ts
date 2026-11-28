@@ -5,9 +5,10 @@ import { formatIp } from './address'
 import { framed, noop, ok, unexpected, WebVpnError } from './context'
 import { decodeIpFrame, encodeIpFrame, ErrorCode, MIN_MTU } from './protocol'
 
-// the relay holds as much toward the client (QUEUE_BYTES in its tunnel.rs): a link's short queue, about 44 packets of
-// 1500 bytes, so that what flows through the tunnel learns of a slow path from loss within a few dozen milliseconds
-const QUEUE_BYTES = 64 * 1024
+// a stack sends what its sockets' windows allow in one turn of the event loop, before the carrier takes any of it, so
+// the queue holds the windows of several busy sockets: at 64 KiB it dropped 2 to 9% of an upload's packets with a
+// 512 KiB send buffer. Those windows, not this queue, bound how long a slow link makes the tunnel's packets wait.
+const QUEUE_BYTES = 1024 * 1024
 
 const STREAM_MS = 30_000
 
@@ -52,7 +53,7 @@ export type IpTunnel = {
   readable: ReadableStream<Uint8Array>,
   /**
    * Sends one packet and never waits. `false` when the packet was dropped: it is empty or longer than `mtu`, the
-   * tunnel stopped, or the short queue toward the relay is full, as a busy link's would be. Over the WebSocket, that
+   * tunnel stopped, or the queue toward the relay is full, as a busy link's would be. Over the WebSocket, that
    * queue also counts the bytes the session's other sockets have not sent yet, so a tunnel drops every packet while
    * one of them uploads.
    */
@@ -163,7 +164,7 @@ export const ipTunnel = async (context: Context, reply: RelayPacket): Promise<Ip
     const frame = encodeIpFrame(packet)
     // a frame leaves `queued` once the carrier took it, and the WebSocket mux takes up to 1 MiB it did not send yet,
     // so that counts too. It holds what the session's other sockets send as well: while their uploads keep it past
-    // 64 KiB, the tunnel drops every packet. Counting only the tunnel's own bytes there would take much more code,
+    // 1 MiB, the tunnel drops every packet. Counting only the tunnel's own bytes there would take much more code,
     // and a page that sends only through the tunnel has no such uploads.
     if (queued + (context.carrier.buffered?.() ?? 0) + frame.byteLength > QUEUE_BYTES) return false
     queued += frame.byteLength

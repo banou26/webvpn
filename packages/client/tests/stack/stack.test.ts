@@ -184,7 +184,7 @@ describe('TCP over a tunnel', () => {
   })
 
   it('holds back the peer while the reader does not read, and takes the rest once it does', async () => {
-    const { client, site } = await internet({ client: { tcpReceiveBuffer: 32 * 1024 } })
+    const { client, site } = await internet({ client: { tcpReceiveBuffer: 32 * 1024 }, site: { tcpSendBuffer: 64 * 1024 } })
     const { socket, peer } = await connect(client, site)
     const data = pattern(1024 * 1024)
     const poured = pour(peer, data)
@@ -212,6 +212,22 @@ describe('TCP over a tunnel', () => {
       }
       await connect(client, site)
       expect(offered).toBe(shift)
+    }
+  })
+
+  it('takes a send buffer of 128 KiB by default, over either carrier', async () => {
+    for (const carrier of ['webtransport', 'websocket'] as const) {
+      const { client, site } = await internet({ carrier, site: { tcpReceiveBuffer: 64 * 1024 } })
+      const { socket, peer } = await connect(client, site)
+      const poured = pour(socket, pattern(1024 * 1024))
+      await wait(300)
+      // the site's window and the client's send buffer, and less than a chunk more
+      expect(poured.taken).toBeGreaterThan(64 * 1024 + 128 * 1024 - 16 * 1024)
+      expect(poured.taken).toBeLessThanOrEqual(64 * 1024 + 128 * 1024 + 16 * 1024)
+      const read = readAll(peer.readable)
+      await poured.done
+      await socket.close()
+      expect((await read).byteLength).toBe(1024 * 1024)
     }
   })
 

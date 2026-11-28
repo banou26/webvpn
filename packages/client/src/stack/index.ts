@@ -27,7 +27,11 @@ export type StackOptions = {
    * measurements and only made the tunnel's other connections wait behind what it holds.
    */
   tcpReceiveBuffer?: number,
-  /** A TCP socket's send buffer, 64 KiB by default, which bounds what it sends per round trip the same way. */
+  /**
+   * A TCP socket's send buffer, 128 KiB by default, which bounds what it sends per round trip the same way. A larger
+   * one carried more in measurements, but over WebTransport the path's loss does not reach the stack, so the window
+   * grows to the whole buffer: at 512 KiB on a 3 Mbit/s path the tunnel's other connections waited 2 s behind it.
+   */
   tcpSendBuffer?: number,
   /** A UDP socket's receive buffer, 64 KiB by default. A datagram that finds it full is dropped. */
   udpReceiveBuffer?: number,
@@ -75,7 +79,7 @@ export const openStack = async (tunnel: IpTunnel, options: StackOptions = {}): P
   const {
     resolver = tunnel.ipv4 ? RESOLVER_V4 : RESOLVER_V6,
     tcpReceiveBuffer = tunnel.carrier === 'webtransport' ? 512 * KIB : 128 * KIB,
-    tcpSendBuffer = 64 * KIB,
+    tcpSendBuffer = 128 * KIB,
     udpReceiveBuffer = 64 * KIB,
     udpSendBuffer = 64 * KIB,
     backlog = 8,
