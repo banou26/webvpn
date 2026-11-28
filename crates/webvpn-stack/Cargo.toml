@@ -13,7 +13,13 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 webvpn-proto = { path = "../webvpn-proto" }
-smoltcp = { version = "0.14.0", default-features = false, features = [
+# smoltcp's main branch with three fixes of its TCP socket that it does not have yet: back to a release once one
+# carries them
+[dependencies.smoltcp]
+git = "https://github.com/banou26/smoltcp"
+rev = "69afb290ee08f36f64036b66812c8ce2509ce756"
+default-features = false
+features = [
     "std",
     "medium-ip",
     "proto-ipv4",
@@ -21,4 +27,4 @@ smoltcp = { version = "0.14.0", default-features = false, features = [
     "socket-tcp",
     "socket-tcp-cubic",
     "socket-udp",
-] }
+]
