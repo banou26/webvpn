@@ -119,7 +119,18 @@ on_peer socat TCP-LISTEN:7003,fork,reuseaddr SYSTEM:true 2>/dev/null &
 
 # The relay runs as user 1 of the namespace, which owns the device. Its binary is copied to a directory that user
 # can read, on a file system of this namespace only.
-WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=198.18.0.0/29 WEBVPN_IP_USER=1 WEBVPN_IP_FLOWS_PER_ADDRESS=8 sh "$setup" up
+# A range of public ports in the node's local port range is refused, and nothing is made.
+if WEBVPN_IP_POOL=198.18.0.0/29 WEBVPN_IP_USER=1 WEBVPN_IP_PORTS=40000-40031 sh "$setup" up 2>"$work/refused"; then
+	echo "the setup took public ports in the local port range" >&2
+	exit 1
+fi
+grep -q "overlaps the node's local port range" "$work/refused" || { cat "$work/refused" >&2; exit 1; }
+! ip link show dev webvpn0 >/dev/null 2>&1 || { echo "the refused setup made the device" >&2; exit 1; }
+echo "ok: public ports in the local port range are refused"
+
+# Four tunnel addresses hold 8 public ports each, 198.18.0.2 from 30000 on, and the fifth, 198.18.0.6, none.
+WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=198.18.0.0/29 WEBVPN_IP_USER=1 WEBVPN_IP_FLOWS_PER_ADDRESS=8 \
+	WEBVPN_IP_PORTS=30000-30031 sh "$setup" up
 
 if [ -n "${WEBVPN_TEST_CAPTURE:-}" ]; then
 	for at in host:webvpn0 host:out0 host:out1 peer:peer0 peer:peer1; do
@@ -152,7 +163,8 @@ else
 	echo "webvpnd runs as root of the namespace: this system gives the namespace no other user"
 fi
 env -i RUST_LOG=error WEBVPN_ADDRESS=127.0.0.1 WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=198.18.0.0/29 \
-	WEBVPN_ALLOW_PRIVATE_TARGETS=true "$@" "$work/run/webvpnd" &
+	WEBVPN_IP_PORTS=30000-30031 WEBVPN_OWN_ADDRESSES=11.0.0.1 WEBVPN_ALLOW_PRIVATE_TARGETS=true "$@" \
+	"$work/run/webvpnd" &
 relay=$!
 
 tries=0
