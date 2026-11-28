@@ -197,6 +197,24 @@ describe('TCP over a tunnel', () => {
     expect(await read).toEqual(data)
   })
 
+  it('offers a window of 512 KiB over WebTransport and of 128 KiB over the WebSocket by default', async () => {
+    for (const [carrier, shift] of [['webtransport', 4], ['websocket', 2]] as const) {
+      const { client, site, pipe } = await internet({ carrier })
+      let offered: number | undefined
+      pipe.drop = (toward, packet) => {
+        // the window scale option of the client's SYN: 2 ** shift times 64 KiB at most
+        const end = 20 + (packet[32]! >> 4) * 4
+        for (let at = 40; toward === 'site' && packet[9] === 6 && packet[33]! & 0x02 && at < end;) {
+          if (packet[at] === 3) offered = packet[at + 2]
+          at += packet[at]! <= 1 ? 1 : packet[at + 1]!
+        }
+        return false
+      }
+      await connect(client, site)
+      expect(offered).toBe(shift)
+    }
+  })
+
   it('holds the writer while the peer does not read, and lets it go on once it does', async () => {
     const { client, site } = await internet({ client: { tcpSendBuffer: 16 * 1024 } })
     const { socket, peer } = await connect(client, site)

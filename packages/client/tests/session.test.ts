@@ -746,6 +746,7 @@ describe('an IP tunnel', () => {
     const { tunnel, request } = await tunnelled(relay, session)
     expect(request).toEqual({ type: 'ipOpen', id: idOf(request) })
     expect(tunnel).toMatchObject({ id: 12, ipv4: '198.18.0.2', ipv6: 'fd00::2', mtu: MTU, ports: 0 })
+    expect(tunnel.carrier).toBe(session.carrier)
     expect(tunnel.publicIpv4).toBeUndefined()
     expect(tunnel.publicIpv6).toBeUndefined()
   })

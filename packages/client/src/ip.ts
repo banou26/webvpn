@@ -32,6 +32,8 @@ export type IpTunnel = {
   ipv6?: string,
   /** The largest packet the tunnel carries, at least 1280 bytes. */
   mtu: number,
+  /** The carrier the tunnel's packets ride, as `Session.carrier` names it. */
+  carrier: 'webtransport' | 'websocket',
   /**
    * The relay's public IPv4 address, as text, as others dial it to reach the tunnel's public ports. Absent when the
    * relay gave no public ports or none of this family.
@@ -174,6 +176,7 @@ export const ipTunnel = async (context: Context, reply: RelayPacket): Promise<Ip
     ipv4: reply.ipv4 && formatIp(reply.ipv4),
     ipv6: reply.ipv6 && formatIp(reply.ipv6),
     mtu,
+    carrier: context.carrier.kind,
     publicIpv4: reply.publicIpv4 && formatIp(reply.publicIpv4),
     publicIpv6: reply.publicIpv6 && formatIp(reply.publicIpv6),
     firstPort: reply.firstPort,

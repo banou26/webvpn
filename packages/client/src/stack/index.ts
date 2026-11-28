@@ -21,8 +21,10 @@ export type StackOptions = {
   /** The DNS resolver `lookup` asks through the tunnel: 1.1.1.1 port 53, or 2606:4700:4700::1111 on a tunnel without IPv4. */
   resolver?: Address,
   /**
-   * A TCP socket's receive buffer, 128 KiB by default. It is the most the socket's window offers, so a connection
-   * carries at most this much per round trip: about 10 Mbit/s at a 100 ms round trip.
+   * A TCP socket's receive buffer: 512 KiB by default over WebTransport, 128 KiB over the WebSocket. It is the most
+   * the socket's window offers, so a connection carries at most this much per round trip: about 40 Mbit/s and 10 Mbit/s
+   * at a 100 ms round trip. Over the WebSocket, whose own TCP is the slower link, a larger window bought no speed in
+   * measurements and only made the tunnel's other connections wait behind what it holds.
    */
   tcpReceiveBuffer?: number,
   /** A TCP socket's send buffer, 64 KiB by default, which bounds what it sends per round trip the same way. */
@@ -72,7 +74,7 @@ export type Stack = Pick<Session, 'tcpConnect' | 'tcpListen' | 'udpBind' | 'look
 export const openStack = async (tunnel: IpTunnel, options: StackOptions = {}): Promise<Stack> => {
   const {
     resolver = tunnel.ipv4 ? RESOLVER_V4 : RESOLVER_V6,
-    tcpReceiveBuffer = 128 * KIB,
+    tcpReceiveBuffer = tunnel.carrier === 'webtransport' ? 512 * KIB : 128 * KIB,
     tcpSendBuffer = 64 * KIB,
     udpReceiveBuffer = 64 * KIB,
     udpSendBuffer = 64 * KIB,

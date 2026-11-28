@@ -15,7 +15,7 @@ export const SITE_V6 = '2001:db8::1'
 
 export const at = (text: string, port: number): Address => ({ ip: parseIp(text)!, port })
 
-type Fields = Omit<IpTunnel, 'readable' | 'send' | 'closed' | 'close'>
+type Fields = Omit<IpTunnel, 'readable' | 'send' | 'closed' | 'close' | 'carrier'> & { carrier?: IpTunnel['carrier'] }
 
 /** A tunnel played by the test: what it reads is what `deliver` gives it, and what it sends goes to `send`. */
 export const fakeTunnel = (fields: Fields, send: (packet: Uint8Array) => boolean) => {
@@ -32,6 +32,7 @@ export const fakeTunnel = (fields: Fields, send: (packet: Uint8Array) => boolean
     stop(by)
   }
   const tunnel: IpTunnel = {
+    carrier: 'websocket',
     ...fields,
     readable: new ReadableStream({ start: (started) => { controller = started } }),
     send: (packet) => !done && send(packet),
@@ -117,14 +118,15 @@ export type Pipe = {
   counts: { site: number, client: number, refused: number },
 }
 
-type Setup = { client?: StackOptions, site?: StackOptions, ports?: number, mtu?: number }
+type Setup = { client?: StackOptions, site?: StackOptions, ports?: number, mtu?: number, carrier?: IpTunnel['carrier'] }
 
 /**
  * The client's stack on a tunnel, and a second stack that plays the internet as `SITE` and `SITE_V6` on a tunnel of
  * its own, joined by a pipe that translates the client's IPv4 address to its public one both ways, as a relay does,
  * and carries IPv6 as it is. The site may listen and bind on any port below the private ones.
  */
-export const internet = async ({ client: clientOptions, site: siteOptions, ports = 8, mtu = 1500 }: Setup = {}) => {
+export const internet = async (setup: Setup = {}) => {
+  const { client: clientOptions, site: siteOptions, ports = 8, mtu = 1500, carrier } = setup
   const pipe: Pipe = {
     drop: () => false,
     answer: () => undefined,
@@ -142,7 +144,7 @@ export const internet = async ({ client: clientOptions, site: siteOptions, ports
     else target.deliver(moved)
   }
   const client = fakeTunnel(
-    { id: 1, ipv4: CLIENT, ipv6: CLIENT_V6, mtu, publicIpv4: CLIENT_PUBLIC, firstPort: FIRST_PORT, ports },
+    { id: 1, ipv4: CLIENT, ipv6: CLIENT_V6, mtu, publicIpv4: CLIENT_PUBLIC, firstPort: FIRST_PORT, ports, carrier },
     (packet) => {
       if (pipe.refuse(packet)) {
         pipe.counts.refused++
