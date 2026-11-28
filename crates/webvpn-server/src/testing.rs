@@ -295,6 +295,12 @@ impl TestForwarder {
         self.ends.lock().unwrap().get(index).is_some_and(|end| end.try_send(packet).is_ok())
     }
 
+    /// The packets in tunnel `index`'s channel that the relay has not taken yet.
+    pub(crate) fn waiting(&self, index: usize) -> usize {
+        let ends = self.ends.lock().unwrap();
+        ends[index].max_capacity() - ends[index].capacity()
+    }
+
     /// Ends tunnel `index` from the forwarder's side.
     pub(crate) fn end(&self, index: usize) {
         let (sender, _) = mpsc::channel(1);

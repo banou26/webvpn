@@ -179,8 +179,6 @@ async fn run<T: Transport, S: Session>(
                 metrics.count(dropped);
                 continue;
             }
-            metrics.add(Counter::BytesDown, packet.len() as u64);
-            session.policy.relayed(Direction::Down, packet.len()).await;
             // an empty packet still takes a place, so the queue's bytes bound its packets too
             let charge = packet.len().max(1) as u32;
             match budget.clone().try_acquire_many_owned(charge) {
@@ -194,6 +192,11 @@ async fn run<T: Transport, S: Session>(
     let mut writer = Box::pin(async move {
         let mut frame = Vec::new();
         while let Some((packet, _reservation)) = queued.recv().await {
+            // Counted and metered as it leaves the queue, so a packet the full queue drops is neither. While a policy
+            // that paces waits here, the packet keeps its place in the queue, so the queue fills and drops the newest,
+            // and the forwarder's channel stays empty.
+            metrics.add(Counter::BytesDown, packet.len() as u64);
+            session.policy.relayed(Direction::Down, packet.len()).await;
             frame.clear();
             ip::encode(&packet, &mut frame);
             if to_client.write_all(&frame).await.is_err() {
@@ -348,6 +351,8 @@ mod tests {
         asked: Arc<Mutex<Vec<(Proto, SocketAddr)>>>,
         up: Arc<AtomicUsize>,
         down: Arc<AtomicUsize>,
+        /// When set, how long it holds each packet toward the client before letting it move, as a policy that paces.
+        pace_down: Arc<Mutex<Option<Duration>>>,
     }
 
     impl Metered {
@@ -396,7 +401,12 @@ mod tests {
         fn relayed(&self, direction: Direction, bytes: usize) -> impl std::future::Future<Output = ()> + Send {
             let metered = if direction == Direction::Up { &self.up } else { &self.down };
             metered.fetch_add(bytes, Ordering::SeqCst);
-            std::future::ready(())
+            let pace = (*self.pace_down.lock().unwrap()).filter(|_| direction == Direction::Down);
+            async move {
+                if let Some(pace) = pace {
+                    tokio::time::sleep(pace).await;
+                }
+            }
         }
     }
 
@@ -755,7 +765,8 @@ mod tests {
         for index in 0..SENT {
             assert!(harness.forwarder.deliver(0, toward_client(0, index, 1400)), "the forwarder waits on no tunnel");
         }
-        eventually(|| harness.policy.metered()[1] == usize::from(SENT) * 1400).await;
+        // every packet was taken from the forwarder, and so queued or dropped: nothing waits between the two
+        eventually(|| harness.forwarder.waiting(0) == 0).await;
         let dropped = harness.count(Counter::IpDroppedQueueFull);
         assert!(dropped > 0);
 
@@ -776,6 +787,30 @@ mod tests {
         assert!(through.windows(2).all(|pair| pair[0] < pair[1]), "{through:?}");
         eventually(|| harness.count(Counter::IpPacketsDown) == u64::from(SENT) - dropped + 1).await;
         assert_eq!(harness.count(Counter::IpDroppedQueueFull), dropped);
+        // only what reached the stream is metered and counted: what got through, and the other tunnel's packet
+        let delivered = (u64::from(SENT) - dropped) * 1400 + 100;
+        assert_eq!((harness.policy.metered()[1] as u64, harness.count(Counter::BytesDown)), (delivered, delivered));
+    }
+
+    #[tokio::test]
+    async fn under_a_policy_that_paces_the_short_queue_fills_and_the_forwarder_s_channel_stays_empty() {
+        let mut harness = tunnelling(1).await;
+        let mut tunnel = harness.open(1, 0).await;
+        tunnel.send(&udp_from(0)).await;
+        harness.forwarder.sent(1).await;
+        // a minute a packet, far longer than the test runs
+        *harness.policy.pace_down.lock().unwrap() = Some(Duration::from_secs(60));
+        const SENT: u16 = 200;
+        for index in 0..SENT {
+            assert!(harness.forwarder.deliver(0, toward_client(0, index, 1400)));
+        }
+        eventually(|| harness.forwarder.waiting(0) == 0).await;
+        // the packet the policy holds keeps its place in the queue, so the queue drops the newest at once
+        let fitted = (QUEUE_BYTES / 1400) as u64;
+        assert_eq!(harness.count(Counter::IpDroppedQueueFull), u64::from(SENT) - fitted);
+        // and only that packet is metered and counted yet
+        eventually(|| harness.policy.metered()[1] == 1400).await;
+        assert_eq!(harness.count(Counter::BytesDown), 1400);
     }
 
     #[tokio::test]
