@@ -16,7 +16,13 @@ const KIB = 1024
 const RESOLVER_V4: Address = { ip: Uint8Array.of(1, 1, 1, 1), port: 53 }
 const RESOLVER_V6: Address = { ip: parseIp('2606:4700:4700::1111')!, port: 53 }
 
-/** How a stack sizes its sockets and where it looks names up. Every size is in bytes and fixed when a socket is made. */
+/**
+ * How a stack sizes its sockets and where it looks names up. Every size is in bytes and fixed when a socket is made.
+ * A TCP socket takes both of its buffers in the page's memory when it is made, 640 KiB by default over WebTransport
+ * and 256 KiB over the WebSocket, and a listener takes `backlog` of them at once. A closed socket keeps them until its
+ * connection ends, a minute at most. The stack uses freed memory again but gives none back to the page until it
+ * closes, so 100 sockets open at once hold about 64 MiB over WebTransport.
+ */
 export type StackOptions = {
   /** The DNS resolver `lookup` asks through the tunnel: 1.1.1.1 port 53, or 2606:4700:4700::1111 on a tunnel without IPv4. */
   resolver?: Address,
