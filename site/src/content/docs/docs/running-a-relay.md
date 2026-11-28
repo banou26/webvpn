@@ -146,7 +146,7 @@ A relay can also carry whole IP packets, for a client that brings its own networ
 They come in two halves:
 
 - **The setup step, with privilege.** Run as root once, before the relay starts, it makes a TUN device owned by the relay's user, gives it its network, turns forwarding on and loads the host's rules for it. `crates/webvpnd/ip-tunnel-setup.sh` does all of it.
-- **The relay, with none.** It only opens the device that exists and belongs to its user, and needs no capability. A device that is missing, belongs to another user, or has an MTU under 1280 stops the program at start, with a message that says what to check.
+- **The relay, with none.** It only opens the device that exists and belongs to its user, and needs no capability. A device that is missing, belongs to another user, has an MTU under 1280, or does not hold the first host address of `WEBVPN_IP_POOL` with its prefix length, stops the program at start, with a message that says what to check.
 
 ### Settings
 
