@@ -50,7 +50,9 @@ export type IpTunnel = {
   readable: ReadableStream<Uint8Array>,
   /**
    * Sends one packet and never waits. `false` when the packet was dropped: it is empty or longer than `mtu`, the
-   * tunnel stopped, or the short queue toward the relay is full, as a busy link's would be.
+   * tunnel stopped, or the short queue toward the relay is full, as a busy link's would be. Over the WebSocket, that
+   * queue also counts the bytes the session's other sockets have not sent yet, so a tunnel drops every packet while
+   * one of them uploads.
    */
   send: (packet: Uint8Array) => boolean,
   /** Resolves once the tunnel stopped, with who stopped it. Never rejects. */
