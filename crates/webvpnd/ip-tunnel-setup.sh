@@ -97,6 +97,9 @@ $public_map
 		iifname "$device" meta nfproto ipv6 drop
 		iifname "$device" ip daddr @reserved drop
 		iifname "$device" ct state new add @flows { ip saddr ct count over $flows } drop
+		# the masquerade below translates no packet connection tracking calls invalid: it would leave with the pool's
+		# address as its source
+		iifname "$device" ct state invalid drop
 		iifname "$device" accept
 		oifname "$device" ct state established,related accept
 $public_forward

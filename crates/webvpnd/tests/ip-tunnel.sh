@@ -112,6 +112,10 @@ on_peer ip link set peer1 up
 on_peer ip route add 13.0.0.0/29 via 11.0.0.1
 # a private address the peer answers on, which only the setup's reserved destinations keep tunnels from
 on_peer ip address add 10.0.0.2/32 dev lo
+# counts what reaches the peer with an address of the pool as its source: the host translates every packet it sends on
+on_peer nft add table ip peer
+on_peer nft add chain ip peer from_pool '{ type filter hook prerouting priority filter; }'
+on_peer nft add rule ip peer from_pool ip saddr 13.0.0.0/29 counter
 
 : >"$work/sink"
 on_peer socat -u UDP-RECV:7002 OPEN:"$work/sink",append 2>/dev/null &

@@ -4,9 +4,10 @@
 //! The network: the relay's host routes the pool 13.0.0.0/29 to its TUN device, under `ip-tunnel-setup.sh`, and
 //! reaches "the internet" at 11.0.0.0/24 by a veth pair, its default route, and at 12.0.0.0/24 by a second one. The
 //! peer, at 11.0.0.2 and 12.0.0.2, answers ICMP echoes, writes what reaches UDP port 7002 to a file, accepts TCP on
-//! port 7003, and has nothing on UDP port 7004. It is reached at the private address 10.0.0.2 too. The setup keeps at
-//! most 8 connections for one tunnel address. The relay's public address is 11.0.0.1, and its public ports are 30000
-//! to 30031 in blocks of 8: 13.0.0.2 holds 30000 to 30007, up to 13.0.0.5, and 13.0.0.6 holds none.
+//! port 7003, and has nothing on UDP port 7004. It is reached at the private address 10.0.0.2 too, and counts what
+//! reaches it with an address of the pool as its source. The setup keeps at most 8 connections for one tunnel address.
+//! The relay's public address is 11.0.0.1, and its public ports are 30000 to 30031 in blocks of 8: 13.0.0.2 holds
+//! 30000 to 30007, up to 13.0.0.5, and 13.0.0.6 holds none.
 //!
 //! This test is the peer's UDP port 7001 itself, from a socket it makes in the peer's namespace, and answers each
 //! datagram there with the source address it came from. socat's forking responder left a datagram that closely
@@ -590,6 +591,18 @@ async fn tunnels_reach_a_real_network_and_take_only_answers() {
     session.close(fresh).await;
 
     public_ports(&mut session).await;
+
+    let mut last = session.tunnel().await;
+    let address = last.address;
+    // connection tracking calls it invalid, and no address translation applies to such a packet
+    last.send(&whole(address, PEER, TCP, &tcp((address, 40018), (PEER, TCP_LISTENER), 5555, 0x04))).await;
+    sleep(QUIET).await;
+    on_peer("nft list chain ip peer from_pool | grep -q 'counter packets 0 '").await;
+    println!(
+        "ok 18: no packet reached the peer with an address of the pool as its source, nor a TCP RST that starts no \
+         connection"
+    );
+    session.close(last).await;
 }
 
 /// The checks of the tunnels' public ports. Every tunnel address is held, so each is known: the tunnels at
