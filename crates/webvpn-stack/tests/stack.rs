@@ -384,6 +384,42 @@ fn an_icmp_error_about_an_established_connection_leaves_it_open() {
     assert_eq!((net.client.tcp_state(client), net.client.tcp_error(client)), (Some(State::Established), None));
 }
 
+// the stack's own parser reads every packet before smoltcp checks it, and a panic there ends every socket of the tunnel
+#[test]
+fn cut_and_lying_packets_change_nothing() {
+    let mut net = Net::new();
+    let (client, site) = net.connect(80);
+    net.client.tcp_send(client, b"x").unwrap();
+    net.client.poll(net.now);
+    let error = icmp_unreachable(&net.client.output().unwrap(), 1);
+    net.site.tcp_send(site, b"hello").unwrap();
+    net.site.poll(net.now);
+    let segment = net.site.output().unwrap();
+    let with = |at: usize, byte: u8| {
+        let mut packet = segment.clone();
+        packet[at] = byte;
+        packet
+    };
+    // every cut of the ICMP error also quotes a cut segment, or holds less than the 8 bytes before the quote
+    let mut lying: Vec<Vec<u8>> = (0..segment.len()).map(|cut| segment[..cut].to_vec()).collect();
+    lying.extend((0..error.len()).map(|cut| error[..cut].to_vec()));
+    lying.extend([
+        with(0, 0x4f)[..20].to_vec(), // a header of 60 bytes in 20
+        with(3, 0xff),                // a total length past the end
+        with(3, 10),                  // a total length shorter than the header
+        with(32, 0xf0),               // a TCP data offset past the end
+        vec![0x60; 39],               // an IPv6 packet one byte short of its header
+    ]);
+    for packet in &lying {
+        net.client.input(packet);
+        net.client.poll(net.now);
+    }
+    net.client.input(&segment);
+    let mut buffer = [0; 16];
+    assert!(net.until(100, |net| net.client.tcp_recv(client, &mut buffer) == Some(5)));
+    assert_eq!((net.client.tcp_state(client), net.client.tcp_error(client)), (Some(State::Established), None));
+}
+
 #[test]
 fn a_reset_ends_only_its_own_connection_of_those_on_one_port() {
     let mut net = Net::new();
