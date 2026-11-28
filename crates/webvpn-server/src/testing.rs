@@ -263,11 +263,19 @@ pub(crate) struct TestForwarder {
     max_tunnels: usize,
     ends: std::sync::Mutex<Vec<mpsc::Sender<Vec<u8>>>>,
     sent: std::sync::Mutex<Vec<Vec<u8>>>,
+    dropped: std::sync::atomic::AtomicU64,
 }
 
 impl TestForwarder {
     pub(crate) fn new(mtu: u16, max_tunnels: usize) -> Self {
-        Self { mtu, ports: 0, max_tunnels, ends: Default::default(), sent: Default::default() }
+        Self {
+            mtu,
+            ports: 0,
+            max_tunnels,
+            ends: Default::default(),
+            sent: Default::default(),
+            dropped: Default::default(),
+        }
     }
 
     pub(crate) fn addresses(index: usize) -> (Ipv4Addr, Ipv6Addr) {
@@ -290,9 +298,16 @@ impl TestForwarder {
         timeout(WAIT, held).await.expect("the relay holds as many tunnel ends as expected in time");
     }
 
-    /// Hands `packet` to tunnel `index` as a forwarder does, without waiting: false when its channel is full or gone.
+    /// Hands `packet` to tunnel `index` as a forwarder does, without waiting: false when its channel is full or gone,
+    /// and counted in `dropped` when it is full.
     pub(crate) fn deliver(&self, index: usize, packet: Vec<u8>) -> bool {
-        self.ends.lock().unwrap().get(index).is_some_and(|end| end.try_send(packet).is_ok())
+        let ends = self.ends.lock().unwrap();
+        let Some(end) = ends.get(index) else { return false };
+        let sent = end.try_send(packet);
+        if let Err(mpsc::error::TrySendError::Full(_)) = sent {
+            self.dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        sent.is_ok()
     }
 
     /// The packets in tunnel `index`'s channel that the relay has not taken yet.
@@ -349,5 +364,9 @@ impl Forwarder for TestForwarder {
 
     fn send(&self, packet: &[u8]) {
         self.sent.lock().unwrap().push(packet.to_vec());
+    }
+
+    fn dropped(&self) -> u64 {
+        self.dropped.load(std::sync::atomic::Ordering::Relaxed)
     }
 }

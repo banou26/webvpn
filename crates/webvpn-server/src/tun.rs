@@ -8,6 +8,7 @@ use std::net::Ipv4Addr;
 use std::ops::RangeInclusive;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 
@@ -141,6 +142,7 @@ struct Shared {
     mtu: u16,
     ports: Option<PortBlocks>,
     tunnels: Mutex<Tunnels>,
+    dropped: AtomicU64,
 }
 
 struct Tunnels {
@@ -225,7 +227,7 @@ impl TunForwarder {
             ));
         }
         let tunnels = Mutex::new(Tunnels { walk: Walk::new(ipv4), ends: HashMap::new(), failed: false });
-        let shared = Arc::new(Shared { device: fd, mtu, ports, tunnels });
+        let shared = Arc::new(Shared { device: fd, mtu, ports, tunnels, dropped: AtomicU64::new(0) });
         let weak = Arc::downgrade(&shared);
         thread::Builder::new().name("tun-reader".into()).spawn(move || read(weak))?;
         Ok(Self { shared })
@@ -263,6 +265,10 @@ impl Forwarder for TunForwarder {
         // SAFETY: the device is open and non-blocking, and `packet` is valid for its length.
         unsafe { libc::write(self.shared.device.as_raw_fd(), packet.as_ptr().cast(), packet.len()) };
     }
+
+    fn dropped(&self) -> u64 {
+        self.shared.dropped.load(Ordering::Relaxed)
+    }
 }
 
 /// Reads the device until the forwarder is dropped, handing each packet to the tunnel that holds its destination.
@@ -296,7 +302,9 @@ fn read(shared: Weak<Shared>) {
             }
             let destination = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
             if let Some(end) = shared.tunnels.lock().unwrap().ends.get(&destination) {
-                let _ = end.try_send(packet.to_vec());
+                if let Err(mpsc::error::TrySendError::Full(_)) = end.try_send(packet.to_vec()) {
+                    shared.dropped.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
     }

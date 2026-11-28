@@ -124,10 +124,11 @@ impl Metrics {
         self.0[counter as usize].load(Ordering::Relaxed)
     }
 
-    /// Every counter in the Prometheus text format, with `sessions` as the gauge of open sessions. The series keep
-    /// the names an earlier relay served them under, and no label says anything about a client, an address or a
-    /// destination.
-    pub fn render(&self, sessions: usize) -> String {
+    /// Every counter in the Prometheus text format, with `sessions` as the gauge of open sessions and
+    /// `forwarder_full` as the packets the forwarder dropped ([`Forwarder::dropped`](crate::Forwarder::dropped)). The
+    /// series keep the names an earlier relay served them under, and no label says anything about a client, an
+    /// address or a destination.
+    pub fn render(&self, sessions: usize, forwarder_full: u64) -> String {
         use Counter::*;
         let get = |counter| self.get(counter);
         let mut out = String::new();
@@ -259,6 +260,7 @@ impl Metrics {
                 (r#"{reason="refused"}"#, get(IpDroppedRefused)),
                 (r#"{reason="rate"}"#, get(IpDroppedRate)),
                 (r#"{reason="queue_full"}"#, get(IpDroppedQueueFull)),
+                (r#"{reason="forwarder_full"}"#, forwarder_full),
                 (r#"{reason="down_invalid"}"#, get(IpDroppedDownInvalid)),
                 (r#"{reason="down_destination"}"#, get(IpDroppedDownDestination)),
                 (r#"{reason="unasked"}"#, get(IpDroppedUnasked)),

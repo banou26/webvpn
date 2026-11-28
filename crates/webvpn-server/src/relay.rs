@@ -121,6 +121,12 @@ impl Shared {
         })
     }
 
+    /// The relay's counters as [`Relay::render_metrics`] serves them.
+    pub fn render_metrics(&self, sessions: usize) -> String {
+        let forwarder_full = self.config.forwarder.as_ref().map_or(0, |forwarder| forwarder.dropped());
+        self.metrics.render(sessions, forwarder_full)
+    }
+
     /// The feature bits of the relay's hello.
     pub fn features(&self, auth: Auth) -> u32 {
         let mut bits = 0;
@@ -219,7 +225,7 @@ impl<P: Policy> Relay<P> {
     /// The relay's counters in the Prometheus text format, with [`sessions`](Self::sessions) as the open sessions
     /// gauge. See [`Metrics::render`].
     pub fn render_metrics(&self) -> String {
-        self.metrics().render(self.sessions())
+        self.0.shared.render_metrics(self.sessions())
     }
 
     /// Runs one client's session on `transport` until it ends, on any carrier. `carrier` says how the session's UDP

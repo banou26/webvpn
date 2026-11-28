@@ -40,6 +40,13 @@ pub trait Forwarder: Send + Sync + 'static {
     fn public_ports(&self) -> Option<RangeInclusive<u16>> {
         None
     }
+
+    /// The packets toward tunnels it dropped since it was made because a tunnel's channel had no room for them, which
+    /// the relay serves as `webvpn_ip_dropped_total{reason="forwarder_full"}`. 0 for a forwarder that does not count
+    /// them.
+    fn dropped(&self) -> u64 {
+        0
+    }
 }
 
 /// Refuses to bind a UDP socket or a listener on one of the ports `forwarder` sends to tunnels.
@@ -72,7 +79,8 @@ pub struct TunnelEnd {
     pub first_port: u16,
     pub ports: u16,
     /// The packets that arrive for those addresses, each one whole packet of at most the `mtu`. The forwarder sends
-    /// with `try_send` and drops a packet the channel has no room for, so a slow client never holds it.
+    /// with `try_send` and drops a packet the channel has no room for, so a slow client never holds it, and counts it
+    /// in [`Forwarder::dropped`].
     pub packets: mpsc::Receiver<Vec<u8>>,
 }
 
@@ -828,6 +836,26 @@ mod tests {
         // and only that packet is metered and counted yet
         eventually(|| harness.policy.metered()[1] == 1400).await;
         assert_eq!(harness.count(Counter::BytesDown), 1400);
+    }
+
+    #[tokio::test]
+    async fn a_packet_the_forwarder_s_channel_has_no_room_for_is_counted_so_every_packet_is_accounted_for() {
+        let mut harness = tunnelling(1).await;
+        let mut tunnel = harness.open(1, 0).await;
+        tunnel.send(&udp_from(0)).await;
+        harness.forwarder.sent(1).await;
+        // all handed over before the tunnel's task runs again, more than its channel holds
+        const SENT: u16 = 1100;
+        let taken = (0..SENT).filter(|&index| harness.forwarder.deliver(0, toward_client(0, index, 100))).count();
+        let full = u64::from(SENT) - taken as u64;
+        assert!(full > 0);
+        let line = format!(r#"webvpn_ip_dropped_total{{reason="forwarder_full"}} {full}"#);
+        let rendered = harness.relay.render_metrics(1);
+        assert!(rendered.lines().any(|rendered| rendered == line), "{line:?} is not in\n{rendered}");
+        let reading = tokio::spawn(async move { tokio::io::copy(&mut tunnel.recv, &mut tokio::io::sink()).await });
+        let accounted = || [Counter::IpPacketsDown, Counter::IpDroppedQueueFull].map(|of| harness.count(of));
+        eventually(|| accounted().iter().sum::<u64>() + full == u64::from(SENT)).await;
+        reading.abort();
     }
 
     #[tokio::test]
