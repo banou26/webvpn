@@ -253,7 +253,8 @@ between them: there is no gateway address to learn, and a client whose stack wan
   is reached only by answers.
 - **Flows.** A relay bounds the flows one tunnel holds, and forgets a flow that stays silent: after no less than two
   minutes, and for an open TCP connection after no less than two hours. A program that needs a quiet flow kept
-  sends on it more often than that.
+  sends on it more often than that. A new flow that finds the bound reached pushes out first the flows only their
+  peers sent on, then the ones nearest the end of their life.
 - **Loss.** A tunnel is a link that may drop. Each side holds a short queue for the stream and drops the newest
   packet once the queue is full, so neither side waits on the other and what flows through a tunnel paces itself, as
   on any link. Nothing is sent again and nothing is reordered.

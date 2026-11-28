@@ -16,7 +16,7 @@
 #   WEBVPN_IP_MTU      the device's MTU, at least 1280. Default: 1500
 #   WEBVPN_IP_FLOWS_PER_ADDRESS
 #                      the connections the kernel tracks for one tunnel address, past which a new one is dropped.
-#                      Default: 4096. The relay keeps at most 3584 flows a tunnel and forgets the oldest past that, so
+#                      Default: 4096. The relay keeps at most 3584 flows a tunnel and forgets flows past that, so
 #                      an answer on a forgotten flow never reaches the client anyway: the default sits a little above,
 #                      so that the relay's own bound acts first and this one only keeps the kernel's table bounded.
 #   WEBVPN_IP_PORTS    the tunnels' public ports, as the relay is given them: a range written first-last, such as
