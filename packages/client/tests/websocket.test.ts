@@ -261,7 +261,7 @@ describe('an IP tunnel over the WebSocket mux', () => {
     expect(socket.frames(MuxKind.DATA, 5).map(({ payload }) => payload)).toEqual([encodeIpFrame(Uint8Array.of(0x60, 3))])
   })
 
-  it('drops the newest packets once 1 MiB waits for the relay, with what the WebSocket holds unsent', async () => {
+  it('drops the newest packets once 256 KiB wait for the relay, with what the WebSocket holds unsent', async () => {
     const socket = new FakeSocket()
     // a WebSocket whose buffer never drains
     const send = socket.send.bind(socket)
@@ -272,13 +272,13 @@ describe('an IP tunnel over the WebSocket mux', () => {
     const { tunnel } = await tunnelled(socket)
     socket.bufferedAmount = 0
     let taken = 0
-    for (let at = 0; at < 800; at++) {
+    for (let at = 0; at < 200; at++) {
       if (tunnel.send(new Uint8Array(1400))) taken++
       // the write resolves once the WebSocket took its frame
       await settle()
     }
-    // 1407 bytes a frame with the mux's header, 745 of them in 1 MiB
-    expect(taken).toBe(745)
+    // 1407 bytes a frame with the mux's header, 186 of them in 256 KiB
+    expect(taken).toBe(186)
   })
 
   it('drops every packet while a socket of the session uploads', async () => {

@@ -894,18 +894,18 @@ describe('an IP tunnel', () => {
     await vi.waitFor(() => expect(stream.received()).toEqual(encodeIpFrame(packet(7))))
   })
 
-  it('drops the newest packets once 1 MiB waits for the stream, and sends the earlier ones in order', async () => {
+  it('drops the newest packets once 256 KiB wait for the stream, and sends the earlier ones in order', async () => {
     const { relay, session } = await opened(Feature.IP)
     const { tunnel, stream } = await tunnelled(relay, session)
     const resume = stream.holdWrites()
     const taken: Uint8Array[] = []
-    for (let at = 0; at < 800; at++) {
+    for (let at = 0; at < 200; at++) {
       const sent = packet(1400, at)
       if (tunnel.send(sent)) taken.push(sent)
     }
-    // 1402 bytes a frame, 747 of them in 1 MiB
-    expect(taken).toHaveLength(747)
-    expect(taken.at(-1)![0]).toBe(746 & 0xff)
+    // 1402 bytes a frame, 186 of them in 256 KiB
+    expect(taken).toHaveLength(186)
+    expect(taken.at(-1)![0]).toBe(185)
     resume()
     await vi.waitFor(() => expect(stream.received()).toEqual(framed(taken)))
     expect(tunnel.send(packet(1400, 99))).toBe(true)

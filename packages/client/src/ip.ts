@@ -5,10 +5,12 @@ import { formatIp } from './address'
 import { framed, noop, ok, unexpected, WebVpnError } from './context'
 import { decodeIpFrame, encodeIpFrame, ErrorCode, MIN_MTU } from './protocol'
 
-// a stack sends what its sockets' windows allow in one turn of the event loop, before the carrier takes any of it, so
-// the queue holds the windows of several busy sockets: at 64 KiB it dropped 2 to 9% of an upload's packets with a
-// 512 KiB send buffer. Those windows, not this queue, bound how long a slow link makes the tunnel's packets wait.
-const QUEUE_BYTES = 1024 * 1024
+// A socket of the stack sends what its window allows in one turn of the event loop, before the carrier takes any of
+// it, so the queue holds two default send buffers of 128 KiB: at 64 KiB one socket's burst did not fit. Once several
+// sockets send, this queue and not their windows bounds how long every packet of the tunnel waits on a slow link: its
+// size at the link's rate, 0.2 s at 10 Mbit/s and 2 s at 1 Mbit/s. At 1 MiB that was 8 s at 1 Mbit/s, past the 5 s
+// the stack gives a lookup.
+const QUEUE_BYTES = 256 * 1024
 
 const STREAM_MS = 30_000
 
@@ -164,7 +166,7 @@ export const ipTunnel = async (context: Context, reply: RelayPacket): Promise<Ip
     if (done || !packet.byteLength || packet.byteLength > mtu) return false
     const frame = encodeIpFrame(packet)
     // a frame leaves `queued` once the carrier took it, and the WebSocket mux takes up to 1 MiB it did not send yet,
-    // so that counts too. It holds what the session's other sockets send as well: while their uploads keep it past
+    // so that counts too. It holds what the session's other sockets send as well: while their uploads keep it near
     // 1 MiB, the tunnel drops every packet. Counting only the tunnel's own bytes there would take much more code,
     // and a page that sends only through the tunnel has no such uploads.
     if (queued + (context.carrier.buffered?.() ?? 0) + frame.byteLength > QUEUE_BYTES) return false
