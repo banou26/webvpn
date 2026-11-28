@@ -51,7 +51,7 @@ Each carrier re-exports the crate its types come from, at the version `webvpn-se
 | `max_pending_sessions` | `256` | Sessions in setup at once, from the client's arrival to its hello. A client that arrives while that many are in setup is turned away at once. |
 | `setup_timeout` | 15 seconds | How long a session's setup may take. A session past it is closed with `PROTOCOL_ERROR`. |
 | `forwarder` | `None` | Where [IP tunnels](#ip-tunnels) send their packets. `None` turns tunnels off. |
-| `max_tunnels_per_session` | `1` | IP tunnels one session may hold at once, each also one of its sockets. |
+| `max_tunnels_per_session` | `1` | IP tunnels one session may hold at once, each also one of its sockets. A closed tunnel counts until its `IpClose` is answered `Ok`, so a client opens the next one after the `Ok`. |
 | `max_tunnel_packets_per_second` | `Some(20000)` | The packets one IP tunnel takes from its client each second. `None` lifts the ceiling. |
 
 ### The carriers

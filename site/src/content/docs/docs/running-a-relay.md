@@ -155,7 +155,7 @@ They come in two halves:
 | `WEBVPN_IP_DEVICE` | none | The TUN device's name. Unset, the relay carries no tunnels. |
 | `WEBVPN_IP_POOL` | none | The device's IPv4 network, such as `198.18.0.0/28`, with a prefix length of 8 to 30. Required with the device, refused without it. The device holds the first host address, and each tunnel is given one of the others. |
 | `WEBVPN_MAX_TUNNEL_PACKETS_PER_SECOND` | `20000` | The packets one tunnel takes from its client each second, past which they are dropped. `0` lifts the ceiling. |
-| `WEBVPN_MAX_TUNNELS_PER_SESSION` | `1` | The tunnels one session holds at once, at least 1, past which one more is refused with `CAPACITY`. A page's network stack or a virtual machine needs one. |
+| `WEBVPN_MAX_TUNNELS_PER_SESSION` | `1` | The tunnels one session holds at once, at least 1, past which one more is refused with `CAPACITY`. A page's network stack or a virtual machine needs one. A closed tunnel counts until its `IpClose` is answered `Ok`, so a client opens the next one after the `Ok`. |
 | `WEBVPN_IP_PORTS` | none | The tunnels' [public ports](#public-ports), a range written `first-last`, such as `20000-29999`. Unset, tunnels have none. |
 | `WEBVPN_IP_PORTS_PER_TUNNEL` | `8` | How many public ports each tunnel address holds. |
 
