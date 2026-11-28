@@ -254,8 +254,9 @@ ends it as after `TcpClose`: over WebTransport with a reset of code 0, over the 
   then names the relay's public address, as others dial it (`public ipv4`, `public ipv6`, all zero bytes for a
   family it has none of), and `ports` ports from `first port` on. A TCP or UDP packet that anyone sends to that
   address on one of those ports reaches the tunnel's own address on the same port, and begins a flow as a packet
-  from the client does. The ports are the tunnel's for as long as it lives. A tunnel with `ports` 0 has none and
-  is reached only by answers.
+  from the client does. A client of the same relay does not reach them: its `TcpConnect` or `UdpConnect` there is
+  answered `REFUSED`, and its datagram or its tunnel's packet there is dropped. The ports are the tunnel's for as
+  long as it lives. A tunnel with `ports` 0 has none and is reached only by answers.
 - **Flows.** A relay bounds the flows one tunnel holds, and forgets a flow that stays silent: after no less than two
   minutes, and for an open TCP connection after no less than two hours. A program that needs a quiet flow kept
   sends on it more often than that. A new flow that finds the bound reached pushes out first the flows only their

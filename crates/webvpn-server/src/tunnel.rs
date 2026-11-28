@@ -628,6 +628,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_client_of_the_same_relay_does_not_reach_a_tunnel_s_public_port() {
+        let mut harness = with_ports(Config::default()).await;
+        let tunnel = harness.open(1, 0).await;
+        assert_eq!(tunnel.public, (Some(OWN), PUBLIC_PORTS, 4));
+        let remote = SocketAddr::from((OWN, PUBLIC_PORTS));
+        assert_eq!(code(&harness.ask(ClientPacket::TcpConnect { id: 2, remote }).await), (2, ErrorCode::REFUSED));
+        let bind = ClientPacket::UdpBind { id: 3, local: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)) };
+        let RelayPacket::Socket { socket, .. } = harness.ask(bind).await else { panic!("the socket is bound") };
+        let connect = ClientPacket::UdpConnect { id: 4, socket, remote };
+        assert_eq!(code(&harness.ask(connect).await), (4, ErrorCode::REFUSED));
+    }
+
+    #[tokio::test]
     async fn a_tunnel_whose_ports_the_policy_refuses_to_bind_has_none_and_takes_only_answers() {
         let mut harness = with_ports(Config::default()).await;
         let given = harness.open(1, 0).await;
