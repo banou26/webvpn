@@ -967,6 +967,33 @@ mod tests {
         assert_eq!((two.policy.held(), two.forwarder.held()), (2, 2));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_client_that_opens_and_closes_tunnels_without_reading_holds_one_tunnel_s_addresses_at_most() {
+        // A tunnel asked to close still holds its addresses until its task ends, and the task may first wait on the
+        // client, here on a control stream nobody reads. So the ceiling counts it until then.
+        const PAIRS: u32 = 3000;
+        let forwarder = TestForwarder::new(MTU, PAIRS as usize);
+        let mut harness = start(Config::default(), Some(forwarder), Auth::None, false).await;
+        let sent = Duration::from_millis(300);
+        let mut most = 0;
+        for pair in 0..PAIRS {
+            let open = harness.control.send(ClientPacket::IpOpen { id: 2 * pair });
+            if timeout(sent, open).await.is_err() {
+                break;
+            }
+            let close = harness.control.send(ClientPacket::IpClose { id: 2 * pair + 1, socket: pair });
+            if timeout(sent, close).await.is_err() {
+                break;
+            }
+            most = most.max(harness.forwarder.held());
+        }
+        for _ in 0..500 {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            most = most.max(harness.forwarder.held());
+        }
+        assert!(most <= 1, "one session held the addresses of {most} tunnels at once");
+    }
+
     #[tokio::test]
     async fn only_an_answer_to_a_flow_the_tunnel_sent_reaches_its_client_and_is_metered() {
         let mut harness = tunnelling(1).await;

@@ -271,7 +271,7 @@ impl TestForwarder {
     }
 
     pub(crate) fn addresses(index: usize) -> (Ipv4Addr, Ipv6Addr) {
-        let host = 2 + index as u8;
+        let host = (2 + index) as u8;
         (Ipv4Addr::new(198, 18, 0, host), Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, host.into()))
     }
 
