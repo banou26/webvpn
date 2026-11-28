@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::ops::RangeInclusive;
 
-use smoltcp::iface::{Config as InterfaceConfig, Interface, SocketHandle, SocketSet};
+use smoltcp::iface::{Config as InterfaceConfig, Interface, PollIngressSingleResult, SocketHandle, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::{tcp, udp};
 use smoltcp::time::{Duration, Instant};
@@ -111,6 +111,7 @@ impl Device for Link {
         Some((Received(packet), Sending(&mut self.outgoing)))
     }
 
+    // never full, so that a SYN-ACK always leaves before the next packet is taken, as `Stack::poll` needs
     fn transmit(&mut self, _: Instant) -> Option<Sending<'_>> {
         Some(Sending(&mut self.outgoing))
     }
@@ -376,12 +377,19 @@ impl Stack {
         self.link.outgoing.pop_front()
     }
 
-    /// Runs the stack at `now_ms`: takes the packets `input` held, sends what is due, ends what timed out, and notes
-    /// each socket that changed for `events`. Returns how many milliseconds may pass before the next poll, `None`
-    /// when nothing but a packet or a socket call needs one.
+    /// Runs the stack at `now_ms`: takes the packets `input` held one at a time, each followed by what it made the
+    /// sockets send, sends what is due, ends what timed out, and notes each socket that changed for `events`.
+    /// Returns how many milliseconds may pass before the next poll, `None` when nothing but a packet or a socket call
+    /// needs one.
     pub fn poll(&mut self, now_ms: i64) -> Option<u64> {
         self.now = Instant::from_millis(now_ms);
-        self.interface.poll(self.now, &mut self.link, &mut self.sockets);
+        let (now, link, sockets) = (self.now, &mut self.link, &mut self.sockets);
+        // one packet in, then what answers it out, before the next one comes in: a socket never takes a packet while
+        // its answer to the one before still waits to leave
+        while self.interface.poll_ingress_single(now, link, sockets) != PollIngressSingleResult::None {
+            self.interface.poll_egress(now, link, sockets);
+        }
+        self.interface.poll(now, link, sockets);
         self.maintain();
         // sends the resets of what `maintain` ended
         self.interface.poll(self.now, &mut self.link, &mut self.sockets);
