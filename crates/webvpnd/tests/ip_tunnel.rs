@@ -639,6 +639,8 @@ async fn tunnels_reach_a_real_network_and_take_only_answers() {
         "ok 18: no packet reached the peer with an address of the pool as its source, nor a TCP RST that starts no \
          connection"
     );
+    // the TUN forwarder's own count is served, and no burst of these checks filled a tunnel's channel
+    assert_eq!(dropped("forwarder_full").await, 0);
 
     // the last check, since the device is gone after it
     let deleted = Command::new("ip").args(["link", "delete", "dev", "webvpn0"]).status();
