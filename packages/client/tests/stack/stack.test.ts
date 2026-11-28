@@ -205,6 +205,15 @@ describe('TCP over a tunnel', () => {
     expect(await outcome(writer.write(bytes('late')))).toMatchObject({ code: ErrorCode.CONNECTION_RESET })
   })
 
+  it('a reset from the peer fails a write that waits for room with CONNECTION_RESET, with nobody reading', async () => {
+    const { client, site } = await internet({ client: { tcpSendBuffer: 16 * 1024 } })
+    const { socket, peer } = await connect(client, site)
+    const write = outcome(socket.writable.getWriter().write(pattern(1024 * 1024)))
+    await wait(200)
+    await peer.reset()
+    expect(await write).toMatchObject({ code: ErrorCode.CONNECTION_RESET })
+  })
+
   it('a peer silent through keep-alive\'s probes errors the reader and the next write with TIMED_OUT', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
     try {
