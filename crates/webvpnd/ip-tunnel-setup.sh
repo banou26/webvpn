@@ -92,7 +92,7 @@ EOF
 	[ $(((addresses + holders) * flows)) -le $((max / 2)) ] ||
 		fail "the pool's $addresses tunnel addresses, plus the $holders that hold public ports, times \
 WEBVPN_IP_FLOWS_PER_ADDRESS, $flows, is more than half of the node's nf_conntrack_max, $max: take a smaller pool, \
-a lower ceiling or fewer public ports, or raise nf_conntrack_max"
+a lower ceiling or no public ports, or raise nf_conntrack_max"
 
 	ip link show dev "$device" >/dev/null 2>&1 || ip tuntap add dev "$device" mode tun user "$user"
 	ip address replace "$address/$prefix" dev "$device"

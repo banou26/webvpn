@@ -159,6 +159,13 @@ grep -q "half of the node's nf_conntrack_max" "$work/refused" || { cat "$work/re
 	{ echo "the refused setup left something" >&2; exit 1; }
 echo "ok: a pool whose ceilings pass half of the connection table is refused"
 
+# The refusal names what helps: every tunnel address holds a block, so fewer public ports change nothing, and with none
+# the same pool and ceiling are taken. No relay runs yet, so down is safe.
+grep -q "or no public ports" "$work/refused" || { cat "$work/refused" >&2; exit 1; }
+WEBVPN_IP_POOL=13.0.0.0/29 WEBVPN_IP_USER=1 WEBVPN_IP_FLOWS_PER_ADDRESS=$((max / 10)) sh "$setup" up
+sh "$setup" down
+echo "ok: the same pool and ceiling with no public ports are taken"
+
 # An up with another pool first: the next up takes its address away, so the relay below reads the test's pool.
 WEBVPN_IP_POOL=13.0.0.0/28 WEBVPN_IP_USER=1 sh "$setup" up
 
