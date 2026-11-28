@@ -141,7 +141,7 @@ What differs from a session's sockets:
 - A socket's buffers are fixed when it is made: 128 KiB to receive and 64 KiB to send, by default. The receive buffer is the most a connection's window offers, so a connection carries about 10 Mbit/s at a 100 ms round trip. `options.tcpReceiveBuffer`, `tcpSendBuffer`, `udpReceiveBuffer` and `udpSendBuffer` change them for the sockets made after, and the `sendBufferSize` and `recvBufferSize` options reject with `UNSUPPORTED`, as do UDP's broadcast and multicast options.
 - A UDP datagram must fit the tunnel's `mtu` with its headers, since the stack does not fragment. A larger one fails its write.
 
-The stack reads the tunnel and sends on it from then on, so nothing else may. `stack.close()` closes the tunnel. When the tunnel ends, every socket on it ends as a session's sockets do when the session ends, and `stack.closed` resolves with who stopped the tunnel.
+The stack reads the tunnel and sends on it from then on, so nothing else may. `stack.close()` closes the tunnel. When the tunnel ends, every socket on it ends as a session's sockets do when the session ends, and `stack.closed` resolves with who stopped the tunnel. If the stack itself fails, for example when the page runs out of memory for its sockets, it closes the tunnel, and `stack.closed` resolves with `{ by: 'client' }`, as after `stack.close()`. The sockets then end as when the tunnel ends, and their errors have the code `OTHER` and the message 'the stack failed'.
 
 ## When the session ends
 

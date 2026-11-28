@@ -55,7 +55,10 @@ export type StackOptions = {
  *
  * The stack owns the tunnel: it reads every packet from `tunnel.readable` and sends with `tunnel.send`, whose dropped
  * packets its TCP treats as loss on the path. When the tunnel ends, whoever ended it, every socket ends as a
- * session's sockets do when the session ends, and `closed` resolves with the tunnel's `ClosedBy`.
+ * session's sockets do when the session ends, and `closed` resolves with the tunnel's `ClosedBy`. If the stack itself
+ * fails (its WebAssembly module traps, for example when its memory cannot grow), it closes the tunnel: `closed`
+ * resolves with `{ by: 'client' }` as after `close()`, and the sockets end as at a tunnel end, their errors with
+ * `OTHER` and 'the stack failed'.
  */
 export type Stack = Pick<Session, 'tcpConnect' | 'tcpListen' | 'udpBind' | 'lookup'> & {
   /** Resolves once the tunnel stopped, with who stopped it. Never rejects. */
