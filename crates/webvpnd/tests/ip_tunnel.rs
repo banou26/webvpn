@@ -4,10 +4,11 @@
 //! The network: the relay's host routes the pool 13.0.0.0/29 to its TUN device, under `ip-tunnel-setup.sh`, and
 //! reaches "the internet" at 11.0.0.0/24 by a veth pair, its default route, and at 12.0.0.0/24 by a second one. The
 //! peer, at 11.0.0.2 and 12.0.0.2, answers ICMP echoes, writes what reaches UDP port 7002 to a file, accepts TCP on
-//! port 7003, and has nothing on UDP port 7004. It is reached at the private address 10.0.0.2 too, and counts what
-//! reaches it with an address of the pool as its source. The setup keeps at most 8 connections that one tunnel address
-//! opens, and apart from those, 8 to its public ports. The relay's public address is 11.0.0.1, and its public ports
-//! are 30000 to 30031 in blocks of 8: 13.0.0.2 holds 30000 to 30007, up to 13.0.0.5, and 13.0.0.6 holds none.
+//! port 7003 and keeps each connection open, and has nothing on UDP port 7004. It is reached at the private address
+//! 10.0.0.2 too, and counts what reaches it with an address of the pool as its source. The setup keeps at most 8
+//! connections that one tunnel address opens, and apart from those, 8 to its public ports. The relay's public address
+//! is 11.0.0.1, and its public ports are 30000 to 30031 in blocks of 8: 13.0.0.2 holds 30000 to 30007, up to
+//! 13.0.0.5, and 13.0.0.6 holds none.
 //!
 //! This test is the peer's UDP port 7001 itself, from a socket it makes in the peer's namespace, and answers each
 //! datagram there with the source address it came from. socat's forking responder left a datagram that closely
@@ -48,6 +49,8 @@ const PRIVATE: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
 /// The connections the setup keeps that one tunnel address opens, and apart from those, to its public ports, from
 /// `WEBVPN_IP_FLOWS_PER_ADDRESS` in tests/ip-tunnel.sh.
 const FLOWS_PER_ADDRESS: u16 = 8;
+/// The relay's life of a quiet open TCP flow, in seconds, after which the setup has the kernel forget it too.
+const TCP_OPEN_LIFE: u32 = 7440;
 /// The TUN device's own address, the pool's first host.
 const DEVICE: Ipv4Addr = Ipv4Addr::new(13, 0, 0, 1);
 const POOL: [Ipv4Addr; 5] = [
@@ -95,6 +98,28 @@ async fn dropped(reason: &str) -> u64 {
     let metrics = http("/metrics").await;
     let count = metrics.lines().find_map(|text| text.strip_prefix(line.as_str()));
     count.unwrap_or_else(|| panic!("no {line:?} in the metrics")).parse().unwrap()
+}
+
+/// The seconds the host's connection tracking still keeps the established TCP connection that `selected` names, in
+/// options of `conntrack -L`. Waits until it is established.
+async fn established_life(selected: &[&str]) -> u32 {
+    within(async {
+        loop {
+            let listed = Command::new("conntrack")
+                .args(["-L", "-p", "tcp"])
+                .args(selected)
+                .stderr(Stdio::null())
+                .output()
+                .await
+                .unwrap();
+            let text = String::from_utf8_lossy(&listed.stdout);
+            if let Some(line) = text.lines().find(|line| line.contains(" ESTABLISHED ")) {
+                return line.split_whitespace().nth(2).unwrap().parse().unwrap();
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
 }
 
 /// Runs `script` with `sh` in the peer's network namespace.
@@ -467,8 +492,12 @@ async fn tunnels_reach_a_real_network_and_take_only_answers() {
         .expect("SYN and ACK", |p| from_peer(p, TCP) && p.ports() == (TCP_LISTENER, 40003) && p.payload[13] == 0x12)
         .await;
     assert_eq!(syn_ack.payload[8..12], 1001u32.to_be_bytes(), "the SYN is acknowledged");
+    let theirs = u32::from_be_bytes(syn_ack.payload[4..8].try_into().unwrap());
+    first.send(&whole(me, PEER, TCP, &tcp_acking((me, 40003), (PEER, TCP_LISTENER), (1001, theirs + 1), 0x10))).await;
+    let life = established_life(&["--orig-src", &me.to_string(), "--sport", "40003"]).await;
+    assert!(life <= TCP_OPEN_LIFE, "the host keeps the quiet open connection {life} s");
     first.send(&whole(me, PEER, TCP, &tcp((me, 40003), (PEER, TCP_LISTENER), 1001, 0x04))).await;
-    println!("ok 3: a TCP SYN gets a SYN and ACK");
+    println!("ok 3: a TCP SYN gets a SYN and ACK, and the host keeps the open connection no longer than the relay");
 
     let expiring = ipv4(me, PEER, UDP, 1, (0x4343, 0, false), &udp((me, 40004), (PEER, UDP_WHO), b"ttl"));
     first.send(&expiring).await;
@@ -644,7 +673,12 @@ async fn public_ports(session: &mut Session) {
     assert_eq!(stream.peer_addr().unwrap(), SocketAddr::from((OUTSIDE, 30009)));
     one.expect("the peer's ACK", |p| from_peer(p, TCP) && p.ports() == (port, 30009) && p.payload[13] & 0x10 != 0)
         .await;
-    println!("ok 13: a TCP SYN to a tunnel's public port reaches it on the same port, and its SYN and ACK the peer");
+    let life = established_life(&["--reply-src", &me.to_string(), "--reply-port-src", "30009"]).await;
+    assert!(life <= TCP_OPEN_LIFE, "the host keeps the quiet open connection to a public port {life} s");
+    println!(
+        "ok 13: a TCP SYN to a tunnel's public port reaches it on the same port, its SYN and ACK the peer, and the \
+         host keeps the open connection no longer than the relay"
+    );
 
     let peer = peer_socket(0);
     within(peer.send_to(b"in", (OUTSIDE, 30010))).await.unwrap();

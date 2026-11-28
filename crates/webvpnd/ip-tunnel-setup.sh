@@ -31,8 +31,9 @@
 #   WEBVPN_IP_PORTS_PER_TUNNEL
 #                      the size of a block, as the relay is given it. Default: 8
 #
-# up loads one nftables table of its own, named after the device. It does not assume it is the only firewall on the
-# host: another table that drops forwarded packets still drops the tunnels' packets, and has to let them through.
+# up loads one nftables table of its own, named after the device, which needs a kernel with connection tracking timeout
+# policies (CONFIG_NF_CONNTRACK_TIMEOUT). It does not assume it is the only firewall on the host: another table that
+# drops forwarded packets still drops the tunnels' packets, and has to let them through.
 
 set -eu
 
@@ -68,6 +69,11 @@ up() {
 	ip link set dev "$device" mtu "$mtu" up
 	# only when it is off: where it is on already, the step then needs no more than the right to change the network
 	[ "$(cat /proc/sys/net/ipv4/ip_forward)" = 1 ] || echo 1 >/proc/sys/net/ipv4/ip_forward
+	# without connection tracking timeout policies the kernel refuses the whole table, and nft would not say why
+	nft -f - <<EOF || fail "the kernel has no connection tracking timeout policies (CONFIG_NF_CONNTRACK_TIMEOUT)"
+table inet ${table}_probe { ct timeout probe { protocol tcp; l3proto ip; }; }
+delete table inet ${table}_probe
+EOF
 
 	# The reserved destinations are the relay's own egress rule (crates/webvpn-server/src/egress.rs), held again here
 	# so that a relay set to reach them still does not reach them through a tunnel.
@@ -91,6 +97,15 @@ table inet $table {
 		flags dynamic
 	}
 
+	# as long as the relay keeps a quiet open TCP flow (TCP_OPEN_LIFE in crates/webvpn-server/src/flow.rs), where the
+	# node's default is 5 days: a closed tunnel's connections count toward the ceilings of the next tunnel at its
+	# address. The other states keep the node's timeouts.
+	ct timeout tunnel {
+		protocol tcp
+		l3proto ip
+		policy = { established: 7440 }
+	}
+
 $public_map
 	chain forward {
 		type filter hook forward priority filter; policy accept;
@@ -102,7 +117,8 @@ $public_map
 		# the masquerade below translates no packet connection tracking calls invalid: it would leave with the pool's
 		# address as its source
 		iifname "$device" ct state invalid drop
-		iifname "$device" accept
+		# the kernel takes a connection's timeout policy from its first packet only
+		iifname "$device" ct timeout set "tunnel" accept
 		oifname "$device" ct state established,related accept
 $public_forward
 		oifname "$device" drop
@@ -179,7 +195,7 @@ public_ports() {
 	# a count of their own: anyone can open these, and in the tunnel's count they would stop its own connections
 	public_forward="
 		oifname \"$device\" ct status dnat ct state new add @inbound { ip daddr ct count over $flows } drop
-		oifname \"$device\" ct status dnat ct state new accept"
+		oifname \"$device\" ct status dnat ct state new ct timeout set \"tunnel\" accept"
 	public_prerouting="	chain prerouting {
 		type nat hook prerouting priority dstnat; policy accept;
 		iifname != \"$device\" fib daddr type local ip protocol { tcp, udp } dnat ip to th dport map @public

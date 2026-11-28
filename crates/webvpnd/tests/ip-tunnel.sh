@@ -5,14 +5,14 @@
 # however it ends, the namespaces and every process in them go, and its files under target/ are removed.
 #
 # Needs: unshare (with entries in /etc/subuid and /etc/subgid for the calling user, so the namespace has a user other
-# than root to run the relay as), nsenter, setpriv, ip, nft and socat, and a kernel with nftables, connection tracking
-# and NAT. From the repository's root:
+# than root to run the relay as), nsenter, setpriv, ip, nft, socat and conntrack, and a kernel with nftables, connection
+# tracking, its timeout policies, and NAT. From the repository's root:
 #
 #   sh crates/webvpnd/tests/ip-tunnel.sh
 #
-# When a check fails, the script prints the relay's counters, the connections the kernel tracks (with conntrack, when
-# it is installed), the rules with their counters, the neighbours and the peer's sockets. With WEBVPN_TEST_CAPTURE set
-# to a directory, it also captures, with tcpdump, every interface the tunnels' packets cross, into one file each there:
+# When a check fails, the script prints the relay's counters, the connections the kernel tracks, the rules with their
+# counters, the neighbours and the peer's sockets. With WEBVPN_TEST_CAPTURE set to a directory, it also captures, with
+# tcpdump, every interface the tunnels' packets cross, into one file each there:
 #
 #   WEBVPN_TEST_CAPTURE=target/ip-tunnel-capture sh crates/webvpnd/tests/ip-tunnel.sh
 
@@ -23,7 +23,7 @@ work=$root/target/ip-tunnel-test
 setup=$root/crates/webvpnd/ip-tunnel-setup.sh
 
 if [ "${WEBVPN_TEST_INSIDE:-}" != 1 ]; then
-	for tool in unshare nsenter setpriv ip nft socat; do
+	for tool in unshare nsenter setpriv ip nft socat conntrack; do
 		command -v "$tool" >/dev/null || { echo "ip-tunnel.sh needs $tool" >&2; exit 1; }
 	done
 	cd "$root"
@@ -119,7 +119,7 @@ on_peer nft add rule ip peer from_pool ip saddr 13.0.0.0/29 counter
 
 : >"$work/sink"
 on_peer socat -u UDP-RECV:7002 OPEN:"$work/sink",append 2>/dev/null &
-on_peer socat TCP-LISTEN:7003,fork,reuseaddr SYSTEM:true 2>/dev/null &
+on_peer socat TCP-LISTEN:7003,fork,reuseaddr PIPE 2>/dev/null &
 
 # The relay runs as user 1 of the namespace, which owns the device. Its binary is copied to a directory that user
 # can read, on a file system of this namespace only.
