@@ -23,7 +23,8 @@
 //! - `tcp_endpoints(id) -> length`: the local address, then the remote one, in the buffer.
 //! - `tcp_send(id, length) -> taken`, from the buffer; `tcp_recv(id, max) -> length`, into the buffer, -1 for the end.
 //! - `tcp_close(id)`, `tcp_abort(id)` and `tcp_option(id, option, value)`: option 0 is no delay (0 or 1), 1 the TTL,
-//!   2 keep-alive on, probing after that many idle seconds (0 for two hours), 3 keep-alive off.
+//!   2 keep-alive on, for that many idle seconds (0 for two hours) and probing as [`Stack::tcp_set_keep_alive`]
+//!   says, 3 keep-alive off.
 //! - `udp_bind(port, receive, send) -> id` and `udp_port(id) -> port`.
 //! - `udp_send(id, length) -> 1 sent, 0 dropped`: the buffer holds the peer's address, then `length` payload bytes.
 //! - `udp_recv(id) -> length`, -1 for none: the buffer then holds where it came from, then the payload.

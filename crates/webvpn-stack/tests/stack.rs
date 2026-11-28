@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use webvpn_proto::ErrorCode;
 use webvpn_stack::{Buffers, Config, Protocol, Sent, Stack, TcpState as State};
@@ -88,6 +88,18 @@ impl Net {
                 return true;
             }
             self.tick();
+        }
+        done(self)
+    }
+
+    /// As `until`, in steps of `step` milliseconds.
+    fn until_every(&mut self, ms: i64, step: i64, mut done: impl FnMut(&mut Self) -> bool) -> bool {
+        for _ in 0..ms / step {
+            if done(self) {
+                return true;
+            }
+            self.tick();
+            self.now += step - 1;
         }
         done(self)
     }
@@ -188,6 +200,17 @@ fn a_connect_with_no_answer_times_out_at_its_limit() {
 }
 
 #[test]
+fn a_connect_after_an_idle_spell_counts_its_limit_from_then() {
+    let mut net = Net::new();
+    net.site.tcp_listen(80, 1, BUFFERS).unwrap();
+    net.tick();
+    // an idle stack is not polled, here for longer than the connect's limit
+    net.now += 15_000;
+    let client = net.client.tcp_connect(SocketAddr::new(SITE.into(), 80), BUFFERS).unwrap();
+    assert!(net.established(client), "{:?}", net.client.tcp_error(client));
+}
+
+#[test]
 fn a_connect_closing_on_its_own_is_neither_refused_nor_reset() {
     let mut net = Net::with_link(|_, _| Fate::Drop);
     let client = net.client.tcp_connect(SocketAddr::new(SITE.into(), 80), BUFFERS).unwrap();
@@ -196,6 +219,21 @@ fn a_connect_closing_on_its_own_is_neither_refused_nor_reset() {
     net.tick();
     assert_eq!(net.client.tcp_state(client), Some(State::Closed));
     assert_eq!(net.client.tcp_error(client), None);
+}
+
+#[test]
+fn a_remote_of_a_family_the_tunnel_has_not_is_unreachable_at_once() {
+    let only_ipv6 = Config { ipv4: None, ipv6: "fd00::2".parse().ok(), ..config(CLIENT, 8, 1) };
+    let ipv6: IpAddr = "2001:db8::1".parse().unwrap();
+    for (tunnel, remote) in [(config(CLIENT, 8, 1), ipv6), (only_ipv6, SITE.into())] {
+        let mut stack = Stack::new(tunnel, 0);
+        let connect = stack.tcp_connect(SocketAddr::new(remote, 80), BUFFERS);
+        assert_eq!(connect, Err(ErrorCode::NETWORK_UNREACHABLE), "{remote}");
+        let udp = stack.udp_bind(0, BUFFERS).unwrap();
+        assert_eq!(stack.udp_send(udp, SocketAddr::new(remote, 53), b"query"), Ok(Sent::Dropped), "{remote}");
+        stack.poll(0);
+        assert_eq!(stack.output(), None, "nothing goes out toward {remote}");
+    }
 }
 
 /// An ICMP destination unreachable from a router, quoting the packet it is about.
@@ -306,6 +344,127 @@ fn a_listener_refuses_what_its_backlog_has_no_room_for_until_one_is_accepted() {
 }
 
 #[test]
+fn a_connection_nobody_finishes_opening_gives_its_place_in_the_backlog_back() {
+    use std::{cell::Cell, rc::Rc};
+    let answering = Rc::new(Cell::new(false));
+    let flag = answering.clone();
+    // a peer that sends SYNs, never answers the SYN-ACKs and never resets
+    let mut net = Net::with_link(move |toward, packet| match toward {
+        Toward::Site if !flag.get() => Fate::Drop,
+        Toward::Client if packet.get(33).is_some_and(|flags| flags & 0x04 != 0) => Fate::Drop,
+        _ => Fate::After(1),
+    });
+    net.client.tcp_listen(FIRST_PORT, 2, BUFFERS).unwrap();
+    for _ in 0..2 {
+        net.site.tcp_connect(SocketAddr::new(CLIENT.into(), FIRST_PORT), BUFFERS).unwrap();
+    }
+    net.until(11_000, |_| false);
+    answering.set(true);
+    let late = net.site.tcp_connect(SocketAddr::new(CLIENT.into(), FIRST_PORT), BUFFERS).unwrap();
+    assert!(net.until(1000, |net| net.site.tcp_state(late) != Some(State::SynSent)));
+    net.until(10, |_| false);
+    assert_eq!((net.site.tcp_state(late), net.site.tcp_error(late)), (Some(State::Established), None));
+}
+
+#[test]
+fn an_idle_connection_without_keep_alive_lasts() {
+    let mut net = Net::new();
+    let listener = net.client.tcp_listen(FIRST_PORT, 2, BUFFERS).unwrap();
+    let dialed = net.site.tcp_connect(SocketAddr::new(CLIENT.into(), FIRST_PORT), BUFFERS).unwrap();
+    let mut accepted = None;
+    assert!(net.until(1000, |net| {
+        accepted = net.client.tcp_accept(listener);
+        accepted.is_some()
+    }));
+    let accepted = accepted.unwrap();
+    net.until_every(3 * 3_600_000, 1000, |_| false);
+    let states = (net.client.tcp_state(accepted), net.site.tcp_state(dialed));
+    assert_eq!(states, (Some(State::Established), Some(State::Established)));
+    net.site.tcp_send(dialed, b"late").unwrap();
+    assert!(net.until(100, |net| net.client.tcp_recv(accepted, &mut [0; 4]) == Some(4)));
+}
+
+fn closed(client: u32) -> impl FnMut(&mut Net) -> bool {
+    move |net| net.client.tcp_state(client) == Some(State::Closed)
+}
+
+/// Polls the client alone, each time when its last poll asked, as a page does, and drops what it sends, as for a
+/// peer gone silent: how many milliseconds passed until `client` closed, or a little over an hour.
+fn alone_until_closed(net: &mut Net, client: u32) -> i64 {
+    let start = net.now;
+    loop {
+        let delay = net.client.poll(net.now);
+        while net.client.output().is_some() {}
+        if net.client.tcp_state(client) == Some(State::Closed) || net.now - start > 3_600_000 {
+            return net.now - start;
+        }
+        net.now += delay.expect("a poll is asked for") as i64;
+    }
+}
+
+#[test]
+fn what_a_silent_peer_never_acknowledges_times_out_after_15_minutes() {
+    for half_close in [false, true] {
+        let mut net = Net::new();
+        let (client, _) = net.connect(80);
+        if half_close {
+            net.client.tcp_close(client);
+        } else {
+            net.client.tcp_send(client, b"lost").unwrap();
+        }
+        assert_eq!(alone_until_closed(&mut net, client), 900_000, "half close {half_close}");
+        assert_eq!(net.client.tcp_error(client), Some(ErrorCode::TIMED_OUT), "half close {half_close}");
+    }
+}
+
+#[test]
+fn keep_alive_ends_a_connection_whose_peer_went_silent_as_linux_does() {
+    let mut net = Net::new();
+    let (client, _) = net.connect(80);
+    net.client.tcp_set_keep_alive(client, Some(30)).unwrap();
+    // 30 seconds idle, then 9 probes 75 seconds apart
+    assert_eq!(alone_until_closed(&mut net, client), 705_000);
+    assert_eq!(net.client.tcp_error(client), Some(ErrorCode::TIMED_OUT));
+}
+
+#[test]
+fn keep_alive_keeps_a_live_idle_connection() {
+    let mut net = Net::new();
+    let (client, site) = net.connect(80);
+    net.client.tcp_set_keep_alive(client, Some(0)).unwrap();
+    assert!(!net.until_every(5 * 3_600_000, 1000, closed(client)));
+    net.site.tcp_send(site, b"late").unwrap();
+    assert!(net.until(100, |net| net.client.tcp_recv(client, &mut [0; 4]) == Some(4)));
+}
+
+#[test]
+fn a_peer_that_does_not_read_keeps_the_connection() {
+    let mut net = Net::new();
+    let (client, _) = net.connect(80);
+    let data = pattern(1_000_000);
+    let mut sent = 0;
+    net.until_every(3_600_000, 100, |net| {
+        sent += net.client.tcp_send(client, &data[sent..]).unwrap();
+        false
+    });
+    assert!(sent < data.len(), "the peer's window closed");
+    assert_eq!(net.client.tcp_state(client), Some(State::Established));
+}
+
+#[test]
+fn a_connection_idle_for_hours_still_closes_in_order_and_takes_keep_alive() {
+    let mut net = Net::new();
+    let (closing, closing_site) = net.connect(80);
+    let (probed, _) = net.connect(81);
+    net.until_every(3 * 3_600_000, 1000, |_| false);
+    net.client.tcp_close(closing);
+    net.client.tcp_set_keep_alive(probed, Some(60)).unwrap();
+    assert!(net.until(1000, |net| net.site.tcp_recv(closing_site, &mut [0; 16]).is_none()));
+    assert_eq!(net.site.tcp_error(closing_site), None, "the peer reads the end, not a reset");
+    assert!(!net.until_every(3_600_000, 1000, closed(probed)));
+}
+
+#[test]
 fn a_released_listener_resets_what_nobody_accepted() {
     let mut net = Net::new();
     let listener = net.client.tcp_listen(FIRST_PORT, 2, BUFFERS).unwrap();
@@ -351,6 +510,39 @@ fn a_released_connection_still_sends_what_it_held_and_ends() {
         net.site.tcp_state(site) == Some(State::Closed)
     }), "the client drains what comes, more than its window");
     assert_eq!(net.site.tcp_error(site), None);
+}
+
+#[test]
+fn a_connection_released_after_an_idle_spell_still_ends_in_order() {
+    let mut net = Net::new();
+    let (client, site) = net.connect(80);
+    // an idle stack is not polled, here for longer than a released connection is given to end
+    net.now += 120_000;
+    net.client.tcp_close(client);
+    net.client.release(client);
+    assert!(net.until(1000, |net| net.site.tcp_recv(site, &mut [0; 16]).is_none()));
+    assert_eq!(net.site.tcp_error(site), None, "the peer reads the end, not a reset");
+}
+
+#[test]
+fn a_released_id_never_names_another_socket() {
+    let mut net = Net::new();
+    let (old, site) = net.connect(80);
+    net.site.tcp_close(site);
+    let mut chunk = [0; 64];
+    assert!(net.until(1000, |net| net.client.tcp_recv(old, &mut chunk).is_none()));
+    net.client.tcp_close(old);
+    assert!(net.until(1000, |net| net.client.tcp_state(old) == Some(State::Closed)));
+    net.client.release(old);
+    net.tick();
+    let new = net.client.tcp_connect(SocketAddr::new(SITE.into(), 80), BUFFERS).unwrap();
+    assert!(net.established(new));
+    assert_ne!(new, old, "a new connection takes a new id");
+    net.client.tcp_close(old);
+    net.client.tcp_abort(old);
+    assert_eq!(net.client.tcp_set_ttl(old, 7), Err(ErrorCode::UNKNOWN_SOCKET));
+    assert_eq!(net.client.tcp_send(old, b"stale"), Err(ErrorCode::UNKNOWN_SOCKET));
+    assert_eq!(net.client.tcp_state(new), Some(State::Established), "the stale calls left the new connection alone");
 }
 
 #[test]

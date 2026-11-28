@@ -9,7 +9,11 @@ import { sized } from './wire'
 export type TcpOption =
   | { type: 'noDelay', value: boolean }
   | { type: 'ttl', value: number }
-  /** `initialDelaySeconds` is the idle time before the first probe; 0 leaves the system's default. */
+  /**
+   * `initialDelaySeconds` is the idle time before the first probe; 0 leaves the system's default. A stack from
+   * `openStack` probes every 75 seconds of idle time, or every `initialDelaySeconds` when that is shorter, and ends
+   * the connection, as Linux does, once the peer answered nothing for that delay and then 9 times 75 seconds.
+   */
   | { type: 'keepAlive', enabled: boolean, initialDelaySeconds: number }
   | { type: 'sendBufferSize', value: number }
   | { type: 'recvBufferSize', value: number }
