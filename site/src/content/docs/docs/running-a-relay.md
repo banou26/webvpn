@@ -155,10 +155,11 @@ They come in two halves:
 | `WEBVPN_IP_DEVICE` | none | The TUN device's name. Unset, the relay carries no tunnels. |
 | `WEBVPN_IP_POOL` | none | The device's IPv4 network, such as `198.18.0.0/16`, with a prefix length of 8 to 30. Required with the device, refused without it. The device holds the first host address, and each tunnel is given one of the others. |
 | `WEBVPN_MAX_TUNNEL_PACKETS_PER_SECOND` | `20000` | The packets one tunnel takes from its client each second, past which they are dropped. `0` lifts the ceiling. |
+| `WEBVPN_MAX_TUNNELS_PER_SESSION` | `1` | The tunnels one session holds at once, at least 1, past which one more is refused with `CAPACITY`. A page's network stack or a virtual machine needs one. |
 | `WEBVPN_IP_PORTS` | none | The tunnels' [public ports](#public-ports), a range written `first-last`, such as `20000-29999`. Unset, tunnels have none. |
 | `WEBVPN_IP_PORTS_PER_TUNNEL` | `8` | How many public ports each tunnel address holds. |
 
-On another system than Linux, any of these stops the program at start, with a message that says IP tunnels need Linux. A tunnel is one of the session's sockets: it counts toward `WEBVPN_MAX_SOCKETS` and `WEBVPN_MAX_SOCKETS_PER_SESSION`, and `WEBVPN_CREDENTIALS` applies to it. The relay checks the destination of every packet against [the default rules](#what-the-default-rules-allow), as for a socket's: public addresses only, unless `WEBVPN_ALLOW_PRIVATE_TARGETS` is set. A tunnel's address is given again only once every other address of the network was given, so that a freed address stays unused as long as possible.
+On another system than Linux, any of these stops the program at start, with a message that says IP tunnels need Linux. A tunnel is one of the session's sockets: it counts toward `WEBVPN_MAX_SOCKETS` and `WEBVPN_MAX_SOCKETS_PER_SESSION`, and `WEBVPN_CREDENTIALS` applies to it. `WEBVPN_MAX_TUNNELS_PER_SESSION` bounds one session only: a bound on the tunnels one client holds across its sessions is for a [policy of your own](/docs/embedding/) to give. The relay checks the destination of every packet against [the default rules](#what-the-default-rules-allow), as for a socket's: public addresses only, unless `WEBVPN_ALLOW_PRIVATE_TARGETS` is set. A tunnel's address is given again only once every other address of the network was given, so that a freed address stays unused as long as possible.
 
 ### The setup script
 
