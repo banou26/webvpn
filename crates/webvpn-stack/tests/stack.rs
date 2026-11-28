@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use webvpn_proto::ErrorCode;
 use webvpn_stack::{Buffers, Config, Protocol, Sent, Stack, TcpState as State};
@@ -219,6 +219,21 @@ fn a_connect_closing_on_its_own_is_neither_refused_nor_reset() {
     net.tick();
     assert_eq!(net.client.tcp_state(client), Some(State::Closed));
     assert_eq!(net.client.tcp_error(client), None);
+}
+
+#[test]
+fn a_remote_of_a_family_the_tunnel_has_not_is_unreachable_at_once() {
+    let only_ipv6 = Config { ipv4: None, ipv6: "fd00::2".parse().ok(), ..config(CLIENT, 8, 1) };
+    let ipv6: IpAddr = "2001:db8::1".parse().unwrap();
+    for (tunnel, remote) in [(config(CLIENT, 8, 1), ipv6), (only_ipv6, SITE.into())] {
+        let mut stack = Stack::new(tunnel, 0);
+        let connect = stack.tcp_connect(SocketAddr::new(remote, 80), BUFFERS);
+        assert_eq!(connect, Err(ErrorCode::NETWORK_UNREACHABLE), "{remote}");
+        let udp = stack.udp_bind(0, BUFFERS).unwrap();
+        assert_eq!(stack.udp_send(udp, SocketAddr::new(remote, 53), b"query"), Ok(Sent::Dropped), "{remote}");
+        stack.poll(0);
+        assert_eq!(stack.output(), None, "nothing goes out toward {remote}");
+    }
 }
 
 /// An ICMP destination unreachable from a router, quoting the packet it is about.

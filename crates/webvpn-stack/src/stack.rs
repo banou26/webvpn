@@ -409,6 +409,9 @@ impl Stack {
     /// of the remote's family, and with `ADDRESS_IN_USE` when no private port is free. Whether the connection is
     /// made shows in `tcp_state` and `tcp_error`.
     pub fn tcp_connect(&mut self, remote: SocketAddr, buffers: Buffers) -> Result<u32> {
+        if !self.has_family(remote) {
+            return Err(ErrorCode::NETWORK_UNREACHABLE);
+        }
         let port = self.free_port(Protocol::Tcp).ok_or(ErrorCode::ADDRESS_IN_USE)?;
         let mut socket = tcp_socket(buffers);
         socket
@@ -578,7 +581,11 @@ impl Stack {
         if data.len() + header > self.config.mtu {
             return Err(ErrorCode::OTHER);
         }
+        let reachable = self.has_family(remote);
         let socket = self.udp_socket(id)?;
+        if !reachable {
+            return Ok(Sent::Dropped);
+        }
         Ok(match socket.send_slice(data, endpoint(remote)) {
             Ok(()) => Sent::Queued,
             Err(_) => Sent::Dropped,
@@ -701,6 +708,14 @@ impl Stack {
             (Kind::Udp { port: bound, .. }, Protocol::Udp) => *bound == port,
             _ => false,
         })
+    }
+
+    // smoltcp sends from ::1 toward an IPv6 remote on a stack without IPv6, a packet the relay drops
+    fn has_family(&self, remote: SocketAddr) -> bool {
+        match remote {
+            SocketAddr::V4(_) => self.config.ipv4.is_some(),
+            SocketAddr::V6(_) => self.config.ipv6.is_some(),
+        }
     }
 
     fn is_public(&self, port: u16) -> bool {
