@@ -155,8 +155,10 @@ They come in two halves:
 | `WEBVPN_IP_DEVICE` | none | The TUN device's name. Unset, the relay carries no tunnels. |
 | `WEBVPN_IP_POOL` | none | The device's IPv4 network, such as `198.18.0.0/16`, with a prefix length of 8 to 30. Required with the device, refused without it. The device holds the first host address, and each tunnel is given one of the others. |
 | `WEBVPN_MAX_TUNNEL_PACKETS_PER_SECOND` | `20000` | The packets one tunnel takes from its client each second, past which they are dropped. `0` lifts the ceiling. |
+| `WEBVPN_IP_PORTS` | none | The tunnels' [public ports](#public-ports), a range written `first-last`, such as `30000-39999`. Unset, tunnels have none. |
+| `WEBVPN_IP_PORTS_PER_TUNNEL` | `8` | How many public ports each tunnel address holds. |
 
-On another system than Linux, any of the three stops the program at start, with a message that says IP tunnels need Linux. A tunnel is one of the session's sockets: it counts toward `WEBVPN_MAX_SOCKETS` and `WEBVPN_MAX_SOCKETS_PER_SESSION`, and `WEBVPN_CREDENTIALS` applies to it. The relay checks the destination of every packet against [the default rules](#what-the-default-rules-allow), as for a socket's: public addresses only, unless `WEBVPN_ALLOW_PRIVATE_TARGETS` is set. A tunnel's address is given again only once every other address of the network was given, so that a freed address stays unused as long as possible.
+On another system than Linux, any of these stops the program at start, with a message that says IP tunnels need Linux. A tunnel is one of the session's sockets: it counts toward `WEBVPN_MAX_SOCKETS` and `WEBVPN_MAX_SOCKETS_PER_SESSION`, and `WEBVPN_CREDENTIALS` applies to it. The relay checks the destination of every packet against [the default rules](#what-the-default-rules-allow), as for a socket's: public addresses only, unless `WEBVPN_ALLOW_PRIVATE_TARGETS` is set. A tunnel's address is given again only once every other address of the network was given, so that a freed address stays unused as long as possible.
 
 ### The setup script
 
@@ -164,7 +166,7 @@ On another system than Linux, any of the three stops the program at start, with 
 WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=198.18.0.0/16 WEBVPN_IP_USER=webvpnd sh ip-tunnel-setup.sh up
 ```
 
-It takes `WEBVPN_IP_DEVICE` (`webvpn0` by default) and `WEBVPN_IP_POOL` as the relay does, `WEBVPN_IP_USER`, the user the relay runs as, which is required (a device with no owner is open to every local user), `WEBVPN_IP_MTU` (`1500` by default), and `WEBVPN_IP_FLOWS_PER_ADDRESS`, the connections the kernel tracks for one tunnel address (`4096` by default, a little above the 3584 flows the relay keeps for a tunnel, so that the relay's own bound acts first). `up` prints nothing unless something fails, and running it again changes nothing. It:
+It takes `WEBVPN_IP_DEVICE` (`webvpn0` by default), `WEBVPN_IP_POOL`, `WEBVPN_IP_PORTS` and `WEBVPN_IP_PORTS_PER_TUNNEL` as the relay does, `WEBVPN_IP_USER`, the user the relay runs as, which is required (a device with no owner is open to every local user), `WEBVPN_IP_MTU` (`1500` by default), and `WEBVPN_IP_FLOWS_PER_ADDRESS`, the connections the kernel tracks for one tunnel address (`4096` by default, a little above the 3584 flows the relay keeps for a tunnel, so that the relay's own bound acts first). `up` prints nothing unless something fails, and running it again changes nothing. It:
 
 1. makes the device for its user, gives it the network's first host address, sets its MTU and brings it up;
 2. turns IPv4 forwarding on;
@@ -174,13 +176,26 @@ It takes `WEBVPN_IP_DEVICE` (`webvpn0` by default) and `WEBVPN_IP_POOL` as the r
    - packets from the device to private, loopback, link-local, shared, multicast and reserved addresses dropped, the same list as the relay's own rule, as a second layer under it;
    - a ceiling on the connections the kernel tracks for one tunnel address, `WEBVPN_IP_FLOWS_PER_ADDRESS`, past which a new one is dropped;
    - every other packet from the device accepted;
-   - packets toward the device accepted only when they belong to, or relate to, a connection that began from the device, and every other packet toward the device dropped;
+   - packets toward the device accepted only when they belong to, or relate to, a connection that began from the device, or with `WEBVPN_IP_PORTS`, a new connection to a public port that the rule below sent there, which counts toward `WEBVPN_IP_FLOWS_PER_ADDRESS` as the tunnel's own connections do; every other packet toward the device dropped;
+   - with `WEBVPN_IP_PORTS`, a TCP or UDP packet that does not come from the device, to one of the host's own addresses on a public port, sent to the tunnel address that holds the port, on the same port;
    - nothing from the device accepted for the host itself;
    - the network's addresses translated to the host's where packets leave by any other interface.
 
-`down` removes that table and the device, and leaves forwarding on, since other things on the host may need it.
+`down` removes that table and the device, and leaves forwarding on, since other things on the host may need it. `up` refuses a range of public ports that overlaps the host's local port range (`/proc/sys/net/ipv4/ip_local_port_range`), and then changes nothing.
 
 The table does not assume it is the only firewall on the host. Another table that drops forwarded packets, such as a firewall manager's, still drops the tunnels' packets: let packets from and toward the device through there too.
+
+### Public ports
+
+With `WEBVPN_IP_PORTS`, a client's own network stack can listen. The relay tells each tunnel its public address, the first IPv4 address of `WEBVPN_OWN_ADDRESSES` (which the setting needs), and its ports. A TCP or UDP packet that anyone sends to the host on one of those ports reaches the tunnel's own address on the same port, and the tunnel's answers leave from the host's address and that port.
+
+The ports are split into fixed blocks, one for each tunnel address, which the relay and the setup script both follow, so the host's rules never change while the relay runs. The k-th tunnel address, counting from 0 at the network's second host address (the device holds the first), holds the ports from `first + k * size` to `first + (k + 1) * size - 1`, where `size` is `WEBVPN_IP_PORTS_PER_TUNNEL`. An address whose block would pass the end of the range holds none, and its tunnels have no public port. With `198.18.0.0/16`, `30000-39999` and 8, `198.18.0.2` holds 30000 to 30007, `198.18.0.3` holds 30008 to 30015, and so on up to `198.18.4.227`, which holds 39992 to 39999. From `198.18.4.228` on, an address holds none.
+
+- **Keep the range clear of every port something on the host uses.** A new connection or datagram to the host on a port of the range goes to a tunnel, whatever listens there: the relay's carriers, its HTTP listener, a socket a client binds through the relay, or any other program. `up` refuses a range that overlaps the host's local port range, where the system takes the ports of its own connections.
+- **The policy decides.** A tunnel is given its ports only when the policy lets the session bind every one of them, in TCP and in UDP, as for a listener. Under the default rules that means ports of `WEBVPN_MIN_BIND_PORT` and above. Otherwise the tunnel opens with no public port.
+- **A tunnel does not reach another tunnel's public port.** The relay drops a tunnel's packet to its own addresses, and the host drops one to its other addresses.
+- **Fragments.** A datagram in fragments to a public port passes when its first fragment comes first, as the host's connection tracking sends it.
+- **IPv4 only.** Tunnels have no IPv6 address yet, so they have no IPv6 public address either.
 
 ### In a container
 
@@ -196,7 +211,7 @@ With `--network host`, the relay binds its ports on the host itself, so no `-p` 
 ### What a client can expect
 
 - **Its address is private, and translated.** It is one of the network's addresses, and the host translates it to its own where packets leave. It lasts as long as the tunnel does.
-- **A tunnel takes only answers.** A packet reaches the client only when it answers a flow the client sent on, or is an ICMP error about a packet it sent. Nothing reaches a tunnel unasked, and nothing that answers the address's earlier holder.
+- **A tunnel takes only answers.** A packet reaches the client only when it answers a flow the client sent on, or is an ICMP error about a packet it sent, or comes to one of its [public ports](#public-ports). Nothing else reaches a tunnel unasked, and nothing that answers the address's earlier holder.
 - **Flows are bounded and forgotten when silent.** The relay keeps at most 3584 flows a tunnel, and forgets a flow silent for 2 minutes, 5 for UDP, and 2 hours for an open TCP connection. A client that needs a quiet flow kept sends on it more often than that.
 - **Packets may be dropped.** A tunnel is a link that may drop, when a queue is full or a packet is refused, and nothing is sent again.
 
