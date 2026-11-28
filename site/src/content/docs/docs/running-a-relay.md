@@ -153,7 +153,7 @@ They come in two halves:
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `WEBVPN_IP_DEVICE` | none | The TUN device's name. Unset, the relay carries no tunnels. |
-| `WEBVPN_IP_POOL` | none | The device's IPv4 network, such as `198.18.0.0/16`, with a prefix length of 8 to 30. Required with the device, refused without it. The device holds the first host address, and each tunnel is given one of the others. |
+| `WEBVPN_IP_POOL` | none | The device's IPv4 network, such as `198.18.0.0/28`, with a prefix length of 8 to 30. Required with the device, refused without it. The device holds the first host address, and each tunnel is given one of the others. |
 | `WEBVPN_MAX_TUNNEL_PACKETS_PER_SECOND` | `20000` | The packets one tunnel takes from its client each second, past which they are dropped. `0` lifts the ceiling. |
 | `WEBVPN_IP_PORTS` | none | The tunnels' [public ports](#public-ports), a range written `first-last`, such as `20000-29999`. Unset, tunnels have none. |
 | `WEBVPN_IP_PORTS_PER_TUNNEL` | `8` | How many public ports each tunnel address holds. |
@@ -163,7 +163,7 @@ On another system than Linux, any of these stops the program at start, with a me
 ### The setup script
 
 ```sh
-WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=198.18.0.0/16 WEBVPN_IP_USER=webvpnd sh ip-tunnel-setup.sh up
+WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=198.18.0.0/28 WEBVPN_IP_USER=webvpnd sh ip-tunnel-setup.sh up
 ```
 
 It takes `WEBVPN_IP_DEVICE` (`webvpn0` by default), `WEBVPN_IP_POOL`, `WEBVPN_IP_PORTS` and `WEBVPN_IP_PORTS_PER_TUNNEL` as the relay does, `WEBVPN_IP_USER`, the user the relay runs as, which is required (a device with no owner is open to every local user), `WEBVPN_IP_MTU` (`1500` by default), and `WEBVPN_IP_FLOWS_PER_ADDRESS`, the connections the kernel tracks that one tunnel address opens, and apart from those, to its public ports (`4096` by default, a little above the 3584 flows the relay keeps for a tunnel, so that the relay's own bound acts first). `up` prints nothing unless something fails, and running it again changes nothing. It:
@@ -183,7 +183,9 @@ It takes `WEBVPN_IP_DEVICE` (`webvpn0` by default), `WEBVPN_IP_POOL`, `WEBVPN_IP
    - nothing from the device accepted for the host itself;
    - the network's addresses translated to the host's where packets leave by any other interface.
 
-`down` removes that table and the device, and leaves forwarding on, since other things on the host may need it. `up` refuses a range of public ports that overlaps the host's local port range (`/proc/sys/net/ipv4/ip_local_port_range`), and then changes nothing. The table needs a kernel with connection tracking timeout policies (`CONFIG_NF_CONNTRACK_TIMEOUT`): without them `up` stops and says so, before it loads the table.
+`down` removes that table and the device, and leaves forwarding on, since other things on the host may need it. `up` refuses a range of public ports that overlaps the host's local port range (`/proc/sys/net/ipv4/ip_local_port_range`), and a pool too large for the host's connection table (below), and then changes nothing. The table needs a kernel with connection tracking timeout policies (`CONFIG_NF_CONNTRACK_TIMEOUT`): without them `up` stops and says so, before it loads the table.
+
+The connections the kernel tracks for a tunnel address outlast its tunnel, so `up` refuses a pool whose tunnel addresses times `WEBVPN_IP_FLOWS_PER_ADDRESS`, plus the addresses that hold public ports times it again, take more than half of the host's connection table (`/proc/sys/net/netfilter/nf_conntrack_max`), which every program on the host shares. With 262144, a common default, and the default ceiling, the largest pool is a `/27`, for 29 tunnels at once, or a `/28`, for 13, when each address holds public ports; a lower ceiling allows a larger pool. For more tunnels at the same ceiling, raise `nf_conntrack_max` on the host.
 
 The script needs the right to change the network (`CAP_NET_ADMIN`) and `/dev/net/tun`, and to turn forwarding on, the right to write the system's settings. On a host whose forwarding is already on, as on a Kubernetes node, a container with `CAP_NET_ADMIN` alone and `/dev/net/tun` mounted can run it. The relay's own container then needs only `/dev/net/tun` mounted and no capability.
 
@@ -193,7 +195,7 @@ The table does not assume it is the only firewall on the host. Another table tha
 
 With `WEBVPN_IP_PORTS`, a client's own network stack can listen. The relay tells each tunnel its public address, the first IPv4 address of `WEBVPN_OWN_ADDRESSES` (which the setting needs), and its ports. A TCP or UDP packet that anyone sends to the host on one of those ports reaches the tunnel's own address on the same port, and the tunnel's answers leave from the host's address and that port.
 
-The ports are split into fixed blocks, one for each tunnel address, which the relay and the setup script both follow, so the host's rules never change while the relay runs. The k-th tunnel address, counting from 0 at the network's second host address (the device holds the first), holds the ports from `first + k * size` to `first + (k + 1) * size - 1`, where `size` is `WEBVPN_IP_PORTS_PER_TUNNEL`. An address whose block would pass the end of the range holds none, and its tunnels have no public port. With `198.18.0.0/16`, `20000-29999` and 8, `198.18.0.2` holds 20000 to 20007, `198.18.0.3` holds 20008 to 20015, and so on up to `198.18.4.227`, which holds 29992 to 29999. From `198.18.4.228` on, an address holds none.
+The ports are split into fixed blocks, one for each tunnel address, which the relay and the setup script both follow, so the host's rules never change while the relay runs. The k-th tunnel address, counting from 0 at the network's second host address (the device holds the first), holds the ports from `first + k * size` to `first + (k + 1) * size - 1`, where `size` is `WEBVPN_IP_PORTS_PER_TUNNEL`. An address whose block would pass the end of the range holds none, and its tunnels have no public port. With `198.18.0.0/28`, `20000-20063` and 8, `198.18.0.2` holds 20000 to 20007, `198.18.0.3` holds 20008 to 20015, and so on up to `198.18.0.9`, which holds 20056 to 20063. From `198.18.0.10` on, an address holds none.
 
 - **Keep the range clear of every port something on the host uses.** A new connection or datagram to the host on a port of the range goes to a tunnel, whatever listens there: the relay's carriers, its HTTP listener, or any other program. `up` refuses a range that overlaps the host's local port range, where the system takes the ports of its own connections, and the relay refuses to bind a client's UDP socket or listener on a port of the range (`ADDRESS_IN_USE`).
 - **The policy decides.** A tunnel is given its ports only when the policy lets the session bind every one of them, in TCP and in UDP, as for a listener. Under the default rules that means ports of `WEBVPN_MIN_BIND_PORT` and above. Otherwise the tunnel opens with no public port.
@@ -207,7 +209,7 @@ The device lives in the host's network, so the relay's container shares it, and 
 
 ```sh
 docker run --rm --network host --device /dev/net/tun --user 1000:1000 \
-  -e WEBVPN_IP_DEVICE=webvpn0 -e WEBVPN_IP_POOL=198.18.0.0/16 webvpnd
+  -e WEBVPN_IP_DEVICE=webvpn0 -e WEBVPN_IP_POOL=198.18.0.0/28 webvpnd
 ```
 
 With `--network host`, the relay binds its ports on the host itself, so no `-p` is needed.
