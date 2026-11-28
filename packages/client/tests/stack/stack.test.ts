@@ -1,16 +1,18 @@
 import type { TcpListener, TcpSocket, UdpSocket } from '../../src'
 import type { Stack } from '../../src/stack'
 
-import { describe, expect, it } from 'vite-plus/test'
+import { describe, expect, it, vi } from 'vite-plus/test'
 
 import { formatIp } from '../../src/address'
 import { dnsAddresses, dnsQuery } from '../../src/dns'
 import { ErrorCode } from '../../src/protocol'
+import { openStack } from '../../src/stack'
 import {
   at,
   CLIENT,
   CLIENT_PUBLIC,
   dnsAnswer,
+  fakeTunnel,
   FIRST_PORT,
   internet,
   pattern,
@@ -497,5 +499,50 @@ describe('the tunnel ending', () => {
     await client.close()
     expect(await client.closed).toEqual({ by: 'client' })
     expect(await outcome(socket.readable.getReader().read())).toMatchObject({ message: 'the tunnel closed' })
+  })
+
+  it('ends the stack and closes the tunnel when a call into the module throws, and calls it no more', async () => {
+    const instantiate = WebAssembly.instantiate.bind(WebAssembly)
+    let broken = false
+    let callsAfter = 0
+    // an instance's exports are frozen, so the engine gets a copy whose functions throw as a trap does once broken
+    vi.spyOn(WebAssembly, 'instantiate').mockImplementationOnce((async (module: WebAssembly.Module) => {
+      const { exports } = await instantiate(module)
+      return {
+        exports: Object.fromEntries(Object.entries(exports).map(([name, value]) => [
+          name,
+          typeof value !== 'function' ? value : (...args: number[]) => {
+            if (!broken) return value(...args)
+            callsAfter++
+            throw new WebAssembly.RuntimeError('unreachable')
+          },
+        ])),
+      }
+    }) as never)
+    try {
+      const { tunnel } = fakeTunnel(
+        { id: 1, ipv4: CLIENT, mtu: 1500, publicIpv4: CLIENT_PUBLIC, firstPort: FIRST_PORT, ports: 8 },
+        () => true,
+      )
+      const stack = await openStack(tunnel)
+      const listener = await stack.tcpListen(ANY)
+      const udp = await stack.udpBind(ANY)
+      const read = outcome(udp.readable.getReader().read())
+      const lookup = outcome(stack.lookup(dnsQuery('example.test', 'A')))
+      // nothing answers the SYN, so the next call into the module is the poll of its retransmission, from a timer
+      const connecting = outcome(stack.tcpConnect(at(SITE, 80)))
+      await wait(50)
+      broken = true
+      expect(await connecting).toMatchObject({ code: ErrorCode.OTHER, message: 'the stack failed' })
+      expect(await lookup).toMatchObject({ code: ErrorCode.OTHER, message: 'the stack failed' })
+      expect(await read).toEqual({ done: true, value: undefined })
+      expect(await listener.closed).toEqual({ by: 'session' })
+      expect(await tunnel.closed).toEqual({ by: 'client' })
+      expect(await outcome(stack.tcpListen(ANY))).toMatchObject({ message: 'the stack failed' })
+      expect(await outcome(stack.udpBind(ANY))).toMatchObject({ message: 'the stack failed' })
+      expect(callsAfter).toBe(1)
+    } finally {
+      vi.restoreAllMocks()
+    }
   })
 })
