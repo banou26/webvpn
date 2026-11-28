@@ -853,6 +853,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_tunnel_whose_client_stops_reading_its_stream_ends_and_gives_everything_back() {
+        let mut harness = tunnelling(1).await;
+        let mut tunnel = harness.open(1, 0).await;
+        // a packet out first, so that its answer passes the flow table and the relay writes it
+        tunnel.send(&udp_from(0)).await;
+        harness.forwarder.sent(1).await;
+        // the side the client sends on stays open, so only the failed write can end the tunnel
+        let Tunnel { socket, send: _sending, recv, .. } = tunnel;
+        drop(recv);
+        assert!(harness.forwarder.deliver(0, toward_client(0, 1, 100)));
+        let closed = RelayPacket::Closed { socket, code: ErrorCode::OTHER };
+        assert_eq!(harness.control.next().await, Some(closed));
+        harness.forwarder.holds(0).await;
+        harness.permits(0).await;
+    }
+
+    #[tokio::test]
     async fn a_tunnel_ends_with_its_session_however_the_session_ends_and_gives_everything_back() {
         for end in ["client", "dropped", "stop"] {
             let mut harness = tunnelling(1).await;
