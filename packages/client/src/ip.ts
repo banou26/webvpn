@@ -153,7 +153,11 @@ export const ipTunnel = async (context: Context, reply: RelayPacket): Promise<Ip
   const send = (packet: Uint8Array) => {
     if (done || !packet.byteLength || packet.byteLength > mtu) return false
     const frame = encodeIpFrame(packet)
-    if (queued + frame.byteLength > QUEUE_BYTES) return false
+    // a frame leaves `queued` once the carrier took it, and the WebSocket mux takes up to 1 MiB it did not send yet,
+    // so that counts too. It holds what the session's other sockets send as well: while their uploads keep it past
+    // 64 KiB, the tunnel drops every packet. Counting only the tunnel's own bytes there would take much more code,
+    // and a page that sends only through the tunnel has no such uploads.
+    if (queued + (context.carrier.buffered?.() ?? 0) + frame.byteLength > QUEUE_BYTES) return false
     queued += frame.byteLength
     writer.write(frame).catch(noop).finally(() => { queued -= frame.byteLength })
     return true

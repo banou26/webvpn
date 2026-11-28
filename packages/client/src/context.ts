@@ -56,6 +56,8 @@ export type Carrier = {
   datagrams?: ReadableStream<Uint8Array>,
   /** Sends one `UdpPacket` outside any stream, or drops it when the carrier holds too much unsent. */
   sendDatagram: (packet: Uint8Array) => void,
+  /** The bytes the carrier took but did not send yet, on a carrier whose writes resolve before they leave. */
+  buffered?: () => number,
   /** Opens a stream toward the relay only, on a carrier that has such streams. */
   openUni?: () => Promise<WritableStream<Uint8Array>>,
   /**

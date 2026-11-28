@@ -217,6 +217,7 @@ export const webSocketCarrier = async (socket: WebSocket): Promise<Carrier> => {
     sendDatagram: (packet) => {
       if (socket.bufferedAmount <= DATAGRAM_SHED_BYTES) send(MuxKind.DATAGRAM, 0, packet)
     },
+    buffered: () => socket.bufferedAmount,
     closed,
     close,
   }
