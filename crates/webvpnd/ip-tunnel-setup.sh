@@ -1,7 +1,9 @@
 #!/bin/sh
 # Sets a Linux node up for webvpnd's IP tunnels, or takes that setup down. Run it as root, before the relay starts:
-# the relay itself needs no privilege, it only opens the device this makes for its user. Where forwarding is on
-# already, the right to change the network (CAP_NET_ADMIN) and /dev/net/tun are all the script needs.
+# the relay itself needs no privilege, it only opens the device this makes for its user. When IPv4 forwarding is off,
+# up turns it on for the whole host, which then routes between all of its interfaces and not only the device's, and
+# down leaves it on. Where forwarding is on already, the right to change the network (CAP_NET_ADMIN) and /dev/net/tun
+# are all the script needs.
 #
 #   ip-tunnel-setup.sh up      makes the device and its rules
 #   ip-tunnel-setup.sh down    removes them
