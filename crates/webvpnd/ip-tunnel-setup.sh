@@ -3,7 +3,8 @@
 # the relay itself needs no privilege, it only opens the device this makes for its user. When IPv4 forwarding is off,
 # up turns it on for the whole host, which then routes between all of its interfaces and not only the device's, and
 # down leaves it on. Where forwarding is on already, the right to change the network (CAP_NET_ADMIN) and /dev/net/tun
-# are all the script needs.
+# are all the script needs. It does not raise net.core.rmem_max, which the relay's WebTransport socket needs raised to
+# carry tunnels well: set that on the node itself.
 #
 #   ip-tunnel-setup.sh up      makes the device and its rules
 #   ip-tunnel-setup.sh down    removes them
@@ -106,8 +107,9 @@ a lower ceiling or no public ports, or raise nf_conntrack_max"
 		[ "$held" = "$address/$prefix" ] || ip address delete "$held" dev "$device"
 	done
 	# Every tunnel's packets from the internet wait in the device's queue until the relay reads them. The kernel's
-	# 500 lost the bursts servers send toward a busy tunnel: up to 460 packets in 16 s of downloads (measured
-	# 2026-11-28), which the relay never sees to count.
+	# 500 lost the bursts servers send toward a busy tunnel: 124 to 1587 packets in each 16 s of downloads (measured
+	# 2026-11-28), which the relay never sees to count. Full, the queue takes about 8.5 MB of kernel memory at 1500
+	# bytes a packet, which no container's memory limit counts.
 	ip link set dev "$device" mtu "$mtu" txqueuelen 4096 up
 	# only when it is off: where it is on already, the step then needs no more than the right to change the network
 	[ "$(cat /proc/sys/net/ipv4/ip_forward)" = 1 ] || echo 1 >/proc/sys/net/ipv4/ip_forward
