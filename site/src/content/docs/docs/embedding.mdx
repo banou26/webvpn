@@ -143,7 +143,7 @@ The forwarder reads the device on a thread of its own, which ends within a secon
 - **`attach()`** gives a new tunnel its end, a `TunnelEnd`: `ipv4` and `ipv6`, the addresses the client's end is given, at least one of them, and `packets`, the receiving half of a bounded tokio channel of `Vec<u8>` that brings the packets arriving for those addresses. The relay calls it once the policy gave the tunnel its permit. A refusal, such as `CAPACITY` when no address is free, reaches the client under the request's id.
 - **`send(packet)`** takes one packet from a tunnel toward its destination. It is called on the async runtime and must return at once: a forwarder that cannot take the packet now drops it.
 
-The forwarder sends into a tunnel's channel with `try_send` and drops the packet when the channel is full, so no client ever holds it. The relay drops the `TunnelEnd` when the tunnel ends, however it ends: the client closes it, its stream or its session ends, or the relay stops. The forwarder then reads the channel's sender as closed, with `is_closed()` or when `closed()` resolves, and takes the addresses back. A forwarder that drops the sender ends the tunnel, and the client is told `Closed`.
+The forwarder sends into a tunnel's channel with `try_send` and drops the packet when the channel is full, so no client ever holds it. It counts those drops and answers `dropped()` with the count, which the relay serves as `webvpn_ip_dropped_total{reason="forwarder_full"}`. Make the channel `FORWARDER_CHANNEL` packets long, 4096: servers answer a page's stack in bursts of several hundred packets for each connection, and a shorter channel loses them. The relay drops the `TunnelEnd` when the tunnel ends, however it ends: the client closes it, its stream or its session ends, or the relay stops. The forwarder then reads the channel's sender as closed, with `is_closed()` or when `closed()` resolves, and takes the addresses back. A forwarder that drops the sender ends the tunnel, and the client is told `Closed`.
 
 ### What the relay checks
 
@@ -181,6 +181,7 @@ A new SYN from the client on a TCP flow starts it over. A tunnel holds at most 3
 | Tunnels one session holds | `max_tunnels_per_session`, 1 by default |
 | A packet | the forwarder's `mtu`, at least 1280 bytes |
 | Packets a second from one tunnel's client | `max_tunnel_packets_per_second`, 20000 by default |
+| Packets waiting in one tunnel's forwarder channel | `FORWARDER_CHANNEL`, 4096, so about 6 MB at most while a burst waits |
 | Packets queued toward one client | 64 KiB, beyond what the tunnel's stream holds |
 | Flows one tunnel holds | 3584 |
 
