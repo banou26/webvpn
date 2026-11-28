@@ -562,11 +562,11 @@ mod tests {
         message
     }
 
-    /// A session on a relay whose forwarder gives each of its 2 tunnels 4 public ports, with `config`.
+    /// A session that may hold both tunnels of a forwarder that gives each of them 4 public ports, with `config`.
     async fn with_ports(config: Config) -> Harness {
         let mut forwarder = TestForwarder::new(MTU, 2);
         forwarder.ports = 4;
-        start(config, Some(forwarder), Auth::None, false).await
+        start(Config { max_tunnels_per_session: 2, ..config }, Some(forwarder), Auth::None, false).await
     }
 
     /// A UDP packet from `SITE` to the forwarder's tunnel `tunnel` at `port`.
@@ -744,7 +744,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_client_that_reads_nothing_loses_the_newest_packets_and_holds_neither_the_forwarder_nor_the_session() {
-        let mut harness = tunnelling(2).await;
+        let config = Config { max_tunnels_per_session: 2, ..Config::default() };
+        let mut harness = start(config, Some(TestForwarder::new(MTU, 2)), Auth::None, false).await;
         let mut stuck = harness.open(1, 0).await;
         let mut other = harness.open(2, 1).await;
         stuck.send(&udp_from(0)).await;
@@ -860,7 +861,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_tunnel_counts_as_one_of_the_session_s_sockets_and_takes_only_its_own_requests() {
-        let config = Config { max_sockets_per_session: 1, ..Config::default() };
+        let config = Config { max_sockets_per_session: 1, max_tunnels_per_session: 2, ..Config::default() };
         let mut harness = start(config, Some(TestForwarder::new(MTU, 2)), Auth::None, false).await;
         let mut tunnel = harness.open(1, 0).await;
         assert_eq!(code(&harness.ask(ClientPacket::IpOpen { id: 2 }).await), (2, ErrorCode::CAPACITY));
@@ -873,6 +874,30 @@ mod tests {
         }
         tunnel.send(&udp_to(SITE)).await;
         assert_eq!(harness.forwarder.sent(1).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_session_holds_one_tunnel_by_default_and_one_past_its_ceiling_takes_nothing() {
+        let mut harness = tunnelling(2).await;
+        let tunnel = harness.open(1, 0).await;
+        assert_eq!(code(&harness.ask(ClientPacket::IpOpen { id: 2 }).await), (2, ErrorCode::CAPACITY));
+        // refused before the policy and the forwarder are asked
+        assert_eq!(*harness.policy.kinds.lock().unwrap(), [SocketKind::IpTunnel]);
+        assert_eq!((harness.policy.held(), harness.forwarder.held()), (1, 1));
+
+        let close = ClientPacket::IpClose { id: 3, socket: tunnel.socket };
+        assert_eq!(harness.ask(close).await, RelayPacket::Ok { id: 3 });
+        harness.permits(0).await;
+        let _reopened = harness.open(4, 0).await;
+        // the ceiling counts tunnels only
+        let bind = ClientPacket::UdpBind { id: 5, local: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)) };
+        assert!(matches!(harness.ask(bind).await, RelayPacket::Socket { id: 5, .. }));
+
+        let config = Config { max_tunnels_per_session: 2, ..Config::default() };
+        let mut two = start(config, Some(TestForwarder::new(MTU, 3)), Auth::None, false).await;
+        let _held = (two.open(1, 0).await, two.open(2, 1).await);
+        assert_eq!(code(&two.ask(ClientPacket::IpOpen { id: 3 }).await), (3, ErrorCode::CAPACITY));
+        assert_eq!((two.policy.held(), two.forwarder.held()), (2, 2));
     }
 
     #[tokio::test]

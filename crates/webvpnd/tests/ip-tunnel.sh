@@ -162,9 +162,10 @@ else
 	set --
 	echo "webvpnd runs as root of the namespace: this system gives the namespace no other user"
 fi
+# The test's one session holds all five tunnel addresses at once.
 env -i RUST_LOG=error WEBVPN_ADDRESS=127.0.0.1 WEBVPN_IP_DEVICE=webvpn0 WEBVPN_IP_POOL=198.18.0.0/29 \
-	WEBVPN_IP_PORTS=30000-30031 WEBVPN_OWN_ADDRESSES=11.0.0.1 WEBVPN_ALLOW_PRIVATE_TARGETS=true "$@" \
-	"$work/run/webvpnd" &
+	WEBVPN_IP_PORTS=30000-30031 WEBVPN_OWN_ADDRESSES=11.0.0.1 WEBVPN_ALLOW_PRIVATE_TARGETS=true \
+	WEBVPN_MAX_TUNNELS_PER_SESSION=5 "$@" "$work/run/webvpnd" &
 relay=$!
 
 tries=0
