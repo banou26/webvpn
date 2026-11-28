@@ -95,6 +95,10 @@ a lower ceiling or fewer public ports, or raise nf_conntrack_max"
 
 	ip link show dev "$device" >/dev/null 2>&1 || ip tuntap add dev "$device" mode tun user "$user"
 	ip address replace "$address/$prefix" dev "$device"
+	# an earlier up's other pool goes: the relay reads only the device's first IPv4 address
+	ip -4 -o address show dev "$device" | while read -r _ _ _ held _; do
+		[ "$held" = "$address/$prefix" ] || ip address delete "$held" dev "$device"
+	done
 	ip link set dev "$device" mtu "$mtu" up
 	# only when it is off: where it is on already, the step then needs no more than the right to change the network
 	[ "$(cat /proc/sys/net/ipv4/ip_forward)" = 1 ] || echo 1 >/proc/sys/net/ipv4/ip_forward

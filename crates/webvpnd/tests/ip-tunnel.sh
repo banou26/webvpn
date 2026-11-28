@@ -159,6 +159,9 @@ grep -q "half of the node's nf_conntrack_max" "$work/refused" || { cat "$work/re
 	{ echo "the refused setup left something" >&2; exit 1; }
 echo "ok: a pool whose ceilings pass half of the connection table is refused"
 
+# An up with another pool first: the next up takes its address away, so the relay below reads the test's pool.
+WEBVPN_IP_POOL=13.0.0.0/28 WEBVPN_IP_USER=1 sh "$setup" up
+
 # The pool is a public network, outside the setup's reserved destinations, so that only the rule that drops packets
 # from the device to the device keeps one tunnel from another (check 7). Each of the five tunnel addresses holds 8
 # public ports, 13.0.0.2 from 30000 on. up runs first with a ceiling of 7: the next, with 8, loads the table again, and
