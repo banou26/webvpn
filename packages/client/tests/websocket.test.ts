@@ -249,12 +249,12 @@ describe('an IP tunnel over the WebSocket mux', () => {
     const id = (request as { id: number }).id
     const ipv4 = Uint8Array.of(198, 18, 0, 2)
     socket.receive(MuxKind.DATA, CONTROL_STREAM, encodeRelayPacket({ type: 'ipTunnel', id, socket: 5, mtu: 1500, ipv4, firstPort: 0, ports: 0 }))
-    return tunnelling
+    return { session, tunnel: await tunnelling }
   }
 
   it('carries packets both ways on the stream the relay opens with type 2', async () => {
     const socket = new FakeSocket()
-    const tunnel = await tunnelled(socket)
+    const { tunnel } = await tunnelled(socket)
     expect((await tunnel.readable.getReader().read()).value).toEqual(Uint8Array.of(0x45, 1, 2))
     tunnel.send(Uint8Array.of(0x60, 3))
     await settle()
@@ -269,7 +269,7 @@ describe('an IP tunnel over the WebSocket mux', () => {
       socket.bufferedAmount += data.byteLength
       send(data)
     }
-    const tunnel = await tunnelled(socket)
+    const { tunnel } = await tunnelled(socket)
     socket.bufferedAmount = 0
     let taken = 0
     for (let at = 0; at < 60; at++) {
@@ -279,5 +279,30 @@ describe('an IP tunnel over the WebSocket mux', () => {
     }
     // 1407 bytes a frame with the mux's header, 46 of them in 65536
     expect(taken).toBe(46)
+  })
+
+  it('drops every packet while a socket of the session uploads', async () => {
+    vi.useFakeTimers()
+    const socket = new FakeSocket()
+    const send = socket.send.bind(socket)
+    socket.send = (data) => {
+      socket.bufferedAmount += data.byteLength
+      send(data)
+    }
+    const { session, tunnel } = await tunnelled(socket)
+    const remote = { ip: Uint8Array.of(203, 0, 113, 9), port: 80 }
+    const connecting = session.tcpConnect(remote)
+    await settle()
+    const asked = socket.frames(MuxKind.DATA, CONTROL_STREAM).at(-1)!
+    const { id } = decodeClientPacket(asked.payload)!.packet as { id: number }
+    socket.receive(MuxKind.OPEN, 7, Uint8Array.of(MuxStreamType.TCP))
+    socket.receive(MuxKind.DATA, 7, u32(7))
+    const local = { ip: Uint8Array.of(198, 18, 0, 1), port: 4000 }
+    socket.receive(MuxKind.DATA, CONTROL_STREAM, encodeRelayPacket({ type: 'socket', id, socket: 7, local, remote }))
+    void (await connecting).writable.getWriter().write(new Uint8Array(2 * 1024 * 1024))
+    await settle()
+    // the mux keeps the WebSocket's buffer near 1 MiB for the upload, and the tunnel counts it as its own queue
+    expect(socket.bufferedAmount).toBeGreaterThan(64 * 1024)
+    expect(tunnel.send(Uint8Array.of(0x45))).toBe(false)
   })
 })
