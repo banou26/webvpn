@@ -5,9 +5,9 @@
 //! reaches "the internet" at 11.0.0.0/24 by a veth pair, its default route, and at 12.0.0.0/24 by a second one. The
 //! peer, at 11.0.0.2 and 12.0.0.2, answers ICMP echoes, writes what reaches UDP port 7002 to a file, accepts TCP on
 //! port 7003, and has nothing on UDP port 7004. It is reached at the private address 10.0.0.2 too, and counts what
-//! reaches it with an address of the pool as its source. The setup keeps at most 8 connections for one tunnel address.
-//! The relay's public address is 11.0.0.1, and its public ports are 30000 to 30031 in blocks of 8: 13.0.0.2 holds
-//! 30000 to 30007, up to 13.0.0.5, and 13.0.0.6 holds none.
+//! reaches it with an address of the pool as its source. The setup keeps at most 8 connections that one tunnel address
+//! opens, and apart from those, 8 to its public ports. The relay's public address is 11.0.0.1, and its public ports
+//! are 30000 to 30031 in blocks of 8: 13.0.0.2 holds 30000 to 30007, up to 13.0.0.5, and 13.0.0.6 holds none.
 //!
 //! This test is the peer's UDP port 7001 itself, from a socket it makes in the peer's namespace, and answers each
 //! datagram there with the source address it came from. socat's forking responder left a datagram that closely
@@ -45,7 +45,8 @@ const PEER_2: Ipv4Addr = Ipv4Addr::new(12, 0, 0, 2);
 const OUTSIDE_2: Ipv4Addr = Ipv4Addr::new(12, 0, 0, 1);
 /// A private address outside the pool that the peer holds.
 const PRIVATE: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
-/// The connections the setup keeps for one tunnel address, from `WEBVPN_IP_FLOWS_PER_ADDRESS` in tests/ip-tunnel.sh.
+/// The connections the setup keeps that one tunnel address opens, and apart from those, to its public ports, from
+/// `WEBVPN_IP_FLOWS_PER_ADDRESS` in tests/ip-tunnel.sh.
 const FLOWS_PER_ADDRESS: u16 = 8;
 /// The TUN device's own address, the pool's first host.
 const DEVICE: Ipv4Addr = Ipv4Addr::new(13, 0, 0, 1);
@@ -148,6 +149,14 @@ fn block(address: Ipv4Addr) -> (u16, u16) {
     } else {
         (0, 0)
     }
+}
+
+/// Sends a datagram from `peer` to the tunnel's first public port, and waits for it on the tunnel.
+async fn to_public_port(tunnel: &mut Tunnel, peer: &UdpSocket) {
+    let (address, public, from) = (tunnel.address, tunnel.first_port, peer.local_addr().unwrap().port());
+    within(peer.send_to(b"in", (OUTSIDE, public))).await.unwrap();
+    let arrived = |p: &Packet| from_peer(p, UDP) && p.target == address && p.ports() == (from, public);
+    tunnel.expect("a datagram to a public port under its ceiling", arrived).await;
 }
 
 /// Answers each datagram on the peer's [`UDP_WHO`] with the source address it came from.
@@ -522,7 +531,6 @@ async fn tunnels_reach_a_real_network_and_take_only_answers() {
     third.send(&udp_packet((held, 40008), (PEER, UDP_SILENT), b"earlier holder")).await;
     sleep(Duration::from_millis(200)).await;
     session.close(third).await;
-    session.close(second).await;
     let mut later = loop {
         let tunnel = session.tunnel().await;
         if tunnel.address == held {
@@ -561,25 +569,30 @@ async fn tunnels_reach_a_real_network_and_take_only_answers() {
         session.close(tunnel).await;
     };
     let address = fresh.address;
-    for port in 41000..41000 + FLOWS_PER_ADDRESS - 1 {
-        fresh.send(&udp_packet((address, port), (PEER, UDP_WHO), b"who")).await;
-        let answer = |p: &Packet| from_peer(p, UDP) && p.ports() == (UDP_WHO, port);
-        fresh.expect("an answer on a flow under the ceiling", answer).await;
+    // The peer fills the count of connections to the address's public ports, from as many source ports, and the
+    // tunnel's own still pass. The reverse runs on the second tunnel, held open since check 7 left its address with no
+    // connection.
+    let peers: Vec<_> = (0..=FLOWS_PER_ADDRESS).map(|_| peer_socket(0)).collect();
+    for peer in &peers[..usize::from(FLOWS_PER_ADDRESS)] {
+        to_public_port(&mut fresh, peer).await;
     }
-    let peer = peer_socket(0);
-    let public = fresh.first_port;
-    within(peer.send_to(b"in", (OUTSIDE, public))).await.unwrap();
-    let inbound = |p: &Packet| from_peer(p, UDP) && p.target == address && p.ports().1 == public;
-    fresh.expect("a datagram to a public port under the ceiling", inbound).await;
-    for port in 41000 + FLOWS_PER_ADDRESS..41000 + FLOWS_PER_ADDRESS + 2 {
-        fresh.send(&udp_packet((address, port), (PEER, UDP_WHO), b"who")).await;
+    for tunnel in [&mut fresh, &mut second] {
+        let own = tunnel.address;
+        for port in 41000..41000 + FLOWS_PER_ADDRESS {
+            tunnel.send(&udp_packet((own, port), (PEER, UDP_WHO), b"who")).await;
+            let answer = |p: &Packet| from_peer(p, UDP) && p.ports() == (UDP_WHO, port);
+            tunnel.expect("an answer on the tunnel's own flow under its ceiling", answer).await;
+        }
     }
-    within(peer.send_to(b"in", (OUTSIDE, public + 1))).await.unwrap();
-    fresh.quiet("an answer or a datagram to a public port past the ceiling").await;
+    to_public_port(&mut second, &peers[0]).await;
+    fresh.send(&udp_packet((address, 41000 + FLOWS_PER_ADDRESS), (PEER, UDP_WHO), b"who")).await;
+    within(peers[usize::from(FLOWS_PER_ADDRESS)].send_to(b"in", (OUTSIDE, fresh.first_port))).await.unwrap();
+    fresh.quiet("an answer or a datagram to a public port past its ceiling").await;
     println!(
-        "ok 11: the first {FLOWS_PER_ADDRESS} connections of an address, one of them to a public port, pass, the ones \
-         past them do not"
+        "ok 11: an address takes {FLOWS_PER_ADDRESS} connections to its public ports and {FLOWS_PER_ADDRESS} of its \
+         own, either count full leaves the other open, and the next of either does not pass"
     );
+    session.close(second).await;
 
     let before = dropped("refused").await;
     // the relay's own public address, OUTSIDE, the relay drops itself
@@ -606,7 +619,7 @@ async fn tunnels_reach_a_real_network_and_take_only_answers() {
 }
 
 /// The checks of the tunnels' public ports. Every tunnel address is held, so each is known: the tunnels at
-/// 13.0.0.3 and .4 sent little before, and stay far under the ceiling of connections.
+/// 13.0.0.3 and .4 took few connections to their public ports before, and stay far under that ceiling.
 async fn public_ports(session: &mut Session) {
     let mut tunnels = Vec::new();
     for _ in 0..POOL.len() {

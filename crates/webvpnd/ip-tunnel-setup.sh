@@ -15,17 +15,19 @@
 #                      device with no owner is open to every local user.
 #   WEBVPN_IP_MTU      the device's MTU, at least 1280. Default: 1500
 #   WEBVPN_IP_FLOWS_PER_ADDRESS
-#                      the connections the kernel tracks for one tunnel address, past which a new one is dropped.
-#                      Default: 4096. The relay keeps at most 3584 flows a tunnel and forgets the oldest past that, so
-#                      an answer on a forgotten flow never reaches the client anyway: the default sits a little above,
-#                      so that the relay's own bound acts first and this one only keeps the kernel's table bounded.
+#                      the connections the kernel tracks that one tunnel address opens, past which a new one is
+#                      dropped, and apart from those, the connections to its public ports. Default: 4096. The relay
+#                      keeps at most 3584 flows a tunnel and forgets the oldest past that, so an answer on a forgotten
+#                      flow never reaches the client anyway: the default sits a little above, so that the relay's own
+#                      bound acts first and this one only keeps the kernel's table bounded.
 #   WEBVPN_IP_PORTS    the tunnels' public ports, as the relay is given them: a range written first-last, such as
 #                      20000-29999. Unset, tunnels have none. The pool's k-th tunnel address, from 0 at the pool's
 #                      second host address, holds the ports first + k * size to first + (k + 1) * size - 1, and an
 #                      address whose block would pass last holds none. A TCP or UDP packet to one of the node's own
-#                      addresses on one of those ports goes to the address that holds it, on the same port, and counts
-#                      toward WEBVPN_IP_FLOWS_PER_ADDRESS as the tunnel's own connections do. up refuses a range that
-#                      overlaps the node's local port range: keep it clear of every port something on the node uses.
+#                      addresses on one of those ports goes to the address that holds it, on the same port. Those
+#                      connections count toward a ceiling of WEBVPN_IP_FLOWS_PER_ADDRESS of their own, apart from the
+#                      tunnel's own. up refuses a range that overlaps the node's local port range: keep it clear of
+#                      every port something on the node uses.
 #   WEBVPN_IP_PORTS_PER_TUNNEL
 #                      the size of a block, as the relay is given it. Default: 8
 #
@@ -167,8 +169,16 @@ public_ports() {
 		flags interval
 		elements = {${elements%,} }
 	}
+
+	set inbound {
+		type ipv4_addr
+		size 65536
+		flags dynamic
+	}
 "
-	public_forward="		oifname \"$device\" ct status dnat ct state new add @flows { ip daddr ct count over $flows } drop
+	# a count of their own: anyone can open these, and in the tunnel's count they would stop its own connections
+	public_forward="
+		oifname \"$device\" ct status dnat ct state new add @inbound { ip daddr ct count over $flows } drop
 		oifname \"$device\" ct status dnat ct state new accept"
 	public_prerouting="	chain prerouting {
 		type nat hook prerouting priority dstnat; policy accept;
