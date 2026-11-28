@@ -191,8 +191,8 @@ done
 WEBVPN_TEST_PEER_NETNS=/proc/$peer/ns/net WEBVPN_TEST_SINK=$work/sink "$WEBVPN_TEST_BINARY" --ignored --nocapture \
 	--test-threads=1 2>&1
 
-# The device removed while the relay runs: the relay says so, since it refuses tunnels from then on, and serves on.
-sh "$setup" down
+# The test's last check removed the device while the relay ran: the relay says so, since it refuses tunnels from then
+# on, and serves on.
 tries=0
 until grep -q "the TUN device failed" "$work/relay.log"; do
 	tries=$((tries + 1))

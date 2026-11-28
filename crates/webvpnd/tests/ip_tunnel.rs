@@ -23,7 +23,7 @@ use tokio::net::{TcpStream, UdpSocket};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout, Instant};
-use webvpn_proto::{features, ip, ClientPacket, Hello, RelayPacket};
+use webvpn_proto::{features, ip, ClientPacket, ErrorCode, Hello, RelayPacket};
 use webvpn_server::webtransport::wtransport;
 use webvpn_server::webtransport::wtransport::tls::{Sha256Digest, Sha256DigestFmt};
 use webvpn_server::webtransport::wtransport::{Connection, Endpoint, RecvStream, SendStream};
@@ -590,6 +590,17 @@ async fn tunnels_reach_a_real_network_and_take_only_answers() {
     session.close(fresh).await;
 
     public_ports(&mut session).await;
+
+    // the last check, since the device is gone after it
+    let open = session.tunnel().await;
+    let deleted = Command::new("ip").args(["link", "delete", "dev", "webvpn0"]).status();
+    assert!(within(deleted).await.unwrap().success(), "the device is deleted");
+    assert_eq!(session.next().await, RelayPacket::Closed { socket: open.socket, code: ErrorCode::OTHER });
+    let id = session.next_id;
+    session.send(ClientPacket::IpOpen { id }).await;
+    let refused = session.next().await;
+    assert!(matches!(refused, RelayPacket::Error { id: of, code: ErrorCode::OTHER, .. } if of == id), "{refused:?}");
+    println!("ok 18: a tunnel ends with its device, and the next is refused");
 }
 
 /// The checks of the tunnels' public ports. Every tunnel address is held, so each is known: the tunnels at
